@@ -4,7 +4,7 @@ from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, U
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from geoalchemy2 import Geometry 
-from database.session import Base
+from session import Base
 
 
 class DimTime(Base):
@@ -103,7 +103,7 @@ class EnvironmentalFactor(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     location_code = Column(String(50), ForeignKey("location.location_code"))
-    date_id = Column(String(10), ForeignKey("time_dimension.date_id"))
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
     
     # Climate variables
     temperature_mean = Column(Float)  # °C
@@ -125,4 +125,4 @@ class EnvironmentalFactor(Base):
     
     # Relationships
     location = relationship("Location")
-    date = relationship("TimeDimension")
+    date = relationship("DimTime")
