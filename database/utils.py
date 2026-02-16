@@ -103,143 +103,71 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             print(f"Error loading shapefile: {e}")
             raise
     
+
     def process_feature(feature_gdf, feature_name, grib_file_path, output_dir):
-        """Process a single feature"""
+        """Process a single feature, preserving all desired variables."""
         print(f"\nProcessing {feature_name}...")
-        
-        # Get bounding box for more efficient loading
-        bbox = feature_gdf.total_bounds  # [minx, miny, maxx, maxy]
-        
-        # Add buffer for initial loading
+
+        # Get bounding box for initial subset
+        bbox = feature_gdf.total_bounds
         lon_slice = slice(bbox[0] - buffer_degrees, bbox[2] + buffer_degrees)
-        lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)  # Note: latitude is descending
-        
-        try:
-            # Try different backend configurations
-            backend_kwargs_list = [
-                {'filter_by_keys': {'typeOfLevel': 'surface'}},
-                {'filter_by_keys': {'dataType': 'fc'}},
-                {}
-            ]
-            
-            for backend_kwargs in backend_kwargs_list:
-                try:
-                    # Open GRIB file with chunks
-                    print("Opening GRIB file...")
-                    ds = xr.open_dataset(
-                        grib_file_path,
-                        engine='cfgrib',
-                        backend_kwargs=backend_kwargs,
-                        chunks={'time': 100}  # Chunk by time to reduce memory
-                    )
-                    print(f"Success with backend_kwargs: {backend_kwargs}")
-                    break
-                except Exception as e:
-                    print(f"Failed with backend_kwargs {backend_kwargs}: {e}")
-                    continue
-            else:
-                raise ValueError("Could not open GRIB file with any backend configuration")
-            
-            # Get data variables
-            data_vars = list(ds.data_vars.keys())
-            print(f"Available variables: {data_vars}")
-            
-            # Check coordinate names
-            lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
-            lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
-            
-            # Subset the data to the region of interest
-            print(f"Selecting region: lon={lon_slice}, lat={lat_slice}")
-            ds_subset = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
-            
-            print(f"Region selected. Shape: {ds_subset[data_vars[0]].shape}")
-            
-            # Prepare for clipping
-            if not hasattr(ds_subset, 'rio') or not ds_subset.rio.crs:
-                ds_subset = ds_subset.rio.write_crs("EPSG:4326")
-            
-            # Clip to feature boundary
-            print(f"Clipping to feature boundary...")
-            clipped = ds_subset.rio.clip(
-                feature_gdf.geometry.apply(mapping),
-                feature_gdf.crs,
-                all_touched=True,
-                drop=True
-            )
-            
-            # Generate output filename
-            base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
-            safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
-            output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
-            
-            # Save as NetCDF with compression
-            print(f"Saving clipped data to: {output_path}")
-            
-            encoding = {}
-            for var in clipped.data_vars:
-                encoding[var] = {
-                    'zlib': True,
-                    'complevel': 1,
-                    'dtype': 'float32'
-                }
-            
-            clipped.to_netcdf(output_path, encoding=encoding)
-            
-            # Print summary
-            print(f"Successfully clipped {feature_name}!")
-            print(f"  Clipped shape: {clipped[list(clipped.data_vars)[0]].shape}")
-            
-            if hasattr(clipped, 'rio') and hasattr(clipped.rio, 'bounds'):
-                try:
-                    print(f"  Bounds: {clipped.rio.bounds()}")
-                except:
-                    pass
-            
-            return output_path
-            
-        except Exception as e:
-            print(f"Error processing feature {feature_name}: {str(e)}")
-            return None
-    
-    # Load and filter features
-    filtered_gdf = load_shapefile_features()
-    
-    if filtered_gdf.empty:
-        print("No features found after filtering")
-        return []
-    
-    # Process each feature
-    output_files = []
-    
-    for idx, row in filtered_gdf.iterrows():
-        # Create a single-feature GeoDataFrame
-        single_feature_gdf = gpd.GeoDataFrame([row], geometry='geometry', crs=filtered_gdf.crs)
-        
-        # Try to create a meaningful feature name
-        feature_name = None
-        
-        # Look for common name columns
-        for name_col in ['NAME', 'name', 'COUNTY', 'county', 'ADM2_NAME', 'ADM1_NAME']:
-            if name_col in row.index and pd.notna(row[name_col]):
-                feature_name = str(row[name_col])
-                break
-        
-        # If no name column found, use index
-        if feature_name is None:
-            feature_name = f"feature_{idx}"
-        
-        # Get unique identifier if available
-        for id_col in ['ID', 'id', 'OBJECTID', 'FID']:
-            if id_col in row.index and pd.notna(row[id_col]):
-                feature_name = f"{feature_name}_{row[id_col]}"
-                break
-        
-        output_file = process_feature(single_feature_gdf, feature_name, grib_file_path, output_dir)
-        
-        if output_file:
-            output_files.append(output_file)
-    
-    return output_files
+        lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
+
+        # Define the variables we want (add more as needed)
+        variables = ['2t', 'tp']   # short names from GRIB
+
+        datasets = []
+        for var in variables:
+            try:
+                print(f"Loading variable: {var}")
+                ds_var = xr.open_dataset(
+                    grib_file_path,
+                    engine='cfgrib',
+                    backend_kwargs={'filter_by_keys': {'shortName': var}},
+                    chunks={'time': 100}
+                )
+                # Subset to region (before clipping)
+                lon_dim = 'longitude' if 'longitude' in ds_var.dims else 'lon'
+                lat_dim = 'latitude' if 'latitude' in ds_var.dims else 'lat'
+                ds_var = ds_var.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
+                datasets.append(ds_var)
+            except Exception as e:
+                print(f"Warning: Could not load variable {var}: {e}")
+                continue
+
+        if not datasets:
+            raise ValueError("No variables could be loaded.")
+
+        # Merge all variables into one dataset (they share time/lat/lon)
+        ds = xr.merge(datasets)
+        print(f"Merged dataset variables: {list(ds.data_vars)}")
+
+        # Ensure CRS for clipping
+        if not hasattr(ds, 'rio') or not ds.rio.crs:
+            ds = ds.rio.write_crs("EPSG:4326")
+
+        # Clip to feature boundary
+        print("Clipping to feature boundary...")
+        clipped = ds.rio.clip(
+            feature_gdf.geometry.apply(mapping),
+            feature_gdf.crs,
+            all_touched=True,
+            drop=True
+        )
+
+        # Generate output filename
+        base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
+        safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
+        output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
+
+        # Save with compression
+        print(f"Saving to {output_path}")
+        encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
+                    for var in clipped.data_vars}
+        clipped.to_netcdf(output_path, encoding=encoding)
+
+        print(f"Success! Clipped shape: {clipped[list(clipped.data_vars)[0]].shape}")
+        return output_path
 
 
 def clip_era5_to_kenya_counties(grib_file_path, county_names, shapefile_path=None, 
