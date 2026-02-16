@@ -4,7 +4,7 @@ from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, U
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from geoalchemy2 import Geometry 
-from session import Base
+from database.session import Base
 
 
 class DimTime(Base):

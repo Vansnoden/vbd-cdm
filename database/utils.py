@@ -1,10 +1,13 @@
 import xarray as xr
 import geopandas as gpd
-import rioxarray
 from shapely.geometry import mapping
 import os
-import warnings
 import tempfile
+import pandas as pd
+from database.session import SessionLocal
+from database.models import DimTime
+import pandas as pd
+
 
 def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None, 
                           output_dir='./clipped_data', buffer_degrees=0.5):
@@ -416,6 +419,32 @@ def batch_clip_era5(grib_files, shapefile_path, filter_params=None, output_base_
             results[grib_file] = []
     
     return results
+
+
+def ensure_dates_exist(start_date, end_date):
+    session = SessionLocal()
+    try:
+        date_range = pd.date_range(start_date, end_date)
+        for date in date_range:
+            date_id = date.strftime('%Y-%m-%d')
+            exists = session.query(DimTime).filter_by(date_id=date_id).first()
+            if not exists:
+                dt = DimTime(
+                    date_id=date_id,
+                    date=date,
+                    year=date.year,
+                    month=date.month,
+                    week=date.isocalendar()[1],
+                    day_of_year=date.timetuple().tm_yday,
+                    season='dry' if date.month in [11,12,1,2,3] else 'wet',  # customize for your region
+                    is_holiday='no'
+                )
+                session.add(dt)
+        session.commit()
+    finally:
+        session.close()
+
+
 
 
 # Example usage
