@@ -463,7 +463,10 @@ if __name__ == "__main__":
     batch_results = batch_clip_era5(
         grib_files=grib_files,
         shapefile_path=shapefile,
-        filter_params={'column': 'COUNTY', 'value': 'Mombasa'},
+        filter_params=[
+            {'column': 'COUNTY', 'value': 'Mombasa'},
+            {'column': 'COUNTY', 'value': 'Siaya'}
+        ],
         output_base_dir=BASE_DIR + '/clipped/batch_results'
     )
     
