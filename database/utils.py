@@ -8,6 +8,7 @@ from database.session import SessionLocal
 from database.models import DimTime
 import pandas as pd
 import traceback
+import cfgrib
 
 
 def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None, 
@@ -61,53 +62,49 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             print(f"Error loading shapefile: {e}")
             raise
 
+    
     def process_feature(feature_gdf, feature_name, grib_file_path, output_dir):
         print(f"\nProcessing {feature_name}...")
         bbox = feature_gdf.total_bounds
         lon_slice = slice(bbox[0] - buffer_degrees, bbox[2] + buffer_degrees)
         lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
 
-        variables = ['2t', 'tp']   # short names from grib_ls
-        datasets = []
+        try:
+            # Open all datasets (one per variable group) from the GRIB file
+            print("Opening GRIB file and separating variables...")
+            ds_list = cfgrib.open_datasets(grib_file_path)
+            print(f"Found {len(ds_list)} separate variable groups.")
 
-        for var in variables:
-            try:
-                print(f"Loading variable: {var}")
-                ds_var = xr.open_dataset(
-                    grib_file_path,
-                    engine='cfgrib',
-                    backend_kwargs={'filter_by_keys': {'shortName': var}},
-                    chunks={'time': 100}
-                )
-                lon_dim = 'longitude' if 'longitude' in ds_var.dims else 'lon'
-                lat_dim = 'latitude' if 'latitude' in ds_var.dims else 'lat'
-                ds_var = ds_var.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
-                datasets.append(ds_var)
-            except Exception as e:
-                print(f"Warning: Could not load variable {var}: {e}")
-                traceback.print_exc()
-                continue
+            # Subset each dataset to the bounding box and drop auxiliary variables
+            processed_ds_list = []
+            for i, ds in enumerate(ds_list):
+                print(f"  Processing group {i+1}: {list(ds.data_vars)}")
+                # Determine dimension names
+                lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
+                lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
+                # Subset to bounding box
+                ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
+                
+                # Drop variables that often cause merge conflicts (non‑data coordinates)
+                vars_to_drop = ['step', 'valid_time', 'number', 'surface', 'isobaricInhPa']
+                for v in vars_to_drop:
+                    if v in ds_sel.variables:
+                        ds_sel = ds_sel.drop_vars(v)
+                
+                processed_ds_list.append(ds_sel)
 
-        if not datasets:
-            raise ValueError("No variables could be loaded. Check GRIB file and variable names.")
+            if not processed_ds_list:
+                raise ValueError("No datasets loaded from GRIB file.")
 
-        # Drop variables that cause conflicts (valid_time, step) from each dataset
-        for i in range(len(datasets)):
-            for var in ['valid_time', 'step']:
-                if var in datasets[i].variables:
-                    datasets[i] = datasets[i].drop_vars(var)
+            # Merge all datasets with outer join to preserve all time steps
+            print("Merging variable groups...")
+            ds = xr.merge(processed_ds_list, compat='override', join='outer')
+            print(f"Merged dataset variables: {list(ds.data_vars)}")
 
-        # Merge with explicit parameters to avoid warnings and conflicts
-        ds = xr.merge(datasets, compat='override', join='inner')
-        print(f"Merged dataset variables: {list(ds.data_vars)}")
-
-        # try:
-        #     ds = xr.merge(datasets)
-        #     print(f"Merged dataset variables: {list(ds.data_vars)}")
-        # except Exception as e:
-        #     print("Error during merge:")
-        #     traceback.print_exc()
-        #     return None
+        except Exception as e:
+            print(f"Error loading/processing GRIB: {e}")
+            traceback.print_exc()
+            return None
 
         # Ensure CRS for clipping
         try:
@@ -118,6 +115,7 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             traceback.print_exc()
             return None
 
+        # Clip to feature boundary
         try:
             print("Clipping to feature boundary...")
             clipped = ds.rio.clip(
@@ -131,10 +129,12 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             traceback.print_exc()
             return None
 
+        # Generate output filename
         base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
         safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
         output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
 
+        # Save with compression
         try:
             print(f"Saving to {output_path}")
             encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
@@ -147,6 +147,7 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
 
         print(f"Success! Clipped shape: {clipped[list(clipped.data_vars)[0]].shape}")
         return output_path
+
 
     # --- Main flow of clip_era5_by_shapefile ---
     filtered_gdf = load_shapefile_features()
