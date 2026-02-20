@@ -126,3 +126,45 @@ class EnvironmentalFactor(Base):
     # Relationships
     location = relationship("Location")
     date = relationship("DimTime")
+
+
+class HealthFacility(Base):
+    __tablename__ = "health_facility"
+    id = Column(Integer, primary_key=True)
+    facility_code = Column(String(50), unique=True)
+    name = Column(String(200))
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    lat = Column(Float)
+    lon = Column(Float)
+    type = Column(String(50))  # hospital, clinic, dispensary
+    catchment_population = Column(Integer)
+
+class Intervention(Base):
+    __tablename__ = "intervention"
+    id = Column(Integer, primary_key=True)
+    intervention_type = Column(String(50))  # 'IRS', 'ITN', 'larviciding'
+    date_start = Column(Date)
+    date_end = Column(Date)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    coverage = Column(Float)  # percentage or number
+    target_disease = Column(String(50))  # 'malaria', 'dengue', 'both'
+
+class ResistanceTest(Base):
+    __tablename__ = "resistance_test"
+    id = Column(Integer, primary_key=True)
+    vector_observation_id = Column(Integer, ForeignKey("vector_observation.id"))
+    test_type = Column(String(50))  # 'WHO tube', 'CDC bottle'
+    insecticide = Column(String(100))
+    concentration = Column(Float)
+    exposure_time = Column(Integer)  # minutes
+    mortality = Column(Float)        # proportion dead
+    resistance_status = Column(String(50))  # 'susceptible', 'confirmed', 'possible'
+
+class SocioEconomic(Base):
+    __tablename__ = "socioeconomic"
+    id = Column(Integer, primary_key=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    year = Column(Integer)
+    indicator_name = Column(String(100))  # e.g., 'ITN_use', 'poverty_rate'
+    indicator_value = Column(Float)
+    source = Column(String(100))
