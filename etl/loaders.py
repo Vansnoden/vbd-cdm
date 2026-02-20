@@ -281,3 +281,47 @@ class DatabaseLoader:
         else:
             env_factor = EnvironmentalFactor(**record)
             self.session.add(env_factor)
+
+
+    def load_from_file(self, file_path, model_class, schema_class=None, column_mapping=None, **pandas_kwargs):
+        """
+        Load data from CSV or Excel file into the database.
+        
+        :param file_path: Path to the file (string or Path)
+        :param model_class: SQLAlchemy model class (e.g., HostCase)
+        :param schema_class: Optional Pydantic schema for validation (e.g., HostCaseCreate)
+        :param column_mapping: Dict mapping file columns to model attributes
+        :param pandas_kwargs: Additional arguments passed to pandas read_* (e.g., sep, sheet_name)
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Read file based on extension
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path, **pandas_kwargs)
+        elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+            df = pd.read_excel(file_path, **pandas_kwargs)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
+        # Apply column mapping if provided
+        if column_mapping:
+            df = df.rename(columns=column_mapping)
+        
+        # Convert to list of dicts
+        records = df.to_dict('records')
+        
+        # Validate with Pydantic if schema provided
+        if schema_class:
+            validated_records = []
+            for rec in records:
+                # Filter to only keys present in schema (optional)
+                schema_fields = set(schema_class.model_fields.keys())
+                filtered = {k: v for k, v in rec.items() if k in schema_fields}
+                validated = schema_class(**filtered)
+                validated_records.append(validated.model_dump())
+            records = validated_records
+        
+        # Use existing bulk load method (or generic load_from_dataframe)
+        self.load_from_dataframe(pd.DataFrame(records), model_class)

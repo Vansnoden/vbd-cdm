@@ -1,0 +1,2350 @@
+# load_case_data.py
+# load_case_data.py
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+import pandas as pd
+from database.session import SessionLocal
+from database import models, schemas
+from etl.loaders import DatabaseLoader
+
+def load_case_files(data_dir, pattern="*.csv", column_mapping=None):
+    """
+    Load all CSV/Excel files in data_dir matching pattern into host_case table.
+    """
+    data_dir = Path(data_dir)
+    files = list(data_dir.glob(pattern))
+    if not files:
+        print(f"No files matching {pattern} found in {data_dir}")
+        return
+
+    db = SessionLocal()
+    try:
+        loader = DatabaseLoader(db)
+        for file_path in files:
+            print(f"Loading {file_path.name}...")
+            loader.load_from_file(
+                file_path=file_path,
+                model_class=models.HostCase,
+                schema_class=schemas.HostCaseCreate,
+                column_mapping=column_mapping,
+                # Additional pandas args (e.g., sep=';' for CSV, sheet_name for Excel)
+            )
+        print("All case files loaded.")
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    # Example column mapping (adjust to your actual CSV headers)
+    mapping = {
+        'Case ID': 'case_identifier',
+        'District': 'location_code',
+        'Onset Date': 'date_id_onset',
+        'Report Date': 'date_id_reported',
+        'Disease': 'disease',
+        'Status': 'case_status',
+        'Age': 'age_years',
+        'Sex': 'sex',
+        'Outcome': 'outcome'
+    }
+    load_case_files(
+        data_dir="/path/to/your/case_data",
+        pattern="*.csv",
+        column_mapping=mapping
+    )
+# load_vector_data.py
+#!/usr/bin/env python
+# load_vector_data.py
+
+import sys
+from pathlib import Path
+
+# Ensure project root is in path
+sys.path.insert(0, str(Path(__file__).parent))
+
+import pandas as pd
+from database.session import SessionLocal
+from database import models, schemas
+from etl.loaders import DatabaseLoader
+from database.utils import ensure_dates_exist
+
+
+def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, date_format=None, **pandas_kwargs):
+    """
+    Load all vector observation files from data_dir matching pattern.
+    
+    :param data_dir: Directory containing the files.
+    :param pattern: Glob pattern (e.g., "*.csv", "*.xlsx").
+    :param column_mapping: Dict mapping file columns to model field names.
+    :param date_format: Optional strptime format for date columns (if not already YYYY-MM-DD).
+    :param pandas_kwargs: Additional arguments passed to pandas read_*.
+    """
+    data_dir = Path(data_dir)
+    files = list(data_dir.glob(pattern))
+    if not files:
+        print(f"No files matching {pattern} found in {data_dir}")
+        return
+
+    db = SessionLocal()
+    try:
+        loader = DatabaseLoader(db)
+
+        for file_path in files:
+            print(f"Processing {file_path.name}...")
+            # Read file based on extension
+            if file_path.suffix.lower() == '.csv':
+                df = pd.read_csv(file_path, **pandas_kwargs)
+            elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+                df = pd.read_excel(file_path, **pandas_kwargs)
+            else:
+                print(f"Skipping unsupported file type: {file_path.suffix}")
+                continue
+
+            # Apply column mapping if provided
+            if column_mapping:
+                df = df.rename(columns=column_mapping)
+
+            # Ensure required columns exist
+            required = ['location_code', 'date_id', 'vector_species']
+            missing = [col for col in required if col not in df.columns]
+            if missing:
+                print(f"  Missing required columns: {missing}. Skipping file.")
+                continue
+
+            # Convert date_id to YYYY-MM-DD if needed
+            if date_format and 'date_id' in df.columns:
+                # Assuming date_id column contains dates in a custom format
+                df['date_id'] = pd.to_datetime(df['date_id'], format=date_format).dt.strftime('%Y-%m-%d')
+            elif 'date_id' in df.columns and not pd.api.types.is_string_dtype(df['date_id']):
+                # If it's datetime, convert to string
+                df['date_id'] = pd.to_datetime(df['date_id']).dt.strftime('%Y-%m-%d')
+
+            # Optional: ensure dim_time records exist for all dates in this file
+            if 'date_id' in df.columns:
+                min_date = df['date_id'].min()
+                max_date = df['date_id'].max()
+                ensure_dates_exist(min_date, max_date)
+
+            # Convert to list of dicts and validate
+            records = df.to_dict('records')
+            validated = []
+            for rec in records:
+                try:
+                    # Filter to only fields present in schema
+                    schema_fields = schemas.VectorObservationCreate.model_fields.keys()
+                    filtered = {k: v for k, v in rec.items() if k in schema_fields and pd.notna(v)}
+                    validated_rec = schemas.VectorObservationCreate(**filtered)
+                    validated.append(validated_rec.model_dump())
+                except Exception as e:
+                    print(f"  Validation error for record: {rec}")
+                    print(f"  Error: {e}")
+                    # Optionally skip or raise
+
+            if validated:
+                loader.load_from_dataframe(pd.DataFrame(validated), models.VectorObservation)
+                print(f"  Loaded {len(validated)} vector observations from {file_path.name}")
+            else:
+                print(f"  No valid records in {file_path.name}")
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    # Example usage (adjust to your actual file layout)
+    mapping = {
+        'Trap ID': 'trap_id',
+        'Location': 'location_code',
+        'Date': 'date_id',
+        'Species': 'vector_species',
+        'Subspecies': 'vector_subspecies',
+        'Life Stage': 'life_stage',
+        'Sex': 'sex',
+        'Collection Method': 'collection_method',
+        'Count': 'count',
+        'Density': 'density_per_trap',
+        'Tested For': 'tested_for_pathogen',
+        'Infection Status': 'infection_status',
+        'Infection Rate': 'infection_rate'
+    }
+    load_vector_files(
+        data_dir="/path/to/your/vector_data",
+        pattern="*.xlsx",
+        column_mapping=mapping,
+        date_format="%d/%m/%Y"   # adjust to your date format
+    )
+# __init__.py
+
+# clip_timeseries_data.py
+#!-*-coding:utf8-*-
+
+import os
+import pandas as pd
+
+from database.utils import batch_clip_era5
+
+BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
+shapefile = "/mnt/monadworld/library/shapefiles/kenya/kenyan-counties/County.shp"
+
+print("\nBatch processing multiple GRIB files")
+grib_files = [
+    BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2025_data.grib"
+]
+
+batch_results = batch_clip_era5(
+    grib_files=grib_files,
+    shapefile_path=shapefile,
+    filter_params=[
+        {'column': 'COUNTY', 'value': 'Mombasa'},
+        {'column': 'COUNTY', 'value': 'Siaya'}
+    ],
+    output_base_dir=BASE_DIR + '/clipped/batch_results'
+)
+
+# Print batch results summary
+for input_file, output_files in batch_results.items():
+    print(f"{os.path.basename(input_file)}: {len(output_files)} output files")
+# database/__init__.py
+
+# database/alembic/env.py
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
+from dotenv import load_dotenv
+import os
+
+from alembic import context
+
+
+load_dotenv()
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+from session import Base
+from models import Location, DimTime, EnvironmentalFactor, HostCase, VectorObservation
+target_metadata = Base.metadata
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+
+# for connecting to postgresql database
+def get_postgres_url():
+    return "postgresql://%s:%s@%s:%s/%s" % (
+        os.getenv("DB_USER"),
+        os.getenv("DB_PASSWORD"),
+        os.getenv("DB_HOST"),
+        os.getenv("DB_PORT"),
+        os.getenv("DB_NAME"),
+    )
+
+# for connecting to sqlalchemy database
+def get_sqlite_url():
+    return "sqlite:///./%s" % (
+        os.getenv("SQL_LITE_DB_NAME")
+    )
+
+
+config.set_main_option("sqlalchemy.url", get_sqlite_url())
+
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode.
+
+    This configures the context with just a URL
+    and not an Engine, though an Engine is acceptable
+    here as well.  By skipping the Engine creation
+    we don't even need a DBAPI to be available.
+
+    Calls to context.execute() here emit the given string to the
+    script output.
+
+    """
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode.
+
+    In this scenario we need to create an Engine
+    and associate a connection with the context.
+
+    """
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection, target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+# database/alembic/versions/435136097103_.py
+"""empty message
+
+Revision ID: 435136097103
+Revises: 
+Create Date: 2026-02-09 08:57:09.658047
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '435136097103'
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('dim_time',
+    sa.Column('date_id', sa.String(length=10), nullable=False),
+    sa.Column('date', sa.Date(), nullable=False),
+    sa.Column('year', sa.Integer(), nullable=False),
+    sa.Column('month', sa.Integer(), nullable=False),
+    sa.Column('week', sa.Integer(), nullable=True),
+    sa.Column('day_of_year', sa.Integer(), nullable=True),
+    sa.Column('season', sa.String(length=20), nullable=True),
+    sa.Column('is_holiday', sa.String(length=3), nullable=True),
+    sa.PrimaryKeyConstraint('date_id')
+    )
+    op.create_table('location',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('name', sa.String(length=200), nullable=False),
+    sa.Column('admin_level', sa.String(length=50), nullable=True),
+    sa.Column('parent_location_code', sa.String(length=50), nullable=True),
+    sa.Column('geometry_wkt', sa.Text(), nullable=True),
+    sa.Column('centroid_lat', sa.Float(), nullable=True),
+    sa.Column('centroid_lon', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['parent_location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code')
+    )
+    op.create_index(op.f('ix_location_id'), 'location', ['id'], unique=False)
+    op.create_table('environmental_factor',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id', sa.String(length=10), nullable=True),
+    sa.Column('temperature_mean', sa.Float(), nullable=True),
+    sa.Column('temperature_min', sa.Float(), nullable=True),
+    sa.Column('temperature_max', sa.Float(), nullable=True),
+    sa.Column('rainfall_total', sa.Float(), nullable=True),
+    sa.Column('relative_humidity', sa.Float(), nullable=True),
+    sa.Column('ndvi', sa.Float(), nullable=True),
+    sa.Column('evi', sa.Float(), nullable=True),
+    sa.Column('lst_day', sa.Float(), nullable=True),
+    sa.Column('aridity_index', sa.Float(), nullable=True),
+    sa.Column('potential_breeding_sites', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code', 'date_id', name='uq_env_location_date')
+    )
+    op.create_index(op.f('ix_environmental_factor_id'), 'environmental_factor', ['id'], unique=False)
+    op.create_table('host_case',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('case_identifier', sa.String(length=100), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id_onset', sa.String(length=10), nullable=True),
+    sa.Column('date_id_reported', sa.String(length=10), nullable=True),
+    sa.Column('disease', sa.String(length=100), nullable=False),
+    sa.Column('pathogen', sa.String(length=100), nullable=True),
+    sa.Column('case_status', sa.String(length=50), nullable=True),
+    sa.Column('confirmation_method', sa.String(length=100), nullable=True),
+    sa.Column('host_type', sa.String(length=50), nullable=True),
+    sa.Column('age_years', sa.Integer(), nullable=True),
+    sa.Column('age_group', sa.String(length=50), nullable=True),
+    sa.Column('sex', sa.String(length=10), nullable=True),
+    sa.Column('outcome', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['date_id_onset'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['date_id_reported'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('case_identifier')
+    )
+    op.create_index(op.f('ix_host_case_id'), 'host_case', ['id'], unique=False)
+    op.create_table('vector_observation',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id', sa.String(length=10), nullable=True),
+    sa.Column('vector_species', sa.String(length=100), nullable=False),
+    sa.Column('vector_subspecies', sa.String(length=100), nullable=True),
+    sa.Column('life_stage', sa.String(length=50), nullable=True),
+    sa.Column('sex', sa.String(length=10), nullable=True),
+    sa.Column('collection_method', sa.String(length=100), nullable=True),
+    sa.Column('count', sa.Integer(), nullable=True),
+    sa.Column('density_per_trap', sa.Float(), nullable=True),
+    sa.Column('tested_for_pathogen', sa.String(length=100), nullable=True),
+    sa.Column('infection_status', sa.String(length=50), nullable=True),
+    sa.Column('infection_rate', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_vector_observation_id'), 'vector_observation', ['id'], unique=False)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_vector_observation_id'), table_name='vector_observation')
+    op.drop_table('vector_observation')
+    op.drop_index(op.f('ix_host_case_id'), table_name='host_case')
+    op.drop_table('host_case')
+    op.drop_index(op.f('ix_environmental_factor_id'), table_name='environmental_factor')
+    op.drop_table('environmental_factor')
+    op.drop_index(op.f('ix_location_id'), table_name='location')
+    op.drop_table('location')
+    op.drop_table('dim_time')
+    # ### end Alembic commands ###
+
+# database/models.py
+#-*- coding:utf-8 -*-
+
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
+from sqlalchemy.ext.declarative import declarative_base
+from geoalchemy2 import Geometry 
+from database.session import Base
+
+
+class DimTime(Base):
+    """Time dimension table for easy temporal analysis"""
+    __tablename__ = "dim_time"
+    
+    date_id = Column(String(10), primary_key=True)  # YYYY-MM-DD
+    date = Column(Date, nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    week = Column(Integer)
+    day_of_year = Column(Integer)
+    season = Column(String(20))  # 'dry', 'wet', 'spring', etc.
+    is_holiday = Column(String(3), default='no')  # 'yes' or 'no'
+
+
+class Location(Base):
+    """Geographic locations hierarchy"""
+    __tablename__ = "location"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    admin_level = Column(String(50))  # country, state, district, village
+    parent_location_code = Column(String(50), ForeignKey("location.location_code"))
+    # For spatial: use Geometry column for PostGIS, Text for SQLite
+    geometry_wkt = Column(Text)  # WKT representation
+    centroid_lat = Column(Float)
+    centroid_lon = Column(Float)
+
+    # Self-referential relationship
+    parent = relationship("Location", remote_side=[location_code], backref="children")
+
+
+class HostCase(Base):
+    """Human or animal disease cases"""
+    __tablename__ = "host_case"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    case_identifier = Column(String(100), unique=True)  # External ID
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"))
+    date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Disease classification
+    disease = Column(String(100), nullable=False)  # 'malaria', 'dengue'
+    pathogen = Column(String(100))  # 'Plasmodium falciparum'
+    case_status = Column(String(50))  # 'suspected', 'probable', 'confirmed'
+    confirmation_method = Column(String(100))  # 'PCR', 'RDT', 'clinical'
+    
+    # Host details
+    host_type = Column(String(50), default='human')  # 'human', 'animal'
+    age_years = Column(Integer)
+    age_group = Column(String(50))
+    sex = Column(String(10))
+    outcome = Column(String(50))  # 'recovered', 'died', 'unknown'
+    
+    # Relationships
+    location = relationship("Location")
+    onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
+    reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
+
+
+class VectorObservation(Base):
+    """Vector surveillance data"""
+    __tablename__ = "vector_observation"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Vector details
+    vector_species = Column(String(100), nullable=False)
+    vector_subspecies = Column(String(100))
+    life_stage = Column(String(50))  # 'egg', 'larva', 'pupa', 'adult'
+    sex = Column(String(10))  # 'male', 'female', 'mixed'
+    
+    # Collection methods
+    collection_method = Column(String(100))  # 'CDC_light_trap', 'BG_sentinel'
+    count = Column(Integer)
+    density_per_trap = Column(Float)  # Calculated field
+    
+    # Infection status
+    tested_for_pathogen = Column(String(100))
+    infection_status = Column(String(50))  # 'positive', 'negative'
+    infection_rate = Column(Float)  # Proportion positive
+    
+    # Relationships
+    location = relationship("Location")
+    date = relationship("DimTime")
+
+
+class EnvironmentalFactor(Base):
+    """Climate and environmental data"""
+    __tablename__ = "environmental_factor"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Climate variables
+    temperature_mean = Column(Float)  # °C
+    temperature_min = Column(Float)
+    temperature_max = Column(Float)
+    rainfall_total = Column(Float)  # mm
+    relative_humidity = Column(Float)  # %
+    
+    # Remote sensing indices
+    ndvi = Column(Float)  # Normalized Difference Vegetation Index
+    evi = Column(Float)   # Enhanced Vegetation Index
+    lst_day = Column(Float)  # Land Surface Temperature (day)
+    
+    # Derived indicators
+    aridity_index = Column(Float)
+    potential_breeding_sites = Column(Integer)  # Estimated from rainfall
+    
+    __table_args__ = (UniqueConstraint('location_code', 'date_id', name='uq_env_location_date'),)
+    
+    # Relationships
+    location = relationship("Location")
+    date = relationship("DimTime")
+
+# database/schemas.py
+#-*- coding:utf-8 -*-
+
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List
+from datetime import date, datetime
+
+
+# -------------------- DimTime --------------------
+class DimTimeCreate(BaseModel):
+    """Schema for creating time dimension records."""
+    date_id: str = Field(..., description="Date in YYYY-MM-DD format")
+    date: date
+    year: int
+    month: int
+    week: Optional[int] = None
+    day_of_year: Optional[int] = None
+    season: Optional[str] = None
+    is_holiday: Optional[str] = "no"
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('month')
+    def validate_month(cls, v):
+        if not 1 <= v <= 12:
+            raise ValueError("month must be between 1 and 12")
+        return v
+
+
+# -------------------- Location --------------------
+class LocationCreate(BaseModel):
+    """Schema for creating/updating locations."""
+    location_code: str = Field(..., description="Unique identifier for the location")
+    name: str
+    admin_level: str = Field(..., description="e.g., country, state, district, village")
+    parent_location_code: Optional[str] = None
+    geometry_wkt: Optional[str] = None
+    centroid_lat: Optional[float] = None
+    centroid_lon: Optional[float] = None
+
+    @field_validator('centroid_lat')
+    def validate_lat(cls, v):
+        if v is not None and (v < -90 or v > 90):
+            raise ValueError("latitude must be between -90 and 90")
+        return v
+
+    @field_validator('centroid_lon')
+    def validate_lon(cls, v):
+        if v is not None and (v < -180 or v > 180):
+            raise ValueError("longitude must be between -180 and 180")
+        return v
+
+
+# -------------------- HostCase --------------------
+class HostCaseCreate(BaseModel):
+    """Schema for creating disease case records."""
+    case_identifier: str = Field(..., description="External identifier for the case")
+    location_code: str
+    date_id_onset: str = Field(..., description="Date of symptom onset (YYYY-MM-DD)")
+    date_id_reported: str = Field(..., description="Date case was reported (YYYY-MM-DD)")
+    disease: str
+    pathogen: Optional[str] = None
+    case_status: str = "suspected"
+    confirmation_method: Optional[str] = None
+    host_type: str = "human"
+    age_years: Optional[int] = None
+    age_group: Optional[str] = None
+    sex: Optional[str] = None
+    outcome: Optional[str] = "unknown"
+
+    @field_validator('date_id_onset', 'date_id_reported')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError(f"Invalid date format: {v}. Use YYYY-MM-DD")
+        return v
+
+    @field_validator('age_years')
+    def validate_age(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("age_years cannot be negative")
+        return v
+
+    @field_validator('sex')
+    def validate_sex(cls, v):
+        if v is not None and v.upper() not in {'M', 'F', 'OTHER', 'UNKNOWN'}:
+            raise ValueError("sex must be one of: M, F, OTHER, UNKNOWN")
+        return v
+
+
+# -------------------- VectorObservation --------------------
+class VectorObservationCreate(BaseModel):
+    """Schema for creating vector surveillance records."""
+    location_code: str
+    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
+    vector_species: str
+    vector_subspecies: Optional[str] = None
+    life_stage: Optional[str] = None  # egg, larva, pupa, adult
+    sex: Optional[str] = None          # male, female, mixed
+    collection_method: Optional[str] = None
+    trap_id: Optional[str] = None
+    count: Optional[int] = None
+    density_per_trap: Optional[float] = None
+    tested_for_pathogen: Optional[str] = None
+    infection_status: Optional[str] = None  # positive, negative
+    infection_rate: Optional[float] = None
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('infection_rate')
+    def validate_rate(cls, v):
+        if v is not None and (v < 0 or v > 1):
+            raise ValueError("infection_rate must be between 0 and 1")
+        return v
+
+
+# -------------------- EnvironmentalFactor --------------------
+class EnvironmentalFactorCreate(BaseModel):
+    """Schema for creating environmental data records."""
+    location_code: str
+    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
+    temperature_mean: Optional[float] = None
+    temperature_min: Optional[float] = None
+    temperature_max: Optional[float] = None
+    rainfall_total: Optional[float] = None
+    relative_humidity: Optional[float] = None
+    ndvi: Optional[float] = None
+    evi: Optional[float] = None
+    lst_day: Optional[float] = None
+    aridity_index: Optional[float] = None
+    potential_breeding_sites: Optional[int] = None
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('temperature_mean', 'temperature_min', 'temperature_max')
+    def validate_temperature(cls, v):
+        if v is not None and v < -100:
+            raise ValueError("unrealistically low temperature")
+        return v
+
+    @field_validator('rainfall_total')
+    def validate_rainfall(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("rainfall cannot be negative")
+        return v
+
+    @field_validator('relative_humidity')
+    def validate_humidity(cls, v):
+        if v is not None and (v < 0 or v > 100):
+            raise ValueError("relative humidity must be between 0 and 100")
+        return v
+
+    @field_validator('ndvi', 'evi')
+    def validate_vegetation_indices(cls, v):
+        if v is not None and (v < -1 or v > 1):
+            raise ValueError("NDVI and EVI must be between -1 and 1")
+        return v
+
+
+# -------------------- Optional: Response Schemas (if you ever need to return data via API) --------------------
+class LocationResponse(LocationCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class HostCaseResponse(HostCaseCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class VectorObservationResponse(VectorObservationCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class EnvironmentalFactorResponse(EnvironmentalFactorCreate):
+    id: int
+    class Config:
+        from_attributes = True
+# database/session.py
+#-*- coding:utf-8 -*-
+
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+SQLITE_URL = "sqlite:///./%s" % (
+    os.getenv("SQL_LITE_DB_NAME"))
+POSTGRES_URL = "postgresql://%s:%s@%s:%s/%s" % (
+    os.getenv("DB_USER"),
+    os.getenv("DB_PASSWORD"),
+    os.getenv("DB_HOST"),
+    os.getenv("DB_PORT"),
+    os.getenv("DB_NAME"),
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL", SQLITE_URL)
+
+# Special handling for SQLite (needs connect_args for foreign keys)
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=connect_args,
+    echo=False  # Set to True for SQL logging
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    """Dependency for FastAPI or context manager for notebooks"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+# database/utils.py
+import xarray as xr
+import geopandas as gpd
+from shapely.geometry import mapping
+import os
+import tempfile
+import pandas as pd
+from database.session import SessionLocal
+from database.models import DimTime
+import pandas as pd
+import traceback
+import cfgrib
+import xarray as xr
+import cfgrib
+import dask
+
+
+def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None, 
+                          output_dir='./clipped_data', buffer_degrees=0.5):
+    """
+    Clip ERA5-Land GRIB files to features from any shapefile.
+    (parameters unchanged)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    def load_shapefile_features():
+        """Load and filter features from shapefile (uses closure for filter_params, shapefile_path)"""
+        try:
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs is None:
+                gdf = gdf.set_crs('EPSG:4326', allow_override=True)
+            print(f"Shapefile loaded: {len(gdf)} features")
+            print(f"Available columns: {list(gdf.columns)}")
+
+            if filter_params is None:
+                return gdf
+
+            if isinstance(filter_params, dict):
+                column = filter_params.get('column')
+                value = filter_params.get('value')
+                if column not in gdf.columns:
+                    raise ValueError(f"Column '{column}' not found in shapefile")
+                filtered_gdf = gdf[gdf[column] == value]
+
+            elif isinstance(filter_params, list):
+                masks = []
+                for param in filter_params:
+                    column = param.get('column')
+                    value = param.get('value')
+                    if column not in gdf.columns:
+                        print(f"Warning: Column '{column}' not found, skipping")
+                        continue
+                    masks.append(gdf[column] == value)
+                if not masks:
+                    raise ValueError("No valid filter conditions found")
+                combined_mask = masks[0]
+                for mask in masks[1:]:
+                    combined_mask = combined_mask | mask
+                filtered_gdf = gdf[combined_mask]
+            else:
+                raise ValueError("filter_params must be dict, list of dicts, or None")
+
+            print(f"Filtered to {len(filtered_gdf)} feature(s)")
+            return filtered_gdf
+        except Exception as e:
+            print(f"Error loading shapefile: {e}")
+            raise
+
+    
+    def process_feature(feature_gdf, feature_name, grib_file_path, output_dir):
+        print(f"\nProcessing {feature_name}...")
+        bbox = feature_gdf.total_bounds
+        lon_slice = slice(bbox[0] - buffer_degrees, bbox[2] + buffer_degrees)
+        lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
+
+        try:
+            # Open all variable groups lazily with Dask chunks
+            print("Opening GRIB file with lazy loading...")
+            ds_list = cfgrib.open_datasets(
+                grib_file_path,
+                chunks={'time': 100},          # Load time in chunks of 100 steps
+                backend_kwargs={'errors': 'raise'}
+            )
+            print(f"Found {len(ds_list)} separate variable groups.")
+
+            # Subset each dataset to the bounding box and drop auxiliary variables
+            subsets = []
+            for i, ds in enumerate(ds_list):
+                print(f"  Processing group {i+1}: {list(ds.data_vars)}")
+                # Determine dimension names (CF convention)
+                lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
+                lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
+                # Subset – this returns a lazy view (no data loaded yet)
+                ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
+                
+                # Drop variables that often cause merge conflicts (non‑data coordinates)
+                vars_to_drop = ['step', 'valid_time', 'number', 'surface', 'isobaricInhPa']
+                to_drop = [v for v in vars_to_drop if v in ds_sel.variables]
+                if to_drop:
+                    ds_sel = ds_sel.drop_vars(to_drop)
+                
+                subsets.append(ds_sel)
+
+            if not subsets:
+                raise ValueError("No datasets loaded from GRIB file.")
+
+            # Merge all subsets lazily – still no data loaded
+            print("Merging variable groups (lazy)...")
+            ds = xr.merge(subsets, compat='override', join='outer')
+            print(f"Merged dataset variables: {list(ds.data_vars)}")
+
+        except Exception as e:
+            print(f"Error loading/processing GRIB: {e}")
+            traceback.print_exc()
+            return None
+
+        # Ensure CRS for clipping (lazy, no data loaded)
+        try:
+            if not hasattr(ds, 'rio') or not ds.rio.crs:
+                ds = ds.rio.write_crs("EPSG:4326")
+        except Exception as e:
+            print("Error setting CRS:")
+            traceback.print_exc()
+            return None
+
+        # Clip to feature boundary (lazy)
+        try:
+            print("Clipping to feature boundary (lazy)...")
+            clipped = ds.rio.clip(
+                feature_gdf.geometry.apply(mapping),
+                feature_gdf.crs,
+                all_touched=True,
+                drop=True
+            )
+        except Exception as e:
+            print("Error during clipping:")
+            traceback.print_exc()
+            return None
+
+        # Generate output filename
+        base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
+        safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
+        output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
+
+        # Save with compression – this triggers the actual computation chunk by chunk
+        try:
+            print(f"Saving to {output_path} (this will trigger computation)...")
+            encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
+                        for var in clipped.data_vars}
+            # Use compute=False to write lazily, but we want to actually write now.
+            # to_netcdf with compute=True will compute and write.
+            clipped.to_netcdf(output_path, encoding=encoding, compute=True)
+        except Exception as e:
+            print("Error saving file:")
+            traceback.print_exc()
+            return None
+
+        print(f"Success! Clipped shape: {clipped[list(clipped.data_vars)[0]].shape}")
+        return output_path
+
+
+    # --- Main flow of clip_era5_by_shapefile ---
+    filtered_gdf = load_shapefile_features()
+    if filtered_gdf.empty:
+        print("No features found after filtering")
+        return []
+
+    output_files = []
+    for idx, row in filtered_gdf.iterrows():
+        single_feature_gdf = gpd.GeoDataFrame([row], geometry='geometry', crs=filtered_gdf.crs)
+
+        # Try to create a meaningful feature name
+        feature_name = None
+        for name_col in ['NAME', 'name', 'COUNTY', 'county', 'ADM2_NAME', 'ADM1_NAME']:
+            if name_col in row.index and pd.notna(row[name_col]):
+                feature_name = str(row[name_col])
+                break
+        if feature_name is None:
+            feature_name = f"feature_{idx}"
+        for id_col in ['ID', 'id', 'OBJECTID', 'FID']:
+            if id_col in row.index and pd.notna(row[id_col]):
+                feature_name = f"{feature_name}_{row[id_col]}"
+                break
+
+        output_file = process_feature(single_feature_gdf, feature_name, grib_file_path, output_dir)
+        if output_file:
+            output_files.append(output_file)
+
+    return output_files    
+
+
+def clip_era5_to_kenya_counties(grib_file_path, county_names, shapefile_path=None, 
+                               county_column='COUNTY', output_dir='./clipped_data'):
+    """
+    Convenience function specifically for Kenya counties.
+    
+    Parameters:
+    -----------
+    grib_file_path : str
+        Path to the input GRIB file
+    county_names : list or str
+        Name(s) of Kenyan county/counties to clip to
+    shapefile_path : str, optional
+        Path to Kenya counties shapefile. If None, tries default locations
+    county_column : str
+        Column name in shapefile containing county names
+    output_dir : str
+        Directory to save clipped NetCDF files
+    
+    Returns:
+    --------
+    list
+        Paths to saved clipped files
+    """
+    
+    # Convert county_names to list if string
+    if isinstance(county_names, str):
+        county_names = [county_names]
+    
+    # Try to find Kenya shapefile if not provided
+    if shapefile_path is None:
+        possible_paths = [
+            "kenya_counties.shp",
+            "/path/to/kenya/counties.shp",  # Add your common paths here
+            "data/shapefiles/kenya/admin2.shp"
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                shapefile_path = path
+                print(f"Using shapefile: {shapefile_path}")
+                break
+        
+        if shapefile_path is None:
+            raise FileNotFoundError(
+                "Kenya shapefile not found. Please provide shapefile_path parameter or "
+                "download from: https://data.humdata.org/dataset/ken-administrative-boundaries"
+            )
+    
+    # Build filter parameters
+    if len(county_names) == 1:
+        filter_params = {'column': county_column, 'value': county_names[0]}
+    else:
+        filter_params = [
+            {'column': county_column, 'value': county_name}
+            for county_name in county_names
+        ]
+    
+    # Use the general function
+    return clip_era5_by_shapefile(
+        grib_file_path=grib_file_path,
+        shapefile_path=shapefile_path,
+        filter_params=filter_params,
+        output_dir=output_dir
+    )
+
+
+def clip_era5_to_region(grib_file_path, geometry, region_name, output_dir='./clipped_data'):
+    """
+    Clip ERA5 data to a custom geometry (GeoDataFrame, GeoSeries, or Shapely geometry).
+    
+    Parameters:
+    -----------
+    grib_file_path : str
+        Path to the input GRIB file
+    geometry : geopandas.GeoDataFrame, geopandas.GeoSeries, or shapely.geometry
+        Geometry to clip to
+    region_name : str
+        Name for the output file
+    output_dir : str
+        Directory to save clipped NetCDF file
+    
+    Returns:
+    --------
+    str
+        Path to saved clipped file
+    """
+    
+    import pandas as pd
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Convert geometry to GeoDataFrame if needed
+    if isinstance(geometry, gpd.GeoDataFrame):
+        gdf = geometry
+    elif isinstance(geometry, gpd.GeoSeries):
+        gdf = gpd.GeoDataFrame(geometry=geometry)
+    else:
+        # Assume it's a shapely geometry
+        gdf = gpd.GeoDataFrame(geometry=[geometry], crs='EPSG:4326')
+    
+    # Ensure CRS is set
+    if gdf.crs is None:
+        gdf = gdf.set_crs('EPSG:4326', allow_override=True)
+    
+    # Create a temporary shapefile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_shapefile = os.path.join(tmpdir, 'temp_region.shp')
+        gdf.to_file(temp_shapefile)
+        
+        # Use the general function with no filtering
+        output_files = clip_era5_by_shapefile(
+            grib_file_path=grib_file_path,
+            shapefile_path=temp_shapefile,
+            filter_params=None,  # Use all features (just one in this case)
+            output_dir=output_dir
+        )
+    
+    # Rename the output file to use the region_name
+    if output_files:
+        original_path = output_files[0]
+        base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
+        new_path = os.path.join(output_dir, f"{base_name}_{region_name.replace(' ', '_')}.nc")
+        
+        # Rename the file
+        if os.path.exists(original_path):
+            os.rename(original_path, new_path)
+            return new_path
+    
+    return None
+
+
+def batch_clip_era5(grib_files, shapefile_path, filter_params=None, output_base_dir='./clipped_data'):
+    """
+    Batch clip multiple GRIB files using the same shapefile and filters.
+    
+    Parameters:
+    -----------
+    grib_files : list of str
+        Paths to GRIB files
+    shapefile_path : str
+        Path to the shapefile
+    filter_params : dict or list of dicts, optional
+        Filter parameters (same as clip_era5_by_shapefile)
+    output_base_dir : str
+        Base directory for output
+    
+    Returns:
+    --------
+    dict
+        Dictionary mapping input files to lists of output files
+    """
+    
+    results = {}
+    
+    for grib_file in grib_files:
+        print(f"\nProcessing: {grib_file}")
+        
+        # Create output subdirectory based on input filename
+        base_name = os.path.basename(grib_file).replace('.grib', '').replace('.grb', '')
+        output_dir = os.path.join(output_base_dir, base_name)
+        
+        try:
+            output_files = clip_era5_by_shapefile(
+                grib_file_path=grib_file,
+                shapefile_path=shapefile_path,
+                filter_params=filter_params,
+                output_dir=output_dir
+            )
+            
+            results[grib_file] = output_files
+            print(f"Generated {len(output_files)} output files")
+            
+        except Exception as e:
+            print(f"Error processing {grib_file}: {e}")
+            results[grib_file] = []
+            traceback.print_exc()
+    
+    return results
+
+
+def ensure_dates_exist(start_date, end_date):
+    session = SessionLocal()
+    try:
+        date_range = pd.date_range(start_date, end_date)
+        for date in date_range:
+            date_id = date.strftime('%Y-%m-%d')
+            exists = session.query(DimTime).filter_by(date_id=date_id).first()
+            if not exists:
+                dt = DimTime(
+                    date_id=date_id,
+                    date=date,
+                    year=date.year,
+                    month=date.month,
+                    week=date.isocalendar()[1],
+                    day_of_year=date.timetuple().tm_yday,
+                    season='dry' if date.month in [11,12,1,2,3] else 'wet',  # customize for your region
+                    is_holiday='no'
+                )
+                session.add(dt)
+        session.commit()
+    finally:
+        session.close()
+
+
+# Example usage
+if __name__ == "__main__":
+    import pandas as pd
+
+    BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
+    shapefile = "/mnt/monadworld/library/shapefiles/kenya/kenyan-counties/County.shp"
+    
+    print("\nBatch processing multiple GRIB files")
+    grib_files = [
+        BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
+        BASE_DIR + "/climatic_timeseries_data/2025_data.grib"
+    ]
+    
+    batch_results = batch_clip_era5(
+        grib_files=grib_files,
+        shapefile_path=shapefile,
+        filter_params=[
+            {'column': 'COUNTY', 'value': 'Mombasa'},
+            {'column': 'COUNTY', 'value': 'Siaya'}
+        ],
+        output_base_dir=BASE_DIR + '/clipped/batch_results'
+    )
+    
+    # Print batch results summary
+    for input_file, output_files in batch_results.items():
+        print(f"{os.path.basename(input_file)}: {len(output_files)} output files")
+# etl/__init__.py
+
+# etl/grib_utils.py
+# etl/grib_utils.py
+
+import xarray as xr
+import pandas as pd
+import numpy as np
+import rioxarray
+from shapely.geometry import Point, Polygon
+
+
+
+def open_grib(filepath, variable=None):
+    """Open a GRIB file with xarray + cfgrib engine."""
+    # If variable is specified, try to filter at open time (if file contains multiple)
+    kwargs = {'engine': 'cfgrib'}
+    if variable:
+        kwargs['filter_by_keys'] = {'shortName': variable}
+    return xr.open_dataset(filepath, **kwargs)
+
+
+
+def extract_point(ds, lat, lon, variable):
+    """Extract value at the nearest grid point to (lat, lon)."""
+    # Handle longitude wrapping if needed (assume ds uses 0-360 or -180-180)
+    # Adjust lon to match dataset's coordinate system
+    if hasattr(ds, 'longitude'):
+        lon_vals = ds.longitude.values
+        if lon_vals.min() >= 0 and lon < 0:
+            lon += 360
+        elif lon_vals.max() <= 180 and lon > 180:
+            lon -= 360
+    point = ds[variable].sel(latitude=lat, longitude=lon, method='nearest')
+    return point.values.item() if point.values.size == 1 else float(point.values.mean())
+
+
+def extract_polygon(ds, polygon, variable):
+    """
+    Average variable over a polygon (shapely Polygon) using rioxarray.
+    Returns mean value (float) or None if no overlap.
+    """
+    # Ensure dataset has a proper CRS (usually WGS84)
+    ds = ds.rio.write_crs("EPSG:4326")
+    # Clip to polygon
+    try:
+        clipped = ds[variable].rio.clip([polygon], crs="EPSG:4326")
+        # Compute mean over all remaining grid cells
+        mean_val = clipped.mean(dim=['latitude', 'longitude']).values
+        return mean_val.item() if mean_val.size == 1 else float(mean_val)
+    except Exception:
+        # No overlap or error
+        return None
+
+
+def aggregate_to_daily(ds, variable, method='mean'):
+    """Resample sub-daily data to daily using method (mean, sum, min, max)."""
+    # Ensure time is a datetime coordinate
+    if 'time' not in ds.dims:
+        return ds  # already daily?
+    daily = ds[variable].resample(time='1D').reduce(method)
+    return daily
+# etl/loaders.py
+#-*- coding: utf-8 -*-
+
+from pathlib import Path
+from sqlalchemy.orm import Session
+from database import models, schemas
+from typing import List, Dict
+import pandas as pd
+from sqlalchemy.orm import Session
+from database.models import Location, EnvironmentalFactor
+from database.session import SessionLocal
+from shapely import wkt
+import geopandas as gpd
+import pandas as pd
+from . import mappings
+from . import grib_utils
+from . import netcdf_utils
+
+
+class DatabaseLoader:
+    def __init__(self, db_session: Session):
+        self.session = db_session
+    
+
+    def bulk_load_cases(self, cases_data: List[Dict]):
+        """Load multiple cases efficiently"""
+        for case_dict in cases_data:
+            # Validate with Pydantic
+            case = schemas.HostCaseCreate(**case_dict)
+            
+            # Convert to ORM model
+            db_case = models.HostCase(**case.dict())
+            
+            self.session.add(db_case)
+        
+        self.session.commit()
+    
+
+    def upsert_location(self, location_data: Dict):
+        """Insert or update location"""
+        location = self.session.query(models.Location)\
+            .filter(models.Location.location_code == location_data['location_code'])\
+            .first()
+        
+        if location:
+            # Update existing
+            for key, value in location_data.items():
+                setattr(location, key, value)
+        else:
+            # Create new
+            location = models.Location(**location_data)
+            self.session.add(location)
+        
+        self.session.commit()
+        return location
+    
+    
+    def load_from_dataframe(self, df: pd.DataFrame, model_class):
+        """Generic method to load pandas DataFrame to any model"""
+        records = df.to_dict('records')
+        for record in records:
+            # Handle missing columns
+            filtered_record = {k: v for k, v in record.items() 
+                             if hasattr(model_class, k)}
+            db_obj = model_class(**filtered_record)
+            self.session.add(db_obj)
+        
+        self.session.commit()
+
+
+    def load_from_grib(self, start_date, end_date, grib_file_pattern):
+        """
+        grib_file_pattern: string with {date} placeholder, e.g., '/data/era5_{date}.grib'
+        """
+        # 1. Load all locations with geometry
+        locations = self._get_locations_as_geodataframe()
+        
+        # 2. Generate date range
+        date_range = pd.date_range(start_date, end_date)
+        
+        for date in date_range:
+            date_str = date.strftime('%Y-%m-%d')
+            date_id = date_str
+            file_path = grib_file_pattern.format(date=date.strftime('%Y%m%d'))
+            
+            # Dictionary to hold combined data for this date: key = (loc_code, date_id)
+            records = {}
+            for _, row in locations.iterrows():
+                records[(row.location_code, date_id)] = {
+                    'location_code': row.location_code,
+                    'date_id': date_id
+                }
+            
+            # Process each variable from mapping
+            for grib_var, mapping in mappings.GRIB_VARIABLE_MAP.items():
+                try:
+                    ds = grib_utils.open_grib(file_path, variable=grib_var)
+                    
+                    # If sub-daily, aggregate to daily
+                    if 'time' in ds.dims and ds.dims['time'] > 1:
+                        ds = grib_utils.aggregate_to_daily(ds, grib_var)
+                    
+                    # Extract for each location
+                    for _, row in locations.iterrows():
+                        geom = row.geometry
+                        if geom is None or geom.is_empty:
+                            # Use centroid
+                            lat, lon = row.centroid_lat, row.centroid_lon
+                            if lat is None or lon is None:
+                                continue
+                            val = grib_utils.extract_point(ds, lat, lon, grib_var)
+                        else:
+                            val = grib_utils.extract_polygon(ds, geom, grib_var)
+                        
+                        if val is None:
+                            continue
+                        
+                        # Apply unit conversion
+                        if mapping['convert']:
+                            val = mapping['convert'](val)
+                        
+                        # Store in records
+                        key = (row.location_code, date_id)
+                        records[key][mapping['column']] = val
+                        
+                except Exception as e:
+                    print(f"Error processing variable {grib_var} for {file_path}: {e}")
+                    continue
+            
+            # Now insert records into database
+            for key, data in records.items():
+                # Skip if no environmental data was collected (all vars missing)
+                if any(col in data for col in ['temperature_mean', 'rainfall_total', 
+                                                'temperature_min', 'temperature_max',
+                                                'relative_humidity']):
+                    # Check if record already exists
+                    existing = self.session.query(EnvironmentalFactor).filter_by(
+                        location_code=data['location_code'],
+                        date_id=data['date_id']
+                    ).first()
+                    if existing:
+                        # Update existing record with new values (optional)
+                        for col, val in data.items():
+                            if col not in ['location_code', 'date_id']:
+                                setattr(existing, col, val)
+                    else:
+                        env_factor = EnvironmentalFactor(**data)
+                        self.session.add(env_factor)
+            
+            self.session.commit()
+            print(f"Loaded environmental data for {date_str}")
+
+
+    def _get_locations_as_geodataframe(self):
+        """Load all locations with WKT geometry into a GeoDataFrame."""
+        locations = self.session.query(Location).all()
+        data = []
+        for loc in locations:
+            geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+            data.append({
+                'location_code': loc.location_code,
+                'geometry': geom,
+                'centroid_lat': loc.centroid_lat,
+                'centroid_lon': loc.centroid_lon
+            })
+        # Create GeoDataFrame and explicitly set the geometry column
+        gdf = gpd.GeoDataFrame(data, crs='EPSG:4326', geometry='geometry')
+        return gdf
+
+    
+    def load_from_netcdf(self, start_date, end_date, file_path_func):
+        """
+        file_path_func: a function with signature (location_code, date) -> str
+                       that returns the full path to the NetCDF file.
+        Example: lambda loc, d: f"/data/{loc}_{d.strftime('%Y%m%d')}.nc"
+        """
+        # 1. Load all locations with geometries
+        locations = self._get_locations_as_geodataframe()
+        if locations.empty:
+            print("No locations found in database. Run load_locations.py first.")
+            return
+
+        # 2. Generate date range
+        date_range = pd.date_range(start_date, end_date)
+
+        # 3. For each location and date, extract and store
+        for date in date_range:
+            date_str = date.strftime('%Y-%m-%d')
+            date_id = date_str
+
+            for _, loc_row in locations.iterrows():
+                loc_code = loc_row.location_code
+                file_path = file_path_func(loc_code, date)
+
+                if not Path(file_path).exists():
+                    print(f"File not found: {file_path}")
+                    continue
+
+                # Dictionary to hold data for this location+date
+                record = {'location_code': loc_code, 'date_id': date_id}
+
+                # Open the NetCDF file once per location+date
+                try:
+                    ds = netcdf_utils.open_netcdf(file_path)
+                except Exception as e:
+                    print(f"Error opening {file_path}: {e}")
+                    continue
+
+                # Process each variable in the mapping that exists in the dataset
+                for nc_var, mapping in mappings.NC_VARIABLE_MAP.items():
+                    if nc_var not in ds:
+                        # Variable not in this file – skip silently
+                        continue
+
+                    try:
+                        # If sub-daily, aggregate to daily using the specified method
+                        if 'time' in ds.dims and ds.sizes['time'] > 1:
+                            da = netcdf_utils.aggregate_to_daily(
+                                ds, nc_var, method=mapping.get('agg_method', 'mean')
+                            )
+                        else:
+                            da = ds[nc_var]
+
+                        # Extract value for this location (using polygon or centroid)
+                        geom = loc_row.geometry
+                        if geom is None or geom.is_empty:
+                            lat, lon = loc_row.centroid_lat, loc_row.centroid_lon
+                            if lat is None or lon is None:
+                                continue
+                            val = netcdf_utils.extract_point(da, lat, lon)
+                        else:
+                            val = netcdf_utils.extract_polygon(da, geom)
+
+                        if val is None:
+                            continue
+
+                        # Apply unit conversion
+                        if mapping['convert']:
+                            val = mapping['convert'](val)
+
+                        record[mapping['column']] = val
+
+                    except Exception as e:
+                        print(f"Error processing {nc_var} for {loc_code} on {date_str}: {e}")
+                        continue
+
+                # After processing all variables, upsert the record
+                if len(record) > 2:  # at least one environmental variable besides loc/date
+                    self._upsert_environmental(record)
+
+            # Commit after each date to avoid large transactions
+            self.session.commit()
+            print(f"Loaded environmental data for {date_str}")
+
+
+    def _get_locations_as_geodataframe(self):
+        """Load all locations with WKT geometry into a GeoDataFrame."""
+        locations = self.session.query(Location).all()
+        data = []
+        for loc in locations:
+            geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+            data.append({
+                'location_code': loc.location_code,
+                'geometry': geom,
+                'centroid_lat': loc.centroid_lat,
+                'centroid_lon': loc.centroid_lon
+            })
+        gdf = gpd.GeoDataFrame(data, crs='EPSG:4326', geometry='geometry')
+        return gdf
+
+
+    def _upsert_environmental(self, record):
+        """Insert or update a record in environmental_factor."""
+        existing = self.session.query(EnvironmentalFactor).filter_by(
+            location_code=record['location_code'],
+            date_id=record['date_id']
+        ).first()
+        if existing:
+            for key, value in record.items():
+                if key not in ['location_code', 'date_id']:
+                    setattr(existing, key, value)
+        else:
+            env_factor = EnvironmentalFactor(**record)
+            self.session.add(env_factor)
+
+
+    def load_from_file(self, file_path, model_class, schema_class=None, column_mapping=None, **pandas_kwargs):
+        """
+        Load data from CSV or Excel file into the database.
+        
+        :param file_path: Path to the file (string or Path)
+        :param model_class: SQLAlchemy model class (e.g., HostCase)
+        :param schema_class: Optional Pydantic schema for validation (e.g., HostCaseCreate)
+        :param column_mapping: Dict mapping file columns to model attributes
+        :param pandas_kwargs: Additional arguments passed to pandas read_* (e.g., sep, sheet_name)
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Read file based on extension
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path, **pandas_kwargs)
+        elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+            df = pd.read_excel(file_path, **pandas_kwargs)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
+        # Apply column mapping if provided
+        if column_mapping:
+            df = df.rename(columns=column_mapping)
+        
+        # Convert to list of dicts
+        records = df.to_dict('records')
+        
+        # Validate with Pydantic if schema provided
+        if schema_class:
+            validated_records = []
+            for rec in records:
+                # Filter to only keys present in schema (optional)
+                schema_fields = set(schema_class.model_fields.keys())
+                filtered = {k: v for k, v in rec.items() if k in schema_fields}
+                validated = schema_class(**filtered)
+                validated_records.append(validated.model_dump())
+            records = validated_records
+        
+        # Use existing bulk load method (or generic load_from_dataframe)
+        self.load_from_dataframe(pd.DataFrame(records), model_class)
+# etl/mappings.py
+#!-*- coding: utf8 -*-
+
+
+# Mapping from NetCDF variable name to database column and conversion
+NC_VARIABLE_MAP = {
+    't2m': {
+        'column': 'temperature_mean',
+        'convert': lambda k: k - 273.15,   # Kelvin to Celsius
+        'agg_method': 'mean',
+        'description': '2m temperature'
+    },
+    # 'mx2t': {
+    #     'column': 'temperature_max',
+    #     'convert': lambda k: k - 273.15,
+    #     'agg_method': 'max',
+    #     'description': 'Maximum temperature at 2m'
+    # },
+    # 'mn2t': {
+    #     'column': 'temperature_min',
+    #     'convert': lambda k: k - 273.15,
+    #     'agg_method': 'min',
+    #     'description': 'Minimum temperature at 2m'
+    # },
+    'tp': {
+        'column': 'rainfall_total',
+        'convert': lambda m: m * 1000,  # meters to mm
+        'agg_method': 'sum',
+        'description': 'Total precipitation'
+    },
+    # 'r': {
+    #     'column': 'relative_humidity',
+    #     'convert': None,
+    #     'agg_method': 'mean',
+    #     'description': 'Relative humidity'
+    # },
+}
+
+
+VECTOR_OBSERVATION_MAPPING = {
+    
+}
+# etl/netcdf_utils.py
+# etl/netcdf_utils.py
+import xarray as xr
+import pandas as pd
+import numpy as np
+import rioxarray
+from shapely.geometry import Point, Polygon
+
+
+def open_netcdf(filepath):
+    """Open a NetCDF file with xarray."""
+    return xr.open_dataset(filepath)
+
+
+def extract_point(da, lat, lon):
+    """
+    Extract value from a DataArray at the nearest grid point.
+    da: DataArray with dimensions latitude, longitude (and possibly time).
+    """
+    # Align longitude system if needed
+    if 'longitude' in da.dims:
+        lon_vals = da.longitude.values
+        if lon_vals.min() >= 0 and lon < 0:
+            lon += 360
+        elif lon_vals.max() <= 180 and lon > 180:
+            lon -= 360
+    # Select nearest point – if time dimension exists, take first time?
+    # For daily aggregated data, time should be a single step.
+    point = da.sel(latitude=lat, longitude=lon, method='nearest')
+    # If time still present, average over time (should be single after aggregation)
+    if 'time' in point.dims and point.sizes['time'] > 1:
+        point = point.mean(dim='time')
+    return point.values.item() if point.values.size == 1 else float(point.values.mean())
+
+
+def extract_polygon(da, polygon):
+    """
+    Average variable over a polygon using rioxarray.
+    da: DataArray with latitude/longitude dimensions.
+    """
+    # Ensure CRS
+    da = da.rio.write_crs("EPSG:4326")
+    try:
+        clipped = da.rio.clip([polygon], crs="EPSG:4326")
+        mean_val = clipped.mean(dim=['latitude', 'longitude']).values
+        # If time still present, average over time
+        if 'time' in clipped.dims:
+            mean_val = mean_val.mean()
+        return mean_val.item() if mean_val.size == 1 else float(mean_val)
+    except Exception:
+        return None
+
+
+def aggregate_to_daily(ds, variable, method='mean'):
+    """
+    Resample sub-daily data to daily using method.
+    Returns a DataArray with a single time step per day.
+    """
+    # Ensure time is datetime
+    if not np.issubdtype(ds.time.dtype, np.datetime64):
+        ds['time'] = pd.to_datetime(ds.time.values)
+    daily = ds[variable].resample(time='1D').reduce(method)
+    return daily
+
+# etl/transformers.py
+
+# load_annual_netcdf.py
+#!/usr/bin/env python
+
+import sys
+import re
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+
+import xarray as xr
+import pandas as pd
+from shapely import wkt
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from database.session import SessionLocal
+from database.models import Location, EnvironmentalFactor
+from database.utils import ensure_dates_exist
+from etl import netcdf_utils
+from etl.mappings import NC_VARIABLE_MAP
+
+
+def parse_filename(filepath):
+    """
+    Extract year and location from filename.
+    Expected pattern: {year}_data_{location}_{id}.nc
+    Example: 2024_data_Mombasa_141.nc
+    Returns (year, location) or (None, None) if no match.
+    """
+    pattern = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z]+)_\d+\.nc$'
+    match = re.search(pattern, filepath.name)
+    if not match:
+        return None, None
+    year = int(match.group('year'))
+    location = match.group('location').lower()
+    return year, location
+
+
+def load_annual_netcdf_files(data_root):
+    """
+    Process all annual NetCDF files in data_root and load into environmental_factor.
+    """
+    # Get database session
+    db = SessionLocal()
+
+    # Load all locations with their geometries and centroids
+    locations = db.query(Location).all()
+    loc_dict = {}
+    for loc in locations:
+        geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+        loc_dict[loc.location_code] = {
+            'geometry': geom,
+            'centroid_lat': loc.centroid_lat,
+            'centroid_lon': loc.centroid_lon
+        }
+
+    if not loc_dict:
+        print("No locations found in database. Run load_location_data.py first.")
+        db.close()
+        return
+
+    # Find all NetCDF files recursively
+    nc_files = list(Path(data_root).rglob("*.nc"))
+    print(f"Found {len(nc_files)} NetCDF files.")
+
+    for nc_file in nc_files:
+        year, loc_code = parse_filename(nc_file)
+        if loc_code is None:
+            print(f"Skipping unrecognized file: {nc_file.name}")
+            continue
+        if loc_code not in loc_dict:
+            print(f"Location '{loc_code}' not found in database. Skipping {nc_file.name}")
+            continue
+
+        print(f"\nProcessing {nc_file.name} (location: {loc_code}, year: {year})")
+
+        # Open the dataset
+        try:
+            ds = xr.open_dataset(nc_file)
+        except Exception as e:
+            print(f"  Error opening file: {e}")
+            continue
+
+        # Get all unique dates from the time coordinate
+        times = pd.to_datetime(ds.time.values)
+        dates = sorted(set(t.date() for t in times))
+        if not dates:
+            print("  No time data found.")
+            ds.close()
+            continue
+
+        # Ensure all dates exist in dim_time
+        min_date = dates[0].strftime('%Y-%m-%d')
+        max_date = dates[-1].strftime('%Y-%m-%d')
+        ensure_dates_exist(min_date, max_date)
+
+        # Get geometry info for this location
+        geom_info = loc_dict[loc_code]
+        geometry = geom_info['geometry']
+        lat, lon = geom_info['centroid_lat'], geom_info['centroid_lon']
+
+        # Process each variable defined in the mapping
+
+        for nc_var, mapping in NC_VARIABLE_MAP.items():
+            if nc_var not in ds:
+                continue
+
+            print(f"  Processing variable: {nc_var}")
+
+            # Get aggregation method name from mapping (default 'mean')
+            method_name = mapping.get('agg_method', 'mean')
+            
+            # Convert method name to a callable
+            method_func = {
+                'mean': np.mean,
+                'sum': np.sum,
+                'max': np.max,
+                'min': np.min,
+            }.get(method_name)
+            
+            if method_func is None:
+                print(f"    Warning: Unknown method '{method_name}', using np.mean")
+                method_func = np.mean
+
+            # Aggregate sub-daily data to daily using the callable
+            try:
+                daily_da = netcdf_utils.aggregate_to_daily(
+                    ds, nc_var, method=method_func
+                )
+            except Exception as e:
+                print(f"    Error aggregating: {e}")
+                continue
+
+            # Now iterate over each day
+            for time_idx in range(len(daily_da.time)):
+                day_slice = daily_da.isel(time=time_idx)
+                current_date = pd.to_datetime(daily_da.time.values[time_idx]).date()
+                date_id = current_date.strftime('%Y-%m-%d')
+
+                # Extract value for this location
+                try:
+                    if geometry is None or geometry.is_empty:
+                        if lat is None or lon is None:
+                            continue
+                        value = netcdf_utils.extract_point(day_slice, lat, lon)
+                    else:
+                        value = netcdf_utils.extract_polygon(day_slice, geometry)
+
+                    if value is None:
+                        continue
+
+                    # Apply unit conversion
+                    if mapping.get('convert'):
+                        value = mapping['convert'](value)
+
+                    # Prepare record for upsert
+                    record = {
+                        'location_code': loc_code,
+                        'date_id': date_id,
+                        mapping['column']: value
+                    }
+
+                    # Upsert into database
+                    existing = db.query(EnvironmentalFactor).filter_by(
+                        location_code=loc_code,
+                        date_id=date_id
+                    ).first()
+
+                    if existing:
+                        setattr(existing, mapping['column'], value)
+                    else:
+                        # Create full record with all columns (others will be NULL)
+                        full_record = {
+                            'location_code': loc_code,
+                            'date_id': date_id,
+                            mapping['column']: value
+                        }
+                        env_factor = EnvironmentalFactor(**full_record)
+                        db.add(env_factor)
+
+                except Exception as e:
+                    print(f"    Error extracting value for {date_id}: {e}")
+                    continue
+
+        # Commit after each file to avoid large transactions
+        db.commit()
+        ds.close()
+        print(f"  Finished processing {nc_file.name}")
+
+    db.close()
+    print("\nAll files processed.")
+
+
+if __name__ == "__main__":
+    data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+    load_annual_netcdf_files(data_root)
+# load_environmental_data.py
+#!/usr/bin/env python
+
+# /home/void/Documents/codes/vbd-cdm/load_environmental_data.py
+
+import sys
+import re
+from pathlib import Path
+from datetime import datetime, timedelta
+
+from database.models import Location
+from database.session import SessionLocal
+from database.utils import ensure_dates_exist
+from etl.loaders import DatabaseLoader
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+import xarray as xr
+import geopandas as gpd
+import pandas as pd
+from shapely import wkt
+from datetime import datetime
+
+from database.session import SessionLocal
+from database.models import Location, EnvironmentalFactor
+
+
+
+# ---------- NetCDF utilities (simplified) ----------
+def open_netcdf(filepath):
+    return xr.open_dataset(filepath)
+
+def extract_point(da, lat, lon):
+    """Extract value at nearest grid point from a DataArray."""
+    if 'longitude' in da.dims:
+        lon_vals = da.longitude.values
+        if lon_vals.min() >= 0 and lon < 0:
+            lon += 360
+        elif lon_vals.max() <= 180 and lon > 180:
+            lon -= 360
+    point = da.sel(latitude=lat, longitude=lon, method='nearest')
+    if 'time' in point.dims and point.sizes['time'] > 1:
+        point = point.mean(dim='time')
+    return point.values.item() if point.values.size == 1 else float(point.values.mean())
+
+def extract_polygon(da, polygon):
+    """Average over polygon using rioxarray."""
+    da = da.rio.write_crs("EPSG:4326")
+    try:
+        clipped = da.rio.clip([polygon], crs="EPSG:4326")
+        mean_val = clipped.mean(dim=['latitude', 'longitude']).values
+        if 'time' in clipped.dims:
+            mean_val = mean_val.mean()
+        return mean_val.item() if mean_val.size == 1 else float(mean_val)
+    except Exception:
+        return None
+
+def aggregate_to_daily(ds, variable, method='mean'):
+    if 'time' not in ds.dims or ds.sizes['time'] <= 1:
+        return ds[variable]
+    daily = ds[variable].resample(time='1D').reduce(method)
+    return daily
+
+
+
+def parse_filename(filepath):
+    """
+    Extract year, location, and day-of-year from filename.
+    Expected pattern: {year}_data_{location}_{doy}.nc
+    Example: 2024_data_Mombasa_141.nc
+    Returns (year, location, doy) or None if no match.
+    """
+    pattern = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z]+)_(?P<doy>\d{1,3})\.nc$'
+    match = re.search(pattern, filepath.name)
+    if not match:
+        return None
+    year = int(match.group('year'))
+    location = match.group('location').lower()   # e.g. 'mombasa'
+    doy = int(match.group('doy'))
+    return year, location, doy
+
+
+def doy_to_date(year, doy):
+    """Convert year and day-of-year to a date object."""
+    return datetime(year, 1, 1) + timedelta(days=doy - 1)
+
+
+def load_netcdf_files(data_root):
+    """
+    Find all .nc files in data_root (recursively), parse metadata,
+    and load each using the DatabaseLoader.
+    """
+    # Collect all .nc files
+    nc_files = list(Path(data_root).rglob("*.nc"))
+    print(f"Found {len(nc_files)} NetCDF files.")
+
+    # We'll collect all unique dates first to ensure dim_time is populated
+    all_dates = set()
+    file_info = []  # list of (file_path, location, date)
+
+    for nc_file in nc_files:
+        parsed = parse_filename(nc_file)
+        if not parsed:
+            print(f"Skipping file with unexpected name: {nc_file.name}")
+            continue
+        year, location, doy = parsed
+        file_date = doy_to_date(year, doy)
+        all_dates.add(file_date)
+        file_info.append((nc_file, location, file_date))
+
+    if not file_info:
+        print("No valid files to load.")
+        return
+
+    # Ensure all required dates exist in dim_time
+    min_date = min(all_dates).strftime('%Y-%m-%d')
+    max_date = max(all_dates).strftime('%Y-%m-%d')
+    ensure_dates_exist(min_date, max_date)
+    print(f"Ensured dates from {min_date} to {max_date} exist.")
+
+    # Now load each file
+    db = SessionLocal()
+    try:
+        loader = DatabaseLoader(db)
+        for nc_file, location, file_date in file_info:
+            date_str = file_date.strftime('%Y-%m-%d')
+            print(f"Loading {nc_file.name} for {location} on {date_str}...")
+            try:
+                # Adjust method name if necessary
+                loader.load_netcdf_file(
+                    file_path=nc_file,
+                    location_code=location,
+                    date=date_str
+                )
+                print(f"  ✅ Loaded")
+            except Exception as e:
+                print(f"  ❌ Failed: {e}")
+    finally:
+        db.close()
+
+
+
+def load_environmental_factor(start_date, end_date, data_dir, file_pattern_func=None):
+    """
+    Load environmental data from NetCDF files for all locations.
+    :param start_date: string 'YYYY-MM-DD'
+    :param end_date: string 'YYYY-MM-DD'
+    :param data_dir: base directory containing the NetCDF files
+    :param file_pattern_func: optional function(location_code, date) -> full file path.
+                              If None, a default pattern is used:
+                              f"{data_dir}/{location_code}_{date.strftime('%Y%m%d')}.nc"
+    """
+    session = SessionLocal()
+    try:
+        # 1. Get all locations with geometries
+        locations = session.query(Location).all()
+        if not locations:
+            print("No locations found. Run load_location_data first.")
+            return
+
+        # Convert to a list of dicts with geometry
+        loc_list = []
+        for loc in locations:
+            geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+            loc_list.append({
+                'code': loc.location_code,
+                'geometry': geom,
+                'centroid_lat': loc.centroid_lat,
+                'centroid_lon': loc.centroid_lon
+            })
+
+        # 2. Define default file pattern if not provided
+        if file_pattern_func is None:
+            def default_pattern(loc_code, date):
+                return Path(data_dir) / f"{loc_code}_{date.strftime('%Y%m%d')}.nc"
+            file_pattern_func = default_pattern
+
+        # 3. Generate date range
+        date_range = pd.date_range(start_date, end_date)
+
+        # 4. For each date and location, process t2m
+        for date in date_range:
+            date_str = date.strftime('%Y-%m-%d')
+            date_id = date_str
+
+            for loc in loc_list:
+                loc_code = loc['code']
+                file_path = file_pattern_func(loc_code, date)
+
+                if not Path(file_path).exists():
+                    # Silently skip missing files (or print debug)
+                    continue
+
+                try:
+                    ds = open_netcdf(file_path)
+                except Exception as e:
+                    print(f"Error opening {file_path}: {e}")
+                    continue
+
+                # We only have t2m in the mapping (others may be added later)
+                # Hardcode t2m for now – you can move this to a mapping module later
+                if 't2m' not in ds:
+                    print(f"Variable 't2m' not found in {file_path}")
+                    continue
+
+                # Aggregate to daily if needed
+                if 'time' in ds.dims and ds.sizes['time'] > 1:
+                    da = aggregate_to_daily(ds, 't2m', method='mean')
+                else:
+                    da = ds['t2m']
+
+                # Extract value
+                geom = loc['geometry']
+                if geom is None or geom.is_empty:
+                    lat, lon = loc['centroid_lat'], loc['centroid_lon']
+                    if lat is None or lon is None:
+                        continue
+                    val = extract_point(da, lat, lon)
+                else:
+                    val = extract_polygon(da, geom)
+
+                if val is None:
+                    continue
+
+                # Convert Kelvin to Celsius
+                val_celsius = val - 273.15
+
+                # Upsert into environmental_factor
+                existing = session.query(EnvironmentalFactor).filter_by(
+                    location_code=loc_code,
+                    date_id=date_id
+                ).first()
+                if existing:
+                    existing.temperature_mean = val_celsius
+                else:
+                    env = EnvironmentalFactor(
+                        location_code=loc_code,
+                        date_id=date_id,
+                        temperature_mean=val_celsius
+                    )
+                    session.add(env)
+
+            # Commit after each date to avoid large transactions
+            session.commit()
+            print(f"Processed environmental data for {date_str}")
+
+    finally:
+        session.close()
+
+
+
+
+
+if __name__ == "__main__":
+    data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+    load_netcdf_files(data_root)
+# load_location_data.py
+#!/usr/bin/env python
+# scripts/load_locations.py
+import sys
+from pathlib import Path
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import geopandas as gpd
+from database.session import SessionLocal
+from database.models import Location
+
+
+def load_gpkg_to_location(gpkg_path, admin_level, layer=None, parent_code=None):
+    """
+    Reads a GeoPackage file and inserts each feature into the location table.
+    :param gpkg_path: Path to the .gpkg file
+    :param admin_level: e.g., 'county', 'subcounty'
+    :param layer: Layer name within the GeoPackage (if multiple layers)
+    :param parent_code: Optional parent location code for hierarchical data
+    """
+    # Read the GeoPackage (GeoPandas automatically detects format)
+    gdf = gpd.read_file(gpkg_path, layer=layer)
+    
+    # Ensure CRS is WGS84 (EPSG:4326)
+    if gdf.crs and gdf.crs.to_string() != 'EPSG:4326':
+        gdf = gdf.to_crs('EPSG:4326')
+    
+    session = SessionLocal()
+    try:
+        for _, row in gdf.iterrows():
+            # Try to get a name from common attribute fields
+            # Adjust these field names to match your actual data
+            name = None
+            for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin']:
+                if col in row and row[col]:
+                    name = str(row[col])
+                    break
+            if not name:
+                name = f"Feature_{_}"  # fallback
+            
+            # Generate a unique location code (e.g., lowercase with underscores)
+            location_code = name.lower().replace(' ', '_').replace('-', '_')
+            
+            # Get geometry as WKT
+            geom_wkt = row.geometry.wkt if row.geometry else None
+            
+            # Compute centroid
+            if row.geometry:
+                centroid = row.geometry.centroid
+                centroid_lat = centroid.y
+                centroid_lon = centroid.x
+            else:
+                centroid_lat = centroid_lon = None
+            
+            existing = session.query(Location).filter_by(location_code=location_code).first()
+            if existing:
+                # Update existing record
+                existing.name = name
+                existing.admin_level = admin_level
+                existing.parent_location_code = parent_code
+                existing.geometry_wkt = geom_wkt
+                existing.centroid_lat = centroid_lat
+                existing.centroid_lon = centroid_lon
+                print(f"Updated: {location_code}")
+            else:
+                # Insert new record
+                location = Location(
+                    location_code = location_code,
+                    name = name,
+                    admin_level = admin_level,
+                    parent_location_code = parent_code,
+                    geometry_wkt = geom_wkt,
+                    centroid_lat = centroid_lat,
+                    centroid_lon = centroid_lon
+                )
+                session.add(location)
+                print(f"Inserted: {location_code}")
+
+        session.commit()
+        print(f"Loaded {len(gdf)} locations from {gpkg_path}")
+    except Exception as e:
+        session.rollback()
+        print(f"Error loading GeoPackage: {e}")
+    finally:
+        session.close()
+
+
+if __name__ == "__main__":
+    # Define paths to your .gpkg files
+    base = Path(__file__).parent / "study_areas" / "kenya"
+    mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
+    siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
+
+    # Load each county
+    if mombasa_gpkg.exists():
+        load_gpkg_to_location(mombasa_gpkg, admin_level='county')
+    if siaya_gpkg.exists():
+        load_gpkg_to_location(siaya_gpkg, admin_level='county')
+# main.py
+#!/usr/bin/env python
+
+
+#!/usr/bin/env python
+# main.py
+import sys
+from pathlib import Path
+
+from etl.mappings import VECTOR_OBSERVATION_MAPPING
+from load_case_data import load_case_files
+from load_environmental_data import load_environmental_factor
+from load_location_data import load_gpkg_to_location
+from load_vector_data import load_vector_files
+
+# Ensure the project root is in sys.path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from database.session import engine, Base
+from database.utils import ensure_dates_exist
+from etl.loaders import DatabaseLoader
+from database.session import SessionLocal
+
+
+def create_tables_if_not_exist():
+    """Create all tables defined in Base.metadata."""
+    # This will create tables only if they don't exist
+    Base.metadata.create_all(bind=engine)
+    print("Tables checked/created.")
+
+
+def main():
+    # Ensure tables exist
+    create_tables_if_not_exist()
+
+    # Run Location data loader
+    base = Path(__file__).parent / "study_areas" / "kenya"
+    mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
+    siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
+    # Load for each county
+    if mombasa_gpkg.exists():
+        load_gpkg_to_location(mombasa_gpkg, admin_level='county')
+    if siaya_gpkg.exists():
+        load_gpkg_to_location(siaya_gpkg, admin_level='county')
+   
+    # Run the environmental data loader
+    load_environmental_factor(
+        start_date = '2024-01-01', 
+        end_date = '2024-12-31',
+        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2024_data'
+    )
+    load_environmental_factor(
+        start_date = '2025-01-01', 
+        end_date = '2025-12-31',
+        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2025_data'
+    )
+
+    load_vector_files(data_dir="/path/to/vector_data", pattern="*.csv", column_mapping=VECTOR_OBSERVATION_MAPPING)
+    # load_case_files(data_dir="/path/to/lab_data", pattern="*.xlsx", column_mapping=lab_mapping)
+if __name__ == "__main__":
+    main()
+

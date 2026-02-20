@@ -21,16 +21,21 @@ NC_VARIABLE_MAP = {
     #     'agg_method': 'min',
     #     'description': 'Minimum temperature at 2m'
     # },
-    # 'tp': {
-    #     'column': 'rainfall_total',
-    #     'convert': lambda m: m * 1000,  # meters to mm
-    #     'agg_method': 'sum',
-    #     'description': 'Total precipitation'
-    # },
+    'tp': {
+        'column': 'rainfall_total',
+        'convert': lambda m: m * 1000,  # meters to mm
+        'agg_method': 'sum',
+        'description': 'Total precipitation'
+    },
     # 'r': {
     #     'column': 'relative_humidity',
     #     'convert': None,
     #     'agg_method': 'mean',
     #     'description': 'Relative humidity'
     # },
+}
+
+
+VECTOR_OBSERVATION_MAPPING = {
+    
 }

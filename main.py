@@ -6,8 +6,11 @@
 import sys
 from pathlib import Path
 
+from etl.mappings import VECTOR_OBSERVATION_MAPPING
+from load_case_data import load_case_files
 from load_environmental_data import load_environmental_factor
 from load_location_data import load_gpkg_to_location
+from load_vector_data import load_vector_files
 
 # Ensure the project root is in sys.path
 project_root = Path(__file__).parent
@@ -52,6 +55,7 @@ def main():
         data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2025_data'
     )
 
-
+    load_vector_files(data_dir="/path/to/vector_data", pattern="*.csv", column_mapping=VECTOR_OBSERVATION_MAPPING)
+    # load_case_files(data_dir="/path/to/lab_data", pattern="*.xlsx", column_mapping=lab_mapping)
 if __name__ == "__main__":
     main()

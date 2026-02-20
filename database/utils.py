@@ -9,6 +9,9 @@ from database.models import DimTime
 import pandas as pd
 import traceback
 import cfgrib
+import xarray as xr
+import cfgrib
+import dask
 
 
 def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None, 
@@ -70,35 +73,39 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
         lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
 
         try:
-            # Open all datasets (one per variable group) from the GRIB file
-            print("Opening GRIB file and separating variables...")
-            ds_list = cfgrib.open_datasets(grib_file_path)
+            # Open all variable groups lazily with Dask chunks
+            print("Opening GRIB file with lazy loading...")
+            ds_list = cfgrib.open_datasets(
+                grib_file_path,
+                chunks={'time': 100},          # Load time in chunks of 100 steps
+                backend_kwargs={'errors': 'raise'}
+            )
             print(f"Found {len(ds_list)} separate variable groups.")
 
             # Subset each dataset to the bounding box and drop auxiliary variables
-            processed_ds_list = []
+            subsets = []
             for i, ds in enumerate(ds_list):
                 print(f"  Processing group {i+1}: {list(ds.data_vars)}")
-                # Determine dimension names
+                # Determine dimension names (CF convention)
                 lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
                 lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
-                # Subset to bounding box
+                # Subset – this returns a lazy view (no data loaded yet)
                 ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
                 
                 # Drop variables that often cause merge conflicts (non‑data coordinates)
                 vars_to_drop = ['step', 'valid_time', 'number', 'surface', 'isobaricInhPa']
-                for v in vars_to_drop:
-                    if v in ds_sel.variables:
-                        ds_sel = ds_sel.drop_vars(v)
+                to_drop = [v for v in vars_to_drop if v in ds_sel.variables]
+                if to_drop:
+                    ds_sel = ds_sel.drop_vars(to_drop)
                 
-                processed_ds_list.append(ds_sel)
+                subsets.append(ds_sel)
 
-            if not processed_ds_list:
+            if not subsets:
                 raise ValueError("No datasets loaded from GRIB file.")
 
-            # Merge all datasets with outer join to preserve all time steps
-            print("Merging variable groups...")
-            ds = xr.merge(processed_ds_list, compat='override', join='outer')
+            # Merge all subsets lazily – still no data loaded
+            print("Merging variable groups (lazy)...")
+            ds = xr.merge(subsets, compat='override', join='outer')
             print(f"Merged dataset variables: {list(ds.data_vars)}")
 
         except Exception as e:
@@ -106,7 +113,7 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             traceback.print_exc()
             return None
 
-        # Ensure CRS for clipping
+        # Ensure CRS for clipping (lazy, no data loaded)
         try:
             if not hasattr(ds, 'rio') or not ds.rio.crs:
                 ds = ds.rio.write_crs("EPSG:4326")
@@ -115,9 +122,9 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
             traceback.print_exc()
             return None
 
-        # Clip to feature boundary
+        # Clip to feature boundary (lazy)
         try:
-            print("Clipping to feature boundary...")
+            print("Clipping to feature boundary (lazy)...")
             clipped = ds.rio.clip(
                 feature_gdf.geometry.apply(mapping),
                 feature_gdf.crs,
@@ -134,12 +141,14 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
         safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
         output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
 
-        # Save with compression
+        # Save with compression – this triggers the actual computation chunk by chunk
         try:
-            print(f"Saving to {output_path}")
+            print(f"Saving to {output_path} (this will trigger computation)...")
             encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
                         for var in clipped.data_vars}
-            clipped.to_netcdf(output_path, encoding=encoding)
+            # Use compute=False to write lazily, but we want to actually write now.
+            # to_netcdf with compute=True will compute and write.
+            clipped.to_netcdf(output_path, encoding=encoding, compute=True)
         except Exception as e:
             print("Error saving file:")
             traceback.print_exc()
