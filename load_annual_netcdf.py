@@ -115,6 +115,14 @@ def load_annual_netcdf_files(data_root):
 
             print(f"  Processing variable: {nc_var}")
 
+            # Get the data array
+            data = ds[nc_var]
+
+            # If the variable has a 'step' dimension, sum over it to get daily totals
+            if 'step' in data.dims:
+                print(f"    Summing over 'step' dimension for {nc_var}...")
+                data = data.sum(dim='step')
+
             # Get aggregation method name from mapping (default 'mean')
             method_name = mapping.get('agg_method', 'mean')
             
@@ -132,8 +140,11 @@ def load_annual_netcdf_files(data_root):
 
             # Aggregate sub-daily data to daily using the callable
             try:
+                # Create a temporary dataset containing just this variable
+                # (to keep time coordinate)
+                temp_ds = data.to_dataset()
                 daily_da = netcdf_utils.aggregate_to_daily(
-                    ds, nc_var, method=method_func
+                    temp_ds, nc_var, method=method_func
                 )
             except Exception as e:
                 print(f"    Error aggregating: {e}")
