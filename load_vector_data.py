@@ -127,15 +127,36 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
                     db.add(loc)
             db.commit()
             print(f"  Upserted {len(unique_locs)} location sites.")
-            
+
             # --- 5. Construct date_id and ensure dim_time exists ---
-            df['year'] = df[year_col].astype(int)
-            df['month'] = df[month_col].astype(int)
+            # Convert year and month to numeric, coercing errors to NaN
+            df['year'] = pd.to_numeric(df[year_col], errors='coerce')
+            df['month'] = pd.to_numeric(df[month_col], errors='coerce')
+            
+            # Drop rows where year or month is NaN
+            df = df.dropna(subset=['year', 'month'])
+            
+            # Keep only realistic years (1900–2100) and months 1–12
+            df = df[(df['year'] >= 1900) & (df['year'] <= 2100) & (df['month'].between(1, 12))]
+            
+            if df.empty:
+                print("  No rows with valid year/month after cleaning. Skipping file.")
+                continue
+            
+            # Convert to integer (now safe)
+            df['year'] = df['year'].astype(int)
+            df['month'] = df['month'].astype(int)
+            
+            # Create date_id (first day of month)
             df['date_id'] = df.apply(
                 lambda r: f"{r['year']:04d}-{r['month']:02d}-01", axis=1
             )
+            
+            # Compute min and max date from valid rows
             min_date = df['date_id'].min()
             max_date = df['date_id'].max()
+            
+            # Ensure dim_time records exist for all dates in this range
             ensure_dates_exist(min_date, max_date)
 
             # --- 6. Build field mapping for direct attributes ---
@@ -173,6 +194,3 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
 
     finally:
         db.close()
-
-
-    
