@@ -36,7 +36,7 @@ NC_VARIABLE_MAP = {
 }
 
 
-
+# Vector Atlas vector occurrence mapping.
 VECTOR_OBSERVATION_MAPPING = {
     # Special keys (prefixed with '__') control processing
     '__latitude__': 'site_latitude',           # column with latitude
@@ -56,4 +56,20 @@ VECTOR_OBSERVATION_MAPPING = {
     # 'tested_for_pathogen': 'tested_for_pathogen_column',
     # 'infection_status': 'infection_status_column',
     # 'infection_rate': 'infection_rate_column',
+}
+
+
+GBIF_VECTOR_OBSERVATION_MAPPING = {
+    # Special keys for location and date
+    '__latitude__': 'decimalLatitude',
+    '__longitude__': 'decimalLongitude',
+    '__year__': 'year',
+    '__month__': 'month',
+    # Count column – if missing, loader will default to 1 per occurrence
+    '__count__': 'individualCount',
+    # Species name (use scientificName or species column)
+    'vector_species': 'scientificName',
+    # Optional: you can map other fields if you want to store them
+    # 'basis_of_record': 'basisOfRecord',
+    # 'institution_code': 'institutionCode',
 }

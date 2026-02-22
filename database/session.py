@@ -1,15 +1,17 @@
 #-*- coding:utf-8 -*-
 
 import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
 load_dotenv()
 
+project_root = Path(__file__).parent.parent
+default_db_path = project_root / os.getenv("SQL_LITE_DB_NAME")
 
-SQLITE_URL = "sqlite:///./%s" % (
-    os.getenv("SQL_LITE_DB_NAME"))
+SQLITE_URL = "sqlite:///%s" % (default_db_path)
 POSTGRES_URL = "postgresql://%s:%s@%s:%s/%s" % (
     os.getenv("DB_USER"),
     os.getenv("DB_PASSWORD"),

@@ -6,7 +6,7 @@
 import sys
 from pathlib import Path
 
-from etl.mappings import VECTOR_OBSERVATION_MAPPING
+from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING, VECTOR_OBSERVATION_MAPPING
 from load_case_data import load_case_files
 from load_environmental_data import load_environmental_factor
 from load_location_data import load_gpkg_to_location
@@ -35,14 +35,22 @@ def main():
     create_tables_if_not_exist()
 
     # Run Location data loader
-    base = Path(__file__).parent / "study_areas" / "kenya"
-    mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
-    siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
-    # Load for each county
-    if mombasa_gpkg.exists():
-        load_gpkg_to_location(mombasa_gpkg, admin_level='county')
-    if siaya_gpkg.exists():
-        load_gpkg_to_location(siaya_gpkg, admin_level='county')
+    # base = Path(__file__).parent / "study_areas" / "kenya"
+    # mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
+    # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
+
+    base = Path(__file__).parent / "study_areas" / "ghana"
+    oti_gpkg = base / "oti" / "oti.gpkg"   # adjust filename
+    # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
+
+    # Load for each study site
+    # if mombasa_gpkg.exists():
+    #     load_gpkg_to_location(mombasa_gpkg, admin_level='county')
+    # if siaya_gpkg.exists():
+    #     load_gpkg_to_location(siaya_gpkg, admin_level='county')
+
+    if oti_gpkg.exists():
+        load_gpkg_to_location(oti_gpkg, admin_level='region')
    
     # Run the annual environmental data loader (processes all NetCDF files)
     data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
@@ -50,9 +58,9 @@ def main():
 
     # Load vector observation data
     load_vector_files(
-        data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+        data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
         pattern="*.csv",
-        column_mapping=VECTOR_OBSERVATION_MAPPING
+        column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING
     )
 
     

@@ -80,25 +80,22 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
             # --- 3. Handle count (single column or list of columns) ---
             if isinstance(count_spec, str):
                 if count_spec not in df.columns:
-                    print(f"  Count column '{count_spec}' not found. Skipping file.")
-                    continue
-                df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(0)
+                    print(f"  Count column '{count_spec}' not found. Using default count=1 for all rows.")
+                    df['_count'] = 1
+                else:
+                    df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(1)
             elif isinstance(count_spec, list):
+                # For a list of columns, we sum them (but not typical for GBIF)
                 missing_counts = [c for c in count_spec if c not in df.columns]
                 if missing_counts:
-                    print(f"  Missing count columns: {missing_counts}. Skipping file.")
-                    continue
-                for c in count_spec:
-                    df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-                df['_count'] = df[count_spec].sum(axis=1)
+                    print(f"  Missing count columns: {missing_counts}. Using default count=1.")
+                    df['_count'] = 1
+                else:
+                    for c in count_spec:
+                        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+                    df['_count'] = df[count_spec].sum(axis=1)
             else:
                 print("  __count__ must be a string or a list. Skipping file.")
-                continue
-
-            # Drop rows missing coordinates or date components
-            df = df.dropna(subset=[lat_col, lon_col, year_col, month_col])
-            if df.empty:
-                print("  No rows with valid coordinates/dates.")
                 continue
 
             # --- 4. Generate location codes and upsert locations ---
