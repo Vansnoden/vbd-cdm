@@ -1,88 +1,3 @@
-# prepare_data/__init__.py
-
-# prepare_data/gee_data_download_utils.py
-#-*-coding:utf8-*-
-
-
-import ee
-
-
-
-def add_coords(feature):
-    """Add lat and lon properties derived from the feature's geometry."""
-    geom = feature.geometry()
-    coords = geom.coordinates()
-    return feature.set({
-        'lat': coords.get(1),
-        'lon': coords.get(0)
-    })
-
-
-def download_health_facility_occurrence_data(county_name: str):
-    # 1. Setup Names
-    search_name_upper = county_name.upper()
-
-    # 2. Load your Tabular Asset (No coordinates)
-    my_list = ee.FeatureCollection("projects/gen-lang-client-0359288668/assets/kenya-health-facilities-2017_08_02") \
-                .filter(ee.Filter.eq('County', search_name_upper))
-
-    # 3. Load a Spatial Reference (OSM Health Facilities - which HAVE coordinates)
-    # We use a public dataset to "find" the points for your names
-    osm_reference = ee.FeatureCollection("projects/sat-io/open-datasets/HOT_OSM/ken_health_facilities_points")
-
-    # 4. Define a Join
-    # We match 'Name' from your list to 'name' in OSM
-    save_best_join = ee.Join.saveFirst(matchKey='spatial_match')
-    
-    # Define the link: Match your "Name" column to OSM's "name" column
-    # Note: OSM names are often lowercase, so we use a fuzzy match or just equals
-    filter_match = ee.Filter.equals(
-        leftField='Name', 
-        rightField='name'
-    )
-
-    # Execute Join
-    joined_col = save_best_join.apply(my_list, osm_reference, filter_match)
-
-    # 5. Extract Coordinates from the joined "spatial_match"
-    def extract_joined_coords(feature):
-        matched_feat = ee.Feature(feature.get('spatial_match'))
-        # If no match was found, this would stay null, so we handle that:
-        return feature.set({
-            'lon': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(0), 0),
-            'lat': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(1), 0)
-        })
-
-    # Map the extraction and filter out those we couldn't find (the 0s)
-    facilities_final = joined_col.map(extract_joined_coords).filter(ee.Filter.neq('lat', 0))
-
-    # 6. Select and Export
-    facilities_export = facilities_final.select(
-        ['Name', 'Facility type', 'Owner', 'County', 'lat', 'lon']
-    )
-
-    count = facilities_export.size().getInfo()
-    print(f"Matched {count} facilities with coordinates in {search_name_upper}.")
-
-    if count > 0:
-        task = ee.batch.Export.table.toDrive(
-            collection=facilities_export,
-            description=f'{county_name}_geocoded_facilities',
-            folder='GEE_exports',
-            fileFormat='CSV'
-        )
-        task.start()
-        print("Geocoding export started.")
-
-
-if __name__ == '__main__':
-    
-    ee.Authenticate()
-    ee.Initialize(project='gen-lang-client-0359288668')
-    download_health_facility_occurrence_data(county_name='SIAYA')
-    
-
-
 # __init__.py
 
 # analysis/__init__.py
@@ -102,7 +17,7 @@ import pandas as pd
 from database.utils import batch_clip_era5
 
 BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
-shapefile = "/mnt/monadworld/library/shapefiles/kenya/kenyan-counties/County.shp"
+shapefile = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gha_admin_boundaries.shp/gha_admin1.shp"
 
 print("\nBatch processing multiple GRIB files")
 grib_files = [
@@ -114,8 +29,8 @@ batch_results = batch_clip_era5(
     grib_files=grib_files,
     shapefile_path=shapefile,
     filter_params=[
-        {'column': 'COUNTY', 'value': 'Mombasa'},
-        {'column': 'COUNTY', 'value': 'Siaya'}
+        {'column': 'adm1_name', 'value': 'Greater Accra'},
+        # {'column': 'COUNTY', 'value': 'Siaya'}
     ],
     output_base_dir=BASE_DIR + '/clipped/batch_results'
 )
@@ -731,15 +646,17 @@ class EnvironmentalFactorResponse(EnvironmentalFactorCreate):
 #-*- coding:utf-8 -*-
 
 import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
 load_dotenv()
 
+project_root = Path(__file__).parent.parent
+default_db_path = project_root / os.getenv("SQL_LITE_DB_NAME")
 
-SQLITE_URL = "sqlite:///./%s" % (
-    os.getenv("SQL_LITE_DB_NAME"))
+SQLITE_URL = "sqlite:///%s" % (default_db_path)
 POSTGRES_URL = "postgresql://%s:%s@%s:%s/%s" % (
     os.getenv("DB_USER"),
     os.getenv("DB_PASSWORD"),
@@ -1621,7 +1538,7 @@ NC_VARIABLE_MAP = {
 }
 
 
-
+# Vector Atlas vector occurrence mapping.
 VECTOR_OBSERVATION_MAPPING = {
     # Special keys (prefixed with '__') control processing
     '__latitude__': 'site_latitude',           # column with latitude
@@ -1641,6 +1558,22 @@ VECTOR_OBSERVATION_MAPPING = {
     # 'tested_for_pathogen': 'tested_for_pathogen_column',
     # 'infection_status': 'infection_status_column',
     # 'infection_rate': 'infection_rate_column',
+}
+
+
+GBIF_VECTOR_OBSERVATION_MAPPING = {
+    # Special keys for location and date
+    '__latitude__': 'decimalLatitude',
+    '__longitude__': 'decimalLongitude',
+    '__year__': 'year',
+    '__month__': 'month',
+    # Count column – if missing, loader will default to 1 per occurrence
+    '__count__': 'individualCount',
+    # Species name (use scientificName or species column)
+    'vector_species': 'scientificName',
+    # Optional: you can map other fields if you want to store them
+    # 'basis_of_record': 'basisOfRecord',
+    # 'institution_code': 'institutionCode',
 }
 # etl/netcdf_utils.py
 # etl/netcdf_utils.py
@@ -2251,7 +2184,7 @@ def load_gpkg_to_location(gpkg_path, admin_level, layer=None, parent_code=None):
             # Try to get a name from common attribute fields
             # Adjust these field names to match your actual data
             name = None
-            for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin']:
+            for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin', 'adm1_name']:
                 if col in row and row[col]:
                     name = str(row[col])
                     break
@@ -2399,25 +2332,22 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
             # --- 3. Handle count (single column or list of columns) ---
             if isinstance(count_spec, str):
                 if count_spec not in df.columns:
-                    print(f"  Count column '{count_spec}' not found. Skipping file.")
-                    continue
-                df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(0)
+                    print(f"  Count column '{count_spec}' not found. Using default count=1 for all rows.")
+                    df['_count'] = 1
+                else:
+                    df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(1)
             elif isinstance(count_spec, list):
+                # For a list of columns, we sum them (but not typical for GBIF)
                 missing_counts = [c for c in count_spec if c not in df.columns]
                 if missing_counts:
-                    print(f"  Missing count columns: {missing_counts}. Skipping file.")
-                    continue
-                for c in count_spec:
-                    df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-                df['_count'] = df[count_spec].sum(axis=1)
+                    print(f"  Missing count columns: {missing_counts}. Using default count=1.")
+                    df['_count'] = 1
+                else:
+                    for c in count_spec:
+                        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+                    df['_count'] = df[count_spec].sum(axis=1)
             else:
                 print("  __count__ must be a string or a list. Skipping file.")
-                continue
-
-            # Drop rows missing coordinates or date components
-            df = df.dropna(subset=[lat_col, lon_col, year_col, month_col])
-            if df.empty:
-                print("  No rows with valid coordinates/dates.")
                 continue
 
             # --- 4. Generate location codes and upsert locations ---
@@ -2427,8 +2357,10 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
                 lambda r: generate_location_code(r['_lat'], r['_lon']), axis=1
             )
 
+            # Drop duplicates on location_code (keep first occurrence)
+            unique_locs = df[['location_code', '_lat', '_lon']].drop_duplicates(subset=['location_code'])
+
             # Upsert unique locations
-            unique_locs = df[['location_code', '_lat', '_lon']].drop_duplicates()
             for _, row in unique_locs.iterrows():
                 existing = db.query(models.Location).filter_by(location_code=row['location_code']).first()
                 if not existing:
@@ -2446,13 +2378,34 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
             print(f"  Upserted {len(unique_locs)} location sites.")
 
             # --- 5. Construct date_id and ensure dim_time exists ---
-            df['year'] = df[year_col].astype(int)
-            df['month'] = df[month_col].astype(int)
+            # Convert year and month to numeric, coercing errors to NaN
+            df['year'] = pd.to_numeric(df[year_col], errors='coerce')
+            df['month'] = pd.to_numeric(df[month_col], errors='coerce')
+            
+            # Drop rows where year or month is NaN
+            df = df.dropna(subset=['year', 'month'])
+            
+            # Keep only realistic years (1900–2100) and months 1–12
+            df = df[(df['year'] >= 1900) & (df['year'] <= 2100) & (df['month'].between(1, 12))]
+            
+            if df.empty:
+                print("  No rows with valid year/month after cleaning. Skipping file.")
+                continue
+            
+            # Convert to integer (now safe)
+            df['year'] = df['year'].astype(int)
+            df['month'] = df['month'].astype(int)
+            
+            # Create date_id (first day of month)
             df['date_id'] = df.apply(
                 lambda r: f"{r['year']:04d}-{r['month']:02d}-01", axis=1
             )
+            
+            # Compute min and max date from valid rows
             min_date = df['date_id'].min()
             max_date = df['date_id'].max()
+            
+            # Ensure dim_time records exist for all dates in this range
             ensure_dates_exist(min_date, max_date)
 
             # --- 6. Build field mapping for direct attributes ---
@@ -2490,9 +2443,6 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
 
     finally:
         db.close()
-
-
-    
 # main.py
 #!/usr/bin/env python
 
@@ -2502,7 +2452,7 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_k
 import sys
 from pathlib import Path
 
-from etl.mappings import VECTOR_OBSERVATION_MAPPING
+from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING, VECTOR_OBSERVATION_MAPPING
 from load_case_data import load_case_files
 from load_environmental_data import load_environmental_factor
 from load_location_data import load_gpkg_to_location
@@ -2516,6 +2466,7 @@ from database.session import engine, Base
 from database.utils import ensure_dates_exist
 from etl.loaders import DatabaseLoader
 from database.session import SessionLocal
+from load_annual_netcdf import load_annual_netcdf_files
 
 
 def create_tables_if_not_exist():
@@ -2530,34 +2481,121 @@ def main():
     create_tables_if_not_exist()
 
     # Run Location data loader
-    base = Path(__file__).parent / "study_areas" / "kenya"
-    mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
-    siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
-    # Load for each county
-    if mombasa_gpkg.exists():
-        load_gpkg_to_location(mombasa_gpkg, admin_level='county')
-    if siaya_gpkg.exists():
-        load_gpkg_to_location(siaya_gpkg, admin_level='county')
-   
-    # Run the environmental data loader
-    load_environmental_factor(
-        start_date = '2024-01-01', 
-        end_date = '2024-12-31',
-        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2024_data'
-    )
-    load_environmental_factor(
-        start_date = '2025-01-01', 
-        end_date = '2025-12-31',
-        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2025_data'
-    )
+    # base = Path(__file__).parent / "study_areas" / "kenya"
+    # mombasa_gpkg = base / "mombasa_county" / "mombasa_county.gpkg"   # adjust filename
+    # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
 
+    base = Path(__file__).parent / "study_areas" / "ghana"
+    region_gpkg = base / "greater_accra.gpkg"   # adjust filename
+    # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
+
+    # Load for each study site
+    # if mombasa_gpkg.exists():
+    #     load_gpkg_to_location(mombasa_gpkg, admin_level='county')
+    # if siaya_gpkg.exists():
+    #     load_gpkg_to_location(siaya_gpkg, admin_level='county')
+
+    if region_gpkg.exists():
+        load_gpkg_to_location(region_gpkg, admin_level='region')
+   
+    # Run the annual environmental data loader (processes all NetCDF files)
+    data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+    load_annual_netcdf_files(data_root)   # <-- this loads both t2m and tp
+
+    # Load vector observation data
     load_vector_files(
-        data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+        data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
         pattern="*.csv",
-        column_mapping=VECTOR_OBSERVATION_MAPPING
+        column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+        sep='\t' 
     )
 
     
 if __name__ == "__main__":
     main()
+
+# prepare_data/__init__.py
+
+# prepare_data/gee_data_download_utils.py
+#-*-coding:utf8-*-
+
+
+import ee
+
+
+
+def add_coords(feature):
+    """Add lat and lon properties derived from the feature's geometry."""
+    geom = feature.geometry()
+    coords = geom.coordinates()
+    return feature.set({
+        'lat': coords.get(1),
+        'lon': coords.get(0)
+    })
+
+
+def download_health_facility_occurrence_data(county_name: str):
+    # 1. Setup Names
+    search_name_upper = county_name.upper()
+
+    # 2. Load your Tabular Asset (No coordinates)
+    my_list = ee.FeatureCollection("projects/gen-lang-client-0359288668/assets/kenya-health-facilities-2017_08_02") \
+                .filter(ee.Filter.eq('County', search_name_upper))
+
+    # 3. Load a Spatial Reference (OSM Health Facilities - which HAVE coordinates)
+    # We use a public dataset to "find" the points for your names
+    osm_reference = ee.FeatureCollection("projects/sat-io/open-datasets/HOT_OSM/ken_health_facilities_points")
+
+    # 4. Define a Join
+    # We match 'Name' from your list to 'name' in OSM
+    save_best_join = ee.Join.saveFirst(matchKey='spatial_match')
+    
+    # Define the link: Match your "Name" column to OSM's "name" column
+    # Note: OSM names are often lowercase, so we use a fuzzy match or just equals
+    filter_match = ee.Filter.equals(
+        leftField='Name', 
+        rightField='name'
+    )
+
+    # Execute Join
+    joined_col = save_best_join.apply(my_list, osm_reference, filter_match)
+
+    # 5. Extract Coordinates from the joined "spatial_match"
+    def extract_joined_coords(feature):
+        matched_feat = ee.Feature(feature.get('spatial_match'))
+        # If no match was found, this would stay null, so we handle that:
+        return feature.set({
+            'lon': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(0), 0),
+            'lat': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(1), 0)
+        })
+
+    # Map the extraction and filter out those we couldn't find (the 0s)
+    facilities_final = joined_col.map(extract_joined_coords).filter(ee.Filter.neq('lat', 0))
+
+    # 6. Select and Export
+    facilities_export = facilities_final.select(
+        ['Name', 'Facility type', 'Owner', 'County', 'lat', 'lon']
+    )
+
+    count = facilities_export.size().getInfo()
+    print(f"Matched {count} facilities with coordinates in {search_name_upper}.")
+
+    if count > 0:
+        task = ee.batch.Export.table.toDrive(
+            collection=facilities_export,
+            description=f'{county_name}_geocoded_facilities',
+            folder='GEE_exports',
+            fileFormat='CSV'
+        )
+        task.start()
+        print("Geocoding export started.")
+
+
+if __name__ == '__main__':
+    
+    ee.Authenticate()
+    ee.Initialize(project='gen-lang-client-0359288668')
+    download_health_facility_occurrence_data(county_name='SIAYA')
+    
+
 

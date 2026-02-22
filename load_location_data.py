@@ -31,7 +31,7 @@ def load_gpkg_to_location(gpkg_path, admin_level, layer=None, parent_code=None):
             # Try to get a name from common attribute fields
             # Adjust these field names to match your actual data
             name = None
-            for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin']:
+            for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin', 'adm1_name']:
                 if col in row and row[col]:
                     name = str(row[col])
                     break

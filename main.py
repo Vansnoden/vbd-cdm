@@ -40,7 +40,7 @@ def main():
     # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
 
     base = Path(__file__).parent / "study_areas" / "ghana"
-    oti_gpkg = base / "oti" / "oti.gpkg"   # adjust filename
+    region_gpkg = base / "greater_accra.gpkg"   # adjust filename
     # siaya_gpkg = base / "siaya_county" / "siaya_county.gpkg"
 
     # Load for each study site
@@ -49,8 +49,8 @@ def main():
     # if siaya_gpkg.exists():
     #     load_gpkg_to_location(siaya_gpkg, admin_level='county')
 
-    if oti_gpkg.exists():
-        load_gpkg_to_location(oti_gpkg, admin_level='region')
+    if region_gpkg.exists():
+        load_gpkg_to_location(region_gpkg, admin_level='region')
    
     # Run the annual environmental data loader (processes all NetCDF files)
     data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
@@ -60,7 +60,8 @@ def main():
     load_vector_files(
         data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
         pattern="*.csv",
-        column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING
+        column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+        sep='\t' 
     )
 
     

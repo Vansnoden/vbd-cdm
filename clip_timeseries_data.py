@@ -18,7 +18,7 @@ batch_results = batch_clip_era5(
     grib_files=grib_files,
     shapefile_path=shapefile,
     filter_params=[
-        {'column': 'adm1_name', 'value': 'Oti'},
+        {'column': 'adm1_name', 'value': 'Greater Accra'},
         # {'column': 'COUNTY', 'value': 'Siaya'}
     ],
     output_base_dir=BASE_DIR + '/clipped/batch_results'
