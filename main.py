@@ -20,6 +20,7 @@ from database.session import engine, Base
 from database.utils import ensure_dates_exist
 from etl.loaders import DatabaseLoader
 from database.session import SessionLocal
+from load_annual_netcdf import load_annual_netcdf_files
 
 
 def create_tables_if_not_exist():
@@ -43,19 +44,17 @@ def main():
     if siaya_gpkg.exists():
         load_gpkg_to_location(siaya_gpkg, admin_level='county')
    
-    # Run the environmental data loader
-    load_environmental_factor(
-        start_date = '2024-01-01', 
-        end_date = '2024-12-31',
-        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2024_data'
-    )
-    load_environmental_factor(
-        start_date = '2025-01-01', 
-        end_date = '2025-12-31',
-        data_dir = '/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2025_data'
+    # Run the annual environmental data loader (processes all NetCDF files)
+    data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+    load_annual_netcdf_files(data_root)   # <-- this loads both t2m and tp
+
+    # Load vector observation data
+    load_vector_files(
+        data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+        pattern="*.csv",
+        column_mapping=VECTOR_OBSERVATION_MAPPING
     )
 
-    load_vector_files(data_dir="/path/to/vector_data", pattern="*.csv", column_mapping=VECTOR_OBSERVATION_MAPPING)
-    # load_case_files(data_dir="/path/to/lab_data", pattern="*.xlsx", column_mapping=lab_mapping)
+    
 if __name__ == "__main__":
     main()

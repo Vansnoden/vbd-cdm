@@ -1,28 +1,37 @@
 #!/usr/bin/env python
-# load_vector_data.py
+# load_vector_data.py – Generic loader using column mapping
 
 import sys
 from pathlib import Path
 
-# Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import pandas as pd
+from shapely.geometry import Point
+
 from database.session import SessionLocal
 from database import models, schemas
-from etl.loaders import DatabaseLoader
 from database.utils import ensure_dates_exist
+from etl.loaders import DatabaseLoader
 
 
-def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, date_format=None, **pandas_kwargs):
+def generate_location_code(lat, lon):
+    """Generate a unique location code from coordinates."""
+    # Replace negative sign with 'n' and decimal point with '_' for readability
+    return f"point_{lat:.4f}_{lon:.4f}".replace('-', 'n').replace('.', '_')
+
+
+def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, **pandas_kwargs):
     """
-    Load all vector observation files from data_dir matching pattern.
-    
-    :param data_dir: Directory containing the files.
-    :param pattern: Glob pattern (e.g., "*.csv", "*.xlsx").
-    :param column_mapping: Dict mapping file columns to model field names.
-    :param date_format: Optional strptime format for date columns (if not already YYYY-MM-DD).
-    :param pandas_kwargs: Additional arguments passed to pandas read_*.
+    Load vector observation files using a column mapping dictionary.
+
+    The column_mapping must contain special keys:
+        __latitude__  : name of column with latitude
+        __longitude__ : name of column with longitude
+        __year__      : name of column with year
+        __month__     : name of column with month
+        __count__     : either a single column name or a list of column names to sum
+    Additional keys (not starting with '__') are mapped directly to VectorObservation fields.
     """
     data_dir = Path(data_dir)
     files = list(data_dir.glob(pattern))
@@ -35,86 +44,135 @@ def load_vector_files(data_dir, pattern="*.csv", column_mapping=None, date_forma
         loader = DatabaseLoader(db)
 
         for file_path in files:
-            print(f"Processing {file_path.name}...")
-            # Read file based on extension
+            print(f"\nProcessing {file_path.name}...")
+
+            # --- 1. Read file ---
             if file_path.suffix.lower() == '.csv':
                 df = pd.read_csv(file_path, **pandas_kwargs)
             elif file_path.suffix.lower() in ['.xls', '.xlsx']:
                 df = pd.read_excel(file_path, **pandas_kwargs)
             else:
-                print(f"Skipping unsupported file type: {file_path.suffix}")
+                print(f"  Skipping unsupported file type: {file_path.suffix}")
                 continue
 
-            # Apply column mapping if provided
-            if column_mapping:
-                df = df.rename(columns=column_mapping)
+            if df.empty:
+                print("  File is empty.")
+                continue
 
-            # Ensure required columns exist
-            required = ['location_code', 'date_id', 'vector_species']
-            missing = [col for col in required if col not in df.columns]
+            # --- 2. Extract required columns from mapping ---
+            lat_col = column_mapping.get('__latitude__')
+            lon_col = column_mapping.get('__longitude__')
+            year_col = column_mapping.get('__year__')
+            month_col = column_mapping.get('__month__')
+            count_spec = column_mapping.get('__count__')
+
+            if not all([lat_col, lon_col, year_col, month_col, count_spec]):
+                print("  Missing one or more required mapping keys (__latitude__, __longitude__, __year__, __month__, __count__). Skipping file.")
+                continue
+
+            # Check that required columns exist
+            required_cols = [lat_col, lon_col, year_col, month_col]
+            missing = [c for c in required_cols if c not in df.columns]
             if missing:
-                print(f"  Missing required columns: {missing}. Skipping file.")
+                print(f"  Missing columns: {missing}. Skipping file.")
                 continue
 
-            # Convert date_id to YYYY-MM-DD if needed
-            if date_format and 'date_id' in df.columns:
-                # Assuming date_id column contains dates in a custom format
-                df['date_id'] = pd.to_datetime(df['date_id'], format=date_format).dt.strftime('%Y-%m-%d')
-            elif 'date_id' in df.columns and not pd.api.types.is_string_dtype(df['date_id']):
-                # If it's datetime, convert to string
-                df['date_id'] = pd.to_datetime(df['date_id']).dt.strftime('%Y-%m-%d')
-
-            # Optional: ensure dim_time records exist for all dates in this file
-            if 'date_id' in df.columns:
-                min_date = df['date_id'].min()
-                max_date = df['date_id'].max()
-                ensure_dates_exist(min_date, max_date)
-
-            # Convert to list of dicts and validate
-            records = df.to_dict('records')
-            validated = []
-            for rec in records:
-                try:
-                    # Filter to only fields present in schema
-                    schema_fields = schemas.VectorObservationCreate.model_fields.keys()
-                    filtered = {k: v for k, v in rec.items() if k in schema_fields and pd.notna(v)}
-                    validated_rec = schemas.VectorObservationCreate(**filtered)
-                    validated.append(validated_rec.model_dump())
-                except Exception as e:
-                    print(f"  Validation error for record: {rec}")
-                    print(f"  Error: {e}")
-                    # Optionally skip or raise
-
-            if validated:
-                loader.load_from_dataframe(pd.DataFrame(validated), models.VectorObservation)
-                print(f"  Loaded {len(validated)} vector observations from {file_path.name}")
+            # --- 3. Handle count (single column or list of columns) ---
+            if isinstance(count_spec, str):
+                if count_spec not in df.columns:
+                    print(f"  Count column '{count_spec}' not found. Skipping file.")
+                    continue
+                df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(0)
+            elif isinstance(count_spec, list):
+                missing_counts = [c for c in count_spec if c not in df.columns]
+                if missing_counts:
+                    print(f"  Missing count columns: {missing_counts}. Skipping file.")
+                    continue
+                for c in count_spec:
+                    df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+                df['_count'] = df[count_spec].sum(axis=1)
             else:
-                print(f"  No valid records in {file_path.name}")
+                print("  __count__ must be a string or a list. Skipping file.")
+                continue
+
+            # Drop rows missing coordinates or date components
+            df = df.dropna(subset=[lat_col, lon_col, year_col, month_col])
+            if df.empty:
+                print("  No rows with valid coordinates/dates.")
+                continue
+
+            # --- 4. Generate location codes and upsert locations ---
+            df['_lat'] = df[lat_col].astype(float)
+            df['_lon'] = df[lon_col].astype(float)
+            df['location_code'] = df.apply(
+                lambda r: generate_location_code(r['_lat'], r['_lon']), axis=1
+            )
+
+            # Drop duplicates on location_code (keep first occurrence)
+            unique_locs = df[['location_code', '_lat', '_lon']].drop_duplicates(subset=['location_code'])
+
+            # Upsert unique locations
+            for _, row in unique_locs.iterrows():
+                existing = db.query(models.Location).filter_by(location_code=row['location_code']).first()
+                if not existing:
+                    point = Point(row['_lon'], row['_lat'])
+                    loc = models.Location(
+                        location_code=row['location_code'],
+                        name=f"Sampling site at {row['_lat']:.4f}, {row['_lon']:.4f}",
+                        admin_level='site',
+                        geometry_wkt=point.wkt,
+                        centroid_lat=row['_lat'],
+                        centroid_lon=row['_lon']
+                    )
+                    db.add(loc)
+            db.commit()
+            print(f"  Upserted {len(unique_locs)} location sites.")
+            
+            # --- 5. Construct date_id and ensure dim_time exists ---
+            df['year'] = df[year_col].astype(int)
+            df['month'] = df[month_col].astype(int)
+            df['date_id'] = df.apply(
+                lambda r: f"{r['year']:04d}-{r['month']:02d}-01", axis=1
+            )
+            min_date = df['date_id'].min()
+            max_date = df['date_id'].max()
+            ensure_dates_exist(min_date, max_date)
+
+            # --- 6. Build field mapping for direct attributes ---
+            field_mapping = {}
+            for key, value in column_mapping.items():
+                if not key.startswith('__') and value in df.columns:
+                    field_mapping[key] = value
+
+            # --- 7. Create validated records ---
+            obs_records = []
+            for _, row in df.iterrows():
+                record = {
+                    'location_code': row['location_code'],
+                    'date_id': row['date_id'],
+                    'count': int(row['_count']),
+                }
+                # Add directly mapped fields
+                for out_field, src_col in field_mapping.items():
+                    val = row[src_col]
+                    if pd.notna(val):
+                        record[out_field] = val
+
+                # Validate with Pydantic
+                try:
+                    validated = schemas.VectorObservationCreate(**record)
+                    obs_records.append(validated.model_dump())
+                except Exception as e:
+                    print(f"  Validation error for record {record}: {e}")
+
+            if obs_records:
+                loader.load_from_dataframe(pd.DataFrame(obs_records), models.VectorObservation)
+                print(f"  Loaded {len(obs_records)} vector observations.")
+            else:
+                print("  No valid observation records.")
 
     finally:
         db.close()
 
 
-if __name__ == "__main__":
-    # Example usage (adjust to your actual file layout)
-    mapping = {
-        'Trap ID': 'trap_id',
-        'Location': 'location_code',
-        'Date': 'date_id',
-        'Species': 'vector_species',
-        'Subspecies': 'vector_subspecies',
-        'Life Stage': 'life_stage',
-        'Sex': 'sex',
-        'Collection Method': 'collection_method',
-        'Count': 'count',
-        'Density': 'density_per_trap',
-        'Tested For': 'tested_for_pathogen',
-        'Infection Status': 'infection_status',
-        'Infection Rate': 'infection_rate'
-    }
-    load_vector_files(
-        data_dir="/path/to/your/vector_data",
-        pattern="*.xlsx",
-        column_mapping=mapping,
-        date_format="%d/%m/%Y"   # adjust to your date format
-    )
+    
