@@ -23,17 +23,26 @@ from etl.mappings import NC_VARIABLE_MAP
 def parse_filename(filepath):
     """
     Extract year and location from filename.
-    Expected pattern: {year}_data_{location}_{id}.nc
-    Example: 2024_data_Mombasa_141.nc
+    Expected patterns:
+        {year}_data_{location}_{id}.nc   (e.g., 2024_data_Mombasa_141.nc)
+        {year}_data_{location}.nc        (e.g., 2024_data_Greater_Accra.nc)
     Returns (year, location) or (None, None) if no match.
     """
-    pattern = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z]+)_\d+\.nc$'
-    match = re.search(pattern, filepath.name)
-    if not match:
-        return None, None
-    year = int(match.group('year'))
-    location = match.group('location').lower()
-    return year, location
+    # Pattern with ID
+    pattern1 = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z_]+)_\d+\.nc$'
+    match = re.search(pattern1, filepath.name)
+    if match:
+        year = int(match.group('year'))
+        location = match.group('location').lower()
+        return year, location
+    # Pattern without ID
+    pattern2 = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z_]+)\.nc$'
+    match = re.search(pattern2, filepath.name)
+    if match:
+        year = int(match.group('year'))
+        location = match.group('location').lower()
+        return year, location
+    return None, None
 
 
 def load_annual_netcdf_files(data_root):
@@ -100,7 +109,6 @@ def load_annual_netcdf_files(data_root):
         lat, lon = geom_info['centroid_lat'], geom_info['centroid_lon']
 
         # Process each variable defined in the mapping
-
         for nc_var, mapping in NC_VARIABLE_MAP.items():
             if nc_var not in ds:
                 continue

@@ -763,68 +763,26 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
         lon_slice = slice(bbox[0] - buffer_degrees, bbox[2] + buffer_degrees)
         lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
 
+        # Smaller chunk size to control memory
+        chunk_size = 10  # time steps per chunk
+
+        # Define daily aggregation methods per variable
+        agg_methods = {
+            't2m': 'mean',   # 2m temperature → daily mean
+            'tp': 'sum',      # total precipitation → daily sum
+        }
+
         try:
-            # Open all variable groups lazily with Dask chunks
+            # Open all variable groups lazily
             print("Opening GRIB file with lazy loading...")
             ds_list = cfgrib.open_datasets(
                 grib_file_path,
-                chunks={'time': 100},          # Load time in chunks of 100 steps
+                chunks={'time': chunk_size},
                 backend_kwargs={'errors': 'raise'}
             )
             print(f"Found {len(ds_list)} separate variable groups.")
-
-            # Subset each dataset to the bounding box and drop auxiliary variables
-            subsets = []
-            for i, ds in enumerate(ds_list):
-                print(f"  Processing group {i+1}: {list(ds.data_vars)}")
-                # Determine dimension names (CF convention)
-                lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
-                lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
-                # Subset – this returns a lazy view (no data loaded yet)
-                ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
-                
-                # Drop variables that often cause merge conflicts (non‑data coordinates)
-                vars_to_drop = ['step', 'valid_time', 'number', 'surface', 'isobaricInhPa']
-                to_drop = [v for v in vars_to_drop if v in ds_sel.variables]
-                if to_drop:
-                    ds_sel = ds_sel.drop_vars(to_drop)
-                
-                subsets.append(ds_sel)
-
-            if not subsets:
-                raise ValueError("No datasets loaded from GRIB file.")
-
-            # Merge all subsets lazily – still no data loaded
-            print("Merging variable groups (lazy)...")
-            ds = xr.merge(subsets, compat='override', join='outer')
-            print(f"Merged dataset variables: {list(ds.data_vars)}")
-
         except Exception as e:
-            print(f"Error loading/processing GRIB: {e}")
-            traceback.print_exc()
-            return None
-
-        # Ensure CRS for clipping (lazy, no data loaded)
-        try:
-            if not hasattr(ds, 'rio') or not ds.rio.crs:
-                ds = ds.rio.write_crs("EPSG:4326")
-        except Exception as e:
-            print("Error setting CRS:")
-            traceback.print_exc()
-            return None
-
-        # Clip to feature boundary (lazy)
-        try:
-            print("Clipping to feature boundary (lazy)...")
-            clipped = ds.rio.clip(
-                feature_gdf.geometry.apply(mapping),
-                feature_gdf.crs,
-                all_touched=True,
-                drop=True
-            )
-        except Exception as e:
-            print("Error during clipping:")
-            traceback.print_exc()
+            print(f"Error opening GRIB file: {e}")
             return None
 
         # Generate output filename
@@ -832,20 +790,58 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
         safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
         output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
 
-        # Save with compression – this triggers the actual computation chunk by chunk
-        try:
-            print(f"Saving to {output_path} (this will trigger computation)...")
-            encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
-                        for var in clipped.data_vars}
-            # Use compute=False to write lazily, but we want to actually write now.
-            # to_netcdf with compute=True will compute and write.
-            clipped.to_netcdf(output_path, encoding=encoding, compute=True)
-        except Exception as e:
-            print("Error saving file:")
-            traceback.print_exc()
+        daily_datasets = []  # store daily versions of each variable
+
+        for i, ds in enumerate(ds_list):
+            print(f"  Processing group {i+1}: {list(ds.data_vars)}")
+            # Determine dimension names (CF convention)
+            lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
+            lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
+            # Subset to bounding box
+            ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
+
+            # Ensure CRS for clipping
+            ds_sel = ds_sel.rio.write_crs("EPSG:4326")
+            # Clip to feature boundary
+            try:
+                clipped = ds_sel.rio.clip(
+                    feature_gdf.geometry.apply(mapping),
+                    feature_gdf.crs,
+                    all_touched=True,
+                    drop=True
+                )
+            except Exception as e:
+                print(f"Error during clipping for group {i+1}: {e}")
+                continue
+
+            # For each variable in this group, aggregate to daily
+            for var in clipped.data_vars:
+                method_name = agg_methods.get(var, 'mean')
+                print(f"    Aggregating {var} to daily using '{method_name}'...")
+                resampler = clipped[var].resample(time='1D')
+                daily = getattr(resampler, method_name)()
+                daily_ds = daily.to_dataset()
+                daily_datasets.append(daily_ds)
+
+        if not daily_datasets:
+            print("No data after processing.")
             return None
 
-        print(f"Success! Clipped shape: {clipped[list(clipped.data_vars)[0]].shape}")
+        # Merge all daily datasets (they now share the same time dimension)
+        print("Merging daily datasets...")
+        merged = xr.merge(daily_datasets, compat='override', join='outer')
+        print(f"Merged dataset variables: {list(merged.data_vars)}")
+
+        # Save with compression
+        try:
+            encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
+                        for var in merged.data_vars}
+            merged.to_netcdf(output_path, encoding=encoding, compute=True)
+            print(f"Success! Output saved to {output_path}")
+        except Exception as e:
+            print(f"Error saving file: {e}")
+            return None
+
         return output_path
 
 
@@ -861,7 +857,7 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
 
         # Try to create a meaningful feature name
         feature_name = None
-        for name_col in ['NAME', 'name', 'COUNTY', 'county', 'ADM2_NAME', 'ADM1_NAME']:
+        for name_col in ['NAME', 'name', 'COUNTY', 'county', 'ADM2_NAME', 'ADM1_NAME', 'adm1_name']:
             if name_col in row.index and pd.notna(row[name_col]):
                 feature_name = str(row[name_col])
                 break
