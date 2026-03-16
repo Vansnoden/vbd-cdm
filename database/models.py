@@ -1,6 +1,8 @@
 #-*- coding:utf-8 -*-
 
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, Text, UniqueConstraint
+import datetime
+
+from sqlalchemy import Column, DateTime, Integer, String, Float, Date, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 from geoalchemy2 import Geometry 
@@ -66,6 +68,41 @@ class HostCase(Base):
     location = relationship("Location")
     onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
     reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
+
+
+class DiseaseBurden(Base):
+    """Disease burden data from sources like Malaria Atlas Project"""
+    __tablename__ = "disease_burden"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+    year = Column(Integer, nullable=False)
+    disease = Column(String(50), nullable=False)  # 'malaria', 'dengue', etc.
+    
+    # Incidence and prevalence metrics
+    incidence_rate = Column(Float)  # Cases per 1000 population per year
+    prevalence_rate = Column(Float)  # Percentage of population infected
+    mortality_rate = Column(Float)  # Deaths per 1000 population per year
+    cases_lower = Column(Float)  # Lower confidence interval
+    cases_upper = Column(Float)  # Upper confidence interval
+    cases_mean = Column(Float)   # Mean estimate
+    
+    # Metadata
+    source = Column(String(200))  # e.g., 'Malaria Atlas Project'
+    version = Column(String(50))   # Dataset version
+    raster_file = Column(String(500))  # Original raster file name
+    extraction_method = Column(String(50))  # 'mean', 'median', etc.
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    
+    # Relationships
+    location = relationship("Location")
+    
+    __table_args__ = (
+        UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease'),
+    )
 
 
 class VectorObservation(Base):
@@ -168,3 +205,80 @@ class SocioEconomic(Base):
     indicator_name = Column(String(100))  # e.g., 'ITN_use', 'poverty_rate'
     indicator_value = Column(Float)
     source = Column(String(100))
+
+
+
+# class Intervention(Base):
+#     __tablename__ = "intervention"
+    
+#     id = Column(Integer, primary_key=True)
+#     campaign_id = Column(String(100), nullable=True)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     year = Column(Integer, nullable=False)
+#     month = Column(Integer, nullable=False)
+#     intervention_type = Column(String(50), nullable=False)
+#     sub_type = Column(String(100))
+#     coverage_numeric = Column(Float)
+#     coverage_unit = Column(String(50))
+#     coverage_percent = Column(Float)
+#     target_population = Column(Integer)
+#     source = Column(String(200))
+#     notes = Column(Text)
+#     last_updated = Column(DateTime, default=datetime.utcnow)
+    
+#     __table_args__ = (
+#         UniqueConstraint('location_code', 'year', 'month', 'intervention_type', 
+#                          name='uq_intervention_loc_date_type'),
+#     )
+
+
+# class CaseLine(Base):
+#     __tablename__ = "case_line"
+
+#     id = Column(Integer, primary_key=True)
+#     case_identifier = Column(String(100), unique=True)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     date_onset = Column(Date)
+#     date_report = Column(Date)
+#     date_confirmation = Column(Date)
+#     disease = Column(String(50), nullable=False)
+#     pathogen = Column(String(100))
+#     case_status = Column(String(20), nullable=False)
+#     confirmation_method = Column(String(50))
+#     age_years = Column(Integer)
+#     age_group = Column(String(20))
+#     sex = Column(String(10))
+#     pregnancy_status = Column(String(20))
+#     severity = Column(String(20))
+#     outcome = Column(String(20))
+#     outcome_date = Column(Date)
+#     treatment = Column(String(100))
+#     source = Column(String(200))
+#     last_updated = Column(DateTime, default=datetime.utcnow)
+
+
+# class HealthFacility(Base):
+#     __tablename__ = "health_facility"
+
+#     id = Column(Integer, primary_key=True)
+#     facility_code = Column(String(50), unique=True, nullable=False)
+#     name = Column(String(200), nullable=False)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     facility_type = Column(String(50))
+#     ownership = Column(String(50))
+#     operational_status = Column(String(20), default='functional')
+#     latitude = Column(Float, nullable=False)
+#     longitude = Column(Float, nullable=False)
+#     geocoding_method = Column(String(50))
+#     address = Column(Text)
+#     catchment_population = Column(Integer)
+#     catchment_area_km2 = Column(Float)
+#     has_maternity = Column(Boolean, default=False)
+#     has_lab = Column(Boolean, default=False)
+#     has_microscopy = Column(Boolean, default=False)
+#     has_rdt = Column(Boolean, default=False)
+#     has_act = Column(Boolean, default=False)
+#     inpatient_beds = Column(Integer)
+#     outpatient_visits_2023 = Column(Integer)  # or use a separate year table for multiple years
+#     source = Column(String(200))
+#     last_updated = Column(DateTime)

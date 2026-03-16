@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: 435136097103
+Revision ID: 1a6dd090d18a
 Revises: 
-Create Date: 2026-02-09 08:57:09.658047
+Create Date: 2026-03-16 11:47:13.051414
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '435136097103'
+revision: str = '1a6dd090d18a'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -46,6 +46,28 @@ def upgrade() -> None:
     sa.UniqueConstraint('location_code')
     )
     op.create_index(op.f('ix_location_id'), 'location', ['id'], unique=False)
+    op.create_table('disease_burden',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('year', sa.Integer(), nullable=False),
+    sa.Column('disease', sa.String(length=50), nullable=False),
+    sa.Column('incidence_rate', sa.Float(), nullable=True),
+    sa.Column('prevalence_rate', sa.Float(), nullable=True),
+    sa.Column('mortality_rate', sa.Float(), nullable=True),
+    sa.Column('cases_lower', sa.Float(), nullable=True),
+    sa.Column('cases_upper', sa.Float(), nullable=True),
+    sa.Column('cases_mean', sa.Float(), nullable=True),
+    sa.Column('source', sa.String(length=200), nullable=True),
+    sa.Column('version', sa.String(length=50), nullable=True),
+    sa.Column('raster_file', sa.String(length=500), nullable=True),
+    sa.Column('extraction_method', sa.String(length=50), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=True),
+    sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease')
+    )
+    op.create_index(op.f('ix_disease_burden_id'), 'disease_burden', ['id'], unique=False)
     op.create_table('environmental_factor',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('location_code', sa.String(length=50), nullable=True),
@@ -66,6 +88,19 @@ def upgrade() -> None:
     sa.UniqueConstraint('location_code', 'date_id', name='uq_env_location_date')
     )
     op.create_index(op.f('ix_environmental_factor_id'), 'environmental_factor', ['id'], unique=False)
+    op.create_table('health_facility',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('facility_code', sa.String(length=50), nullable=True),
+    sa.Column('name', sa.String(length=200), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('lat', sa.Float(), nullable=True),
+    sa.Column('lon', sa.Float(), nullable=True),
+    sa.Column('type', sa.String(length=50), nullable=True),
+    sa.Column('catchment_population', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('facility_code')
+    )
     op.create_table('host_case',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('case_identifier', sa.String(length=100), nullable=True),
@@ -88,6 +123,27 @@ def upgrade() -> None:
     sa.UniqueConstraint('case_identifier')
     )
     op.create_index(op.f('ix_host_case_id'), 'host_case', ['id'], unique=False)
+    op.create_table('intervention',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('intervention_type', sa.String(length=50), nullable=True),
+    sa.Column('date_start', sa.Date(), nullable=True),
+    sa.Column('date_end', sa.Date(), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('coverage', sa.Float(), nullable=True),
+    sa.Column('target_disease', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('socioeconomic',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('year', sa.Integer(), nullable=True),
+    sa.Column('indicator_name', sa.String(length=100), nullable=True),
+    sa.Column('indicator_value', sa.Float(), nullable=True),
+    sa.Column('source', sa.String(length=100), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('vector_observation',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('location_code', sa.String(length=50), nullable=True),
@@ -107,18 +163,36 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_vector_observation_id'), 'vector_observation', ['id'], unique=False)
+    op.create_table('resistance_test',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('vector_observation_id', sa.Integer(), nullable=True),
+    sa.Column('test_type', sa.String(length=50), nullable=True),
+    sa.Column('insecticide', sa.String(length=100), nullable=True),
+    sa.Column('concentration', sa.Float(), nullable=True),
+    sa.Column('exposure_time', sa.Integer(), nullable=True),
+    sa.Column('mortality', sa.Float(), nullable=True),
+    sa.Column('resistance_status', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['vector_observation_id'], ['vector_observation.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('resistance_test')
     op.drop_index(op.f('ix_vector_observation_id'), table_name='vector_observation')
     op.drop_table('vector_observation')
+    op.drop_table('socioeconomic')
+    op.drop_table('intervention')
     op.drop_index(op.f('ix_host_case_id'), table_name='host_case')
     op.drop_table('host_case')
+    op.drop_table('health_facility')
     op.drop_index(op.f('ix_environmental_factor_id'), table_name='environmental_factor')
     op.drop_table('environmental_factor')
+    op.drop_index(op.f('ix_disease_burden_id'), table_name='disease_burden')
+    op.drop_table('disease_burden')
     op.drop_index(op.f('ix_location_id'), table_name='location')
     op.drop_table('location')
     op.drop_table('dim_time')

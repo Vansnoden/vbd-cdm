@@ -21,8 +21,9 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-from session import Base
-from models import Location, DimTime, EnvironmentalFactor, HostCase, VectorObservation
+from database.session import Base
+from database.models import Location, DimTime, EnvironmentalFactor, HostCase, VectorObservation, \
+    DiseaseBurden, HealthFacility, Intervention, ResistanceTest, SocioEconomic
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

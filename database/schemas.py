@@ -195,3 +195,57 @@ class EnvironmentalFactorResponse(EnvironmentalFactorCreate):
     id: int
     class Config:
         from_attributes = True
+
+
+# -------------------- DiseaseBurden --------------------
+class DiseaseBurdenBase(BaseModel):
+    """Base schema for disease burden data."""
+    location_code: str
+    year: int
+    disease: str
+    incidence_rate: Optional[float] = None
+    prevalence_rate: Optional[float] = None
+    mortality_rate: Optional[float] = None
+    cases_lower: Optional[float] = None
+    cases_upper: Optional[float] = None
+    cases_mean: Optional[float] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    raster_file: Optional[str] = None
+    extraction_method: Optional[str] = None
+
+
+class DiseaseBurdenCreate(DiseaseBurdenBase):
+    """Schema for creating disease burden records."""
+    pass
+
+
+class DiseaseBurdenUpdate(BaseModel):
+    """Schema for updating disease burden records."""
+    incidence_rate: Optional[float] = None
+    prevalence_rate: Optional[float] = None
+    mortality_rate: Optional[float] = None
+    cases_lower: Optional[float] = None
+    cases_upper: Optional[float] = None
+    cases_mean: Optional[float] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    extraction_method: Optional[str] = None
+
+
+class DiseaseBurdenResponse(DiseaseBurdenBase):
+    """Schema for disease burden response."""
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class DiseaseBurdenInDB(DiseaseBurdenBase):
+    """Schema for disease burden in database."""
+    id: int
+    
+    class Config:
+        from_attributes = True
