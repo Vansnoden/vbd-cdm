@@ -36,9 +36,23 @@ class Location(Base):
     geometry_wkt = Column(Text)  # WKT representation
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
-
+    country_name = Column(String)
+    country_code = Column(String)
     # Self-referential relationship
     parent = relationship("Location", remote_side=[location_code], backref="children")
+
+    def set_country_from_coords(self):
+        """
+        Automatically set country_name and country_code from centroid coordinates.
+        """
+        from database.geoutils import get_country_from_coords
+        
+        if self.centroid_lat and self.centroid_lon:
+            country_name, country_code = get_country_from_coords(
+                self.centroid_lat, self.centroid_lon
+            )
+            self.country_name = country_name
+            self.country_code = country_code
 
 
 class HostCase(Base):
@@ -176,6 +190,7 @@ class HealthFacility(Base):
     type = Column(String(50))  # hospital, clinic, dispensary
     catchment_population = Column(Integer)
 
+
 class Intervention(Base):
     __tablename__ = "intervention"
     id = Column(Integer, primary_key=True)
@@ -185,6 +200,7 @@ class Intervention(Base):
     location_code = Column(String(50), ForeignKey("location.location_code"))
     coverage = Column(Float)  # percentage or number
     target_disease = Column(String(50))  # 'malaria', 'dengue', 'both'
+
 
 class ResistanceTest(Base):
     __tablename__ = "resistance_test"
@@ -196,6 +212,7 @@ class ResistanceTest(Base):
     exposure_time = Column(Integer)  # minutes
     mortality = Column(Float)        # proportion dead
     resistance_status = Column(String(50))  # 'susceptible', 'confirmed', 'possible'
+
 
 class SocioEconomic(Base):
     __tablename__ = "socioeconomic"

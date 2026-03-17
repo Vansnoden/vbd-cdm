@@ -36,9 +36,20 @@ class DatabaseLoader:
     def load_location_from_gpkg(self, gpkg_path: Union[str, Path], 
                                 admin_level: str, 
                                 layer: Optional[str] = None,
-                                parent_code: Optional[str] = None) -> Dict[str, Any]:
+                                parent_code: Optional[str] = None,
+                                auto_populate_country: bool = True) -> Dict[str, Any]:
         """
         Load locations from a GeoPackage file.
+    
+        Args:
+            gpkg_path: Path to GeoPackage file
+            admin_level: Administrative level (country, region, district, etc.)
+            layer: Layer name within GeoPackage
+            parent_code: Parent location code
+            auto_populate_country: Whether to automatically set country from coordinates
+        
+        Returns:
+            Statistics dictionary
         """
         gpkg_path = Path(gpkg_path)
         if not gpkg_path.exists():
@@ -111,9 +122,44 @@ class DatabaseLoader:
                 stats['errors'].append(f"Row {idx}: {str(e)}")
                 logger.error(f"Error processing row {idx}: {e}")
         
+        if auto_populate_country:
+            self._populate_location_countries()
+        
         self.session.commit()
         logger.info(f"Location loading complete. Inserted: {stats['inserted']}, Updated: {stats['updated']}")
         return stats
+
+    def _populate_location_countries(self, location_ids=None):
+        """
+        Populate country fields for all locations or specific ones.
+        
+        Args:
+            location_ids: Optional list of location IDs to update. If None, updates all.
+        """
+        from database.geoutils import get_country_from_coords
+        
+        query = self.session.query(models.Location)
+        if location_ids:
+            query = query.filter(models.Location.id.in_(location_ids))
+        
+        locations = query.all()
+        updated_count = 0
+        
+        for loc in locations:
+            if loc.centroid_lat and loc.centroid_lon:
+                country_name, country_code = get_country_from_coords(
+                    loc.centroid_lat, loc.centroid_lon
+                )
+                if country_name != loc.country_name or country_code != loc.country_code:
+                    loc.country_name = country_name
+                    loc.country_code = country_code
+                    updated_count += 1
+        
+        if updated_count > 0:
+            self.session.commit()
+            print(f"Updated country info for {updated_count} locations")
+        
+        return updated_count
     
     # ==================== ENVIRONMENTAL METHODS ====================
     

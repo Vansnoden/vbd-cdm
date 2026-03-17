@@ -129,12 +129,14 @@ pyzmq==27.1.0
 rasterio==1.5.0
 referencing==0.37.0
 requests==2.32.5
+reverse_geocode==1.6.6
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1
 rfc3987-syntax==1.1.0
 rioxarray==0.21.0
 rpds-py==0.30.0
 rsa==4.9.1
+scipy==1.17.1
 seaborn==0.13.2
 Send2Trash==2.1.0
 setuptools==82.0.0

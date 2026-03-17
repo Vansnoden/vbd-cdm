@@ -10,7 +10,7 @@ sys.path.insert(0, str(project_root))
 
 from database.session import engine, Base, SessionLocal
 from etl.loaders import DatabaseLoader
-from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING
+from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING, VECTOR_ATLAS_MAPPING, VECTOR_ATLAS_SIMPLE_MAPPING
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -76,13 +76,19 @@ def run_etl_pipeline():
     try:
         # ==================== STEP 3: Load Vector Observation Data ====================
         print("\n" + "="*50)
-        print("STEP 3: Loading vector observation data from GBIF")
+        print("STEP 3: Loading vector observation data from GBIF / Vector Atlas")
         print("="*50)
         
+        # vector_stats = loader.load_vector_from_csv(
+        #     data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
+        #     pattern="*.csv",
+        #     column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+        #     sep='\t'
+        # )
         vector_stats = loader.load_vector_from_csv(
-            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
+            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
             pattern="*.csv",
-            column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+            column_mapping=VECTOR_ATLAS_SIMPLE_MAPPING,
             sep='\t'
         )
         pipeline_results['vector'] = vector_stats
