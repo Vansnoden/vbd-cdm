@@ -374,8 +374,8 @@ class DatabaseLoader:
         return stats
     
     def _process_vector_file(self, file_path: Path, column_mapping: Optional[Dict], 
-                            **pandas_kwargs) -> Dict[str, Any]:
-        """Process a single vector observation file."""
+                        **pandas_kwargs) -> Dict[str, Any]:
+        """Process a single vector observation file with enhanced GBIF support."""
         from database.utils import ensure_dates_exist
         
         stats = {
@@ -401,21 +401,79 @@ class DatabaseLoader:
         year_col = column_mapping.get('__year__')
         month_col = column_mapping.get('__month__')
         count_spec = column_mapping.get('__count__')
+        event_date_col = column_mapping.get('__event_date_full__')
         
+        # ===== ENHANCED DATE HANDLING =====
+        # Process year and month, using eventDate as fallback if needed
+        if year_col in df.columns and month_col in df.columns:
+            df['year'] = pd.to_numeric(df[year_col], errors='coerce')
+            df['month'] = pd.to_numeric(df[month_col], errors='coerce')
+        else:
+            df['year'] = np.nan
+            df['month'] = np.nan
+        
+        # If year/month are missing but eventDate exists, try to extract
+        if event_date_col and event_date_col in df.columns:
+            # Check if we need to fill missing dates
+            if df['year'].isna().any() or df['month'].isna().any():
+                logger.info(f"  Using {event_date_col} to fill missing dates")
+                df['eventDate_parsed'] = pd.to_datetime(df[event_date_col], errors='coerce')
+                
+                # Fill missing year/month from eventDate
+                df.loc[df['year'].isna(), 'year'] = df['eventDate_parsed'].dt.year
+                df.loc[df['month'].isna(), 'month'] = df['eventDate_parsed'].dt.month
+                
+                # Also capture full date if needed for reference
+                df['event_date_full'] = df['eventDate_parsed'].dt.strftime('%Y-%m-%d')
+                df = df.drop(columns=['eventDate_parsed'])
+        
+        # Drop rows with missing year/month after all attempts
+        initial_len = len(df)
+        df = df.dropna(subset=['year', 'month'])
+        logger.info(f"  Dropped {initial_len - len(df)} rows with missing year/month")
+        
+        # Validate ranges
+        df = df[(df['year'] >= 1900) & (df['year'] <= 2100) & 
+                (df['month'].between(1, 12))]
+        
+        if df.empty:
+            logger.warning("No rows with valid year/month after cleaning")
+            return stats
+        
+        # Convert to integer (now safe)
+        df['year'] = df['year'].astype(int)
+        df['month'] = df['month'].astype(int)
+        
+        # Create date_id (first day of month)
+        df['date_id'] = df.apply(
+            lambda r: f"{int(r['year']):04d}-{int(r['month']):02d}-01", 
+            axis=1
+        )
+        
+        # ===== COUNT HANDLING =====
         # Handle count column
         if isinstance(count_spec, str):
             if count_spec not in df.columns:
                 df['_count'] = 1
+                logger.info(f"  Count column '{count_spec}' not found, using default count=1")
             else:
                 df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(1)
         else:
             df['_count'] = 1
         
+        # ===== COORDINATE PROCESSING =====
         # Process coordinates
         df['_lat'] = pd.to_numeric(df[lat_col], errors='coerce')
         df['_lon'] = pd.to_numeric(df[lon_col], errors='coerce')
+        initial_coord_len = len(df)
         df = df.dropna(subset=['_lat', '_lon'])
+        logger.info(f"  Dropped {initial_coord_len - len(df)} rows with invalid coordinates")
         
+        if df.empty:
+            logger.warning("No rows with valid coordinates after cleaning")
+            return stats
+        
+        # ===== LOCATION CODE GENERATION =====
         # Generate location codes and upsert locations
         df['location_code'] = df.apply(
             lambda r: self._generate_location_code(r['_lat'], r['_lon']), axis=1
@@ -424,33 +482,22 @@ class DatabaseLoader:
         # Upsert unique locations
         unique_locs = df[['location_code', '_lat', '_lon']].drop_duplicates(subset=['location_code'])
         self._upsert_vector_locations(unique_locs)
+        logger.info(f"  Created/updated {len(unique_locs)} unique location sites")
         
-        # Process dates
-        df['year'] = pd.to_numeric(df[year_col], errors='coerce')
-        df['month'] = pd.to_numeric(df[month_col], errors='coerce')
-        df = df.dropna(subset=['year', 'month'])
-        df = df[(df['year'] >= 1900) & (df['year'] <= 2100) & (df['month'].between(1, 12))]
-        
-        if df.empty:
-            logger.warning("No rows with valid year/month after cleaning")
-            return stats
-        
-        df['date_id'] = df.apply(
-            lambda r: f"{int(r['year']):04d}-{int(r['month']):02d}-01", axis=1
-        )
-        
-        # Ensure dim_time records exist
+        # ===== ENSURE DIM_TIME RECORDS EXIST =====
         min_date = df['date_id'].min()
         max_date = df['date_id'].max()
         ensure_dates_exist(min_date, max_date)
+        logger.info(f"  Date range: {min_date} to {max_date}")
         
-        # Build field mapping
+        # ===== FIELD MAPPING FOR VECTOR OBSERVATION =====
+        # Build field mapping for direct attributes (excluding special keys)
         field_mapping = {}
         for key, value in column_mapping.items():
             if not key.startswith('__') and value in df.columns:
                 field_mapping[key] = value
         
-        # Create records
+        # ===== CREATE VALIDATED RECORDS =====
         records = []
         for _, row in df.iterrows():
             record = {
@@ -458,20 +505,40 @@ class DatabaseLoader:
                 'date_id': row['date_id'],
                 'count': int(row['_count']),
             }
+            
+            # Add directly mapped fields
             for out_field, src_col in field_mapping.items():
                 if pd.notna(row[src_col]):
-                    record[out_field] = row[src_col]
+                    # Handle potential type conversions
+                    if out_field in ['life_stage', 'sex', 'collection_method', 
+                                    'tested_for_pathogen', 'infection_status']:
+                        record[out_field] = str(row[src_col])
+                    elif out_field in ['infection_rate']:
+                        try:
+                            record[out_field] = float(row[src_col])
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        record[out_field] = row[src_col]
             
+            # Validate with Pydantic
             try:
                 validated = schemas.VectorObservationCreate(**record)
                 records.append(validated.model_dump())
             except Exception as e:
-                stats['errors'].append(f"Validation error: {e}")
+                stats['errors'].append(f"Validation error for record: {record.get('location_code')} - {str(e)}")
         
-        # Load records
+        # ===== LOAD RECORDS =====
         if records:
-            self.load_from_dataframe(pd.DataFrame(records), models.VectorObservation)
+            # Load in batches to avoid memory issues
+            batch_size = 1000
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                self.load_from_dataframe(pd.DataFrame(batch), models.VectorObservation)
             stats['loaded_records'] = len(records)
+            logger.info(f"  Loaded {len(records)} vector observations")
+        else:
+            logger.warning("  No valid observation records after validation")
         
         return stats
     

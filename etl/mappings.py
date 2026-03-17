@@ -31,13 +31,29 @@ VECTOR_OBSERVATION_MAPPING = {
 
 # GBIF vector observation mapping
 GBIF_VECTOR_OBSERVATION_MAPPING = {
+    # Core required fields
     '__latitude__': 'decimalLatitude',
     '__longitude__': 'decimalLongitude',
     '__year__': 'year',
     '__month__': 'month',
     '__count__': 'individualCount',
+    '__event_date_full__': 'eventDate',  # Full date for fallback
+    
+    # Species information
     'vector_species': 'scientificName',
+    'vector_subspecies': 'infraspecificEpithet',  # Optional subspecies info
+    
+    # Additional GBIF fields that might be useful
+    'collection_method': 'basisOfRecord',  # Maps to collection method type
+    
+    # Note: These fields are not typically in GBIF, so they're omitted
+    # 'life_stage': None,
+    # 'sex': None,
+    # 'tested_for_pathogen': None,
+    # 'infection_status': None,
+    # 'infection_rate': None,
 }
+
 
 # Case data mapping example
 CASE_DATA_MAPPING = {

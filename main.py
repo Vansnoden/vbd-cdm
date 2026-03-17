@@ -79,18 +79,18 @@ def run_etl_pipeline():
         print("STEP 3: Loading vector observation data from GBIF / Vector Atlas")
         print("="*50)
         
-        # vector_stats = loader.load_vector_from_csv(
-        #     data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gbif_anopheles_occurrence",
-        #     pattern="*.csv",
-        #     column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
-        #     sep='\t'
-        # )
         vector_stats = loader.load_vector_from_csv(
-            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/africa",
             pattern="*.csv",
-            column_mapping=VECTOR_ATLAS_SIMPLE_MAPPING,
+            column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
             sep='\t'
         )
+        # vector_stats = loader.load_vector_from_csv(
+        #     data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+        #     pattern="*.csv",
+        #     column_mapping=VECTOR_ATLAS_SIMPLE_MAPPING,
+        #     sep='\t'
+        # )
         pipeline_results['vector'] = vector_stats
         print(f"Vector loading stats: Loaded {vector_stats['loaded_records']} records")
         
