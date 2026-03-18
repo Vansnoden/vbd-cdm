@@ -1,3 +1,8 @@
-date_id,total_count,mean_count,std_count,date_x,date_y,temperature_mean_mean,temperature_mean_std,temperature_mean_min,temperature_mean_max,rainfall_total_mean,rainfall_total_std,rainfall_total_min,rainfall_total_max,date
-2024-01-01,178,1.0,0.0,2024-01-01,2024-01-31,29.24311464371222,0.41981073178566203,28.087762451171898,30.061425781250023,0.478923967419163,0.9941380983132874,0.0,4.770120140165091,2024-01-01
-2025-01-01,128,1.0,0.0,2025-01-01,2025-01-31,29.11592033140123,0.4526748323897014,28.169427490234398,29.799310302734398,0.5189141957951124,1.034559554450026,0.0,4.803498741239309,2025-01-01
+date_id,total_count,mean_count,std_count,n_observations,date_x,location_code_x,date_y,temperature_mean_mean,temperature_mean_std,temperature_mean_min,temperature_mean_max,rainfall_total_mean,rainfall_total_std,rainfall_total_min,rainfall_total_max,location_code_y,date
+2017-02-01,41,5.857142857142857,3.8913824205360674,7,2017-02-01,greater_accra,2017-02-28,,,,,,,,,greater_accra,2017-02-01
+2017-05-01,87,9.666666666666666,8.660254037844387,9,2017-05-01,greater_accra,2017-05-31,,,,,,,,,greater_accra,2017-05-01
+2017-06-01,20,10.0,7.0710678118654755,2,2017-06-01,greater_accra,2017-06-30,,,,,,,,,greater_accra,2017-06-01
+2018-03-01,34,6.8,3.3466401061363023,5,2018-03-01,greater_accra,2018-03-31,,,,,,,,,greater_accra,2018-03-01
+2018-04-01,11,2.75,0.9574271077563381,4,2018-04-01,greater_accra,2018-04-30,,,,,,,,,greater_accra,2018-04-01
+2018-05-01,85,17.0,9.137833441248533,5,2018-05-01,greater_accra,2018-05-31,,,,,,,,,greater_accra,2018-05-01
+2018-06-01,9,2.25,1.8929694486000912,4,2018-06-01,greater_accra,2018-06-30,,,,,,,,,greater_accra,2018-06-01
