@@ -1,0 +1,3507 @@
+# scripts/load_map_data.py
+#!/usr/bin/env python
+# scripts/load_map_data.py
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from database.session import SessionLocal
+from etl.loaders import DatabaseLoader
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def load_map_incidence_data():
+    """
+    Example: Load MAP malaria incidence rasters for multiple years.
+    """
+    db = SessionLocal()
+    loader = DatabaseLoader(db)
+    
+    try:
+        # Example: Load incidence rasters for 2020-2024
+        raster_files = [
+            "/path/to/MAP/2020_incidence.tif",
+            "/path/to/MAP/2021_incidence.tif", 
+            "/path/to/MAP/2022_incidence.tif",
+            "/path/to/MAP/2023_incidence.tif",
+            "/path/to/MAP/2024_incidence.tif"
+        ]
+        
+        years = [2020, 2021, 2022, 2023, 2024]
+        
+        for raster_file, year in zip(raster_files, years):
+            if Path(raster_file).exists():
+                stats = loader.load_map_raster_to_disease_burden(
+                    raster_path=raster_file,
+                    year=year,
+                    disease='malaria',
+                    source='Malaria Atlas Project',
+                    version='2025',
+                    metric_type='incidence_rate',
+                    stat='mean'
+                )
+                
+                print(f"\nYear {year} Results:")
+                print(f"  Total locations: {stats['total_locations']}")
+                print(f"  Successfully loaded: {stats['loaded']}")
+                print(f"  Failed: {stats['failed']}")
+                
+                if stats['errors']:
+                    print(f"\nErrors (first 5):")
+                    for error in stats['errors'][:5]:
+                        print(f"  - {error}")
+            else:
+                print(f"File not found: {raster_file}")
+    
+    finally:
+        db.close()
+
+def load_map_prevalence_data():
+    """
+    Example: Load MAP prevalence rasters.
+    """
+    db = SessionLocal()
+    loader = DatabaseLoader(db)
+    
+    try:
+        raster_files = [
+            "/path/to/MAP/2020_prevalence.tif",
+            "/path/to/MAP/2021_prevalence.tif"
+        ]
+        years = [2020, 2021]
+        
+        stats_multi = loader.load_multiple_map_rasters(
+            raster_files=raster_files,
+            years=years,
+            disease='malaria',
+            source='Malaria Atlas Project',
+            metric_mapping={
+                0: 'prevalence_rate',
+                1: 'prevalence_rate'
+            }
+        )
+        
+        for i, stats in enumerate(stats_multi):
+            print(f"\nYear {years[i]} Results:")
+            print(f"  Loaded: {stats['loaded']} locations")
+    
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    print("Loading MAP incidence data...")
+    load_map_incidence_data()
+# __init__.py
+
+# alembic/env.py
+from logging.config import fileConfig
+
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
+from dotenv import load_dotenv
+import os
+
+from alembic import context
+
+
+load_dotenv()
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+from database.session import Base
+from database.models import Location, DimTime, EnvironmentalFactor, HostCase, VectorObservation, \
+    DiseaseBurden, HealthFacility, Intervention, ResistanceTest, SocioEconomic
+target_metadata = Base.metadata
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+
+# for connecting to postgresql database
+def get_postgres_url():
+    return "postgresql://%s:%s@%s:%s/%s" % (
+        os.getenv("DB_USER"),
+        os.getenv("DB_PASSWORD"),
+        os.getenv("DB_HOST"),
+        os.getenv("DB_PORT"),
+        os.getenv("DB_NAME"),
+    )
+
+# for connecting to sqlalchemy database
+def get_sqlite_url():
+    return "sqlite:///./%s" % (
+        os.getenv("SQL_LITE_DB_NAME")
+    )
+
+
+config.set_main_option("sqlalchemy.url", get_sqlite_url())
+
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode.
+
+    This configures the context with just a URL
+    and not an Engine, though an Engine is acceptable
+    here as well.  By skipping the Engine creation
+    we don't even need a DBAPI to be available.
+
+    Calls to context.execute() here emit the given string to the
+    script output.
+
+    """
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in 'online' mode.
+
+    In this scenario we need to create an Engine
+    and associate a connection with the context.
+
+    """
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection, target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+# alembic/versions/1a6dd090d18a_.py
+"""empty message
+
+Revision ID: 1a6dd090d18a
+Revises: 
+Create Date: 2026-03-16 11:47:13.051414
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '1a6dd090d18a'
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('dim_time',
+    sa.Column('date_id', sa.String(length=10), nullable=False),
+    sa.Column('date', sa.Date(), nullable=False),
+    sa.Column('year', sa.Integer(), nullable=False),
+    sa.Column('month', sa.Integer(), nullable=False),
+    sa.Column('week', sa.Integer(), nullable=True),
+    sa.Column('day_of_year', sa.Integer(), nullable=True),
+    sa.Column('season', sa.String(length=20), nullable=True),
+    sa.Column('is_holiday', sa.String(length=3), nullable=True),
+    sa.PrimaryKeyConstraint('date_id')
+    )
+    op.create_table('location',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('name', sa.String(length=200), nullable=False),
+    sa.Column('admin_level', sa.String(length=50), nullable=True),
+    sa.Column('parent_location_code', sa.String(length=50), nullable=True),
+    sa.Column('geometry_wkt', sa.Text(), nullable=True),
+    sa.Column('centroid_lat', sa.Float(), nullable=True),
+    sa.Column('centroid_lon', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['parent_location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code')
+    )
+    op.create_index(op.f('ix_location_id'), 'location', ['id'], unique=False)
+    op.create_table('disease_burden',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('year', sa.Integer(), nullable=False),
+    sa.Column('disease', sa.String(length=50), nullable=False),
+    sa.Column('incidence_rate', sa.Float(), nullable=True),
+    sa.Column('prevalence_rate', sa.Float(), nullable=True),
+    sa.Column('mortality_rate', sa.Float(), nullable=True),
+    sa.Column('cases_lower', sa.Float(), nullable=True),
+    sa.Column('cases_upper', sa.Float(), nullable=True),
+    sa.Column('cases_mean', sa.Float(), nullable=True),
+    sa.Column('source', sa.String(length=200), nullable=True),
+    sa.Column('version', sa.String(length=50), nullable=True),
+    sa.Column('raster_file', sa.String(length=500), nullable=True),
+    sa.Column('extraction_method', sa.String(length=50), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=True),
+    sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease')
+    )
+    op.create_index(op.f('ix_disease_burden_id'), 'disease_burden', ['id'], unique=False)
+    op.create_table('environmental_factor',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id', sa.String(length=10), nullable=True),
+    sa.Column('temperature_mean', sa.Float(), nullable=True),
+    sa.Column('temperature_min', sa.Float(), nullable=True),
+    sa.Column('temperature_max', sa.Float(), nullable=True),
+    sa.Column('rainfall_total', sa.Float(), nullable=True),
+    sa.Column('relative_humidity', sa.Float(), nullable=True),
+    sa.Column('ndvi', sa.Float(), nullable=True),
+    sa.Column('evi', sa.Float(), nullable=True),
+    sa.Column('lst_day', sa.Float(), nullable=True),
+    sa.Column('aridity_index', sa.Float(), nullable=True),
+    sa.Column('potential_breeding_sites', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('location_code', 'date_id', name='uq_env_location_date')
+    )
+    op.create_index(op.f('ix_environmental_factor_id'), 'environmental_factor', ['id'], unique=False)
+    op.create_table('health_facility',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('facility_code', sa.String(length=50), nullable=True),
+    sa.Column('name', sa.String(length=200), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('lat', sa.Float(), nullable=True),
+    sa.Column('lon', sa.Float(), nullable=True),
+    sa.Column('type', sa.String(length=50), nullable=True),
+    sa.Column('catchment_population', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('facility_code')
+    )
+    op.create_table('host_case',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('case_identifier', sa.String(length=100), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id_onset', sa.String(length=10), nullable=True),
+    sa.Column('date_id_reported', sa.String(length=10), nullable=True),
+    sa.Column('disease', sa.String(length=100), nullable=False),
+    sa.Column('pathogen', sa.String(length=100), nullable=True),
+    sa.Column('case_status', sa.String(length=50), nullable=True),
+    sa.Column('confirmation_method', sa.String(length=100), nullable=True),
+    sa.Column('host_type', sa.String(length=50), nullable=True),
+    sa.Column('age_years', sa.Integer(), nullable=True),
+    sa.Column('age_group', sa.String(length=50), nullable=True),
+    sa.Column('sex', sa.String(length=10), nullable=True),
+    sa.Column('outcome', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['date_id_onset'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['date_id_reported'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('case_identifier')
+    )
+    op.create_index(op.f('ix_host_case_id'), 'host_case', ['id'], unique=False)
+    op.create_table('intervention',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('intervention_type', sa.String(length=50), nullable=True),
+    sa.Column('date_start', sa.Date(), nullable=True),
+    sa.Column('date_end', sa.Date(), nullable=True),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('coverage', sa.Float(), nullable=True),
+    sa.Column('target_disease', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('socioeconomic',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('year', sa.Integer(), nullable=True),
+    sa.Column('indicator_name', sa.String(length=100), nullable=True),
+    sa.Column('indicator_value', sa.Float(), nullable=True),
+    sa.Column('source', sa.String(length=100), nullable=True),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('vector_observation',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('location_code', sa.String(length=50), nullable=True),
+    sa.Column('date_id', sa.String(length=10), nullable=True),
+    sa.Column('vector_species', sa.String(length=100), nullable=False),
+    sa.Column('vector_subspecies', sa.String(length=100), nullable=True),
+    sa.Column('life_stage', sa.String(length=50), nullable=True),
+    sa.Column('sex', sa.String(length=10), nullable=True),
+    sa.Column('collection_method', sa.String(length=100), nullable=True),
+    sa.Column('count', sa.Integer(), nullable=True),
+    sa.Column('density_per_trap', sa.Float(), nullable=True),
+    sa.Column('tested_for_pathogen', sa.String(length=100), nullable=True),
+    sa.Column('infection_status', sa.String(length=50), nullable=True),
+    sa.Column('infection_rate', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_code'], ['location.location_code'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_vector_observation_id'), 'vector_observation', ['id'], unique=False)
+    op.create_table('resistance_test',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('vector_observation_id', sa.Integer(), nullable=True),
+    sa.Column('test_type', sa.String(length=50), nullable=True),
+    sa.Column('insecticide', sa.String(length=100), nullable=True),
+    sa.Column('concentration', sa.Float(), nullable=True),
+    sa.Column('exposure_time', sa.Integer(), nullable=True),
+    sa.Column('mortality', sa.Float(), nullable=True),
+    sa.Column('resistance_status', sa.String(length=50), nullable=True),
+    sa.ForeignKeyConstraint(['vector_observation_id'], ['vector_observation.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('resistance_test')
+    op.drop_index(op.f('ix_vector_observation_id'), table_name='vector_observation')
+    op.drop_table('vector_observation')
+    op.drop_table('socioeconomic')
+    op.drop_table('intervention')
+    op.drop_index(op.f('ix_host_case_id'), table_name='host_case')
+    op.drop_table('host_case')
+    op.drop_table('health_facility')
+    op.drop_index(op.f('ix_environmental_factor_id'), table_name='environmental_factor')
+    op.drop_table('environmental_factor')
+    op.drop_index(op.f('ix_disease_burden_id'), table_name='disease_burden')
+    op.drop_table('disease_burden')
+    op.drop_index(op.f('ix_location_id'), table_name='location')
+    op.drop_table('location')
+    op.drop_table('dim_time')
+    # ### end Alembic commands ###
+
+# alembic/versions/58d3a74fcfe7_.py
+"""empty message
+
+Revision ID: 58d3a74fcfe7
+Revises: 1a6dd090d18a
+Create Date: 2026-03-17 23:34:14.079976
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '58d3a74fcfe7'
+down_revision: Union[str, Sequence[str], None] = '1a6dd090d18a'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.add_column('location', sa.Column('country_name', sa.String(), nullable=True))
+    op.add_column('location', sa.Column('country_code', sa.String(), nullable=True))
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_column('location', 'country_code')
+    op.drop_column('location', 'country_name')
+    # ### end Alembic commands ###
+
+# analysis/__init__.py
+
+# analysis/analysis_pipeline.py
+#-*- coding: utf8 -*-
+
+
+
+
+# clip_timeseries_data.py
+#!-*-coding:utf8-*-
+
+import os
+import pandas as pd
+
+from database.utils import batch_clip_era5
+
+BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
+shapefile = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/Ghana/gha_admin_boundaries.shp/gha_admin1.shp"
+
+print("\nBatch processing multiple GRIB files")
+grib_files = [
+    # BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
+    # BASE_DIR + "/climatic_timeseries_data/2025_data.grib",
+    # BASE_DIR + "/climatic_timeseries_data/2015_data.grib",
+    # BASE_DIR + "/climatic_timeseries_data/2020_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2016_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2017_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2018_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2019_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2020_data.grib"
+]
+
+batch_results = batch_clip_era5(
+    grib_files=grib_files,
+    shapefile_path=shapefile,
+    filter_params=[
+        {'column': 'adm1_name', 'value': 'Greater Accra'},
+        # {'column': 'COUNTY', 'value': 'Siaya'}
+    ],
+    output_base_dir=BASE_DIR + '/clipped/batch_results'
+)
+
+# Print batch results summary
+for input_file, output_files in batch_results.items():
+    print(f"{os.path.basename(input_file)}: {len(output_files)} output files")
+
+# database/__init__.py
+
+# database/constants.py
+#-*- coding: utf-8 -*-
+
+
+COUNTRY_LOOKUP = {
+    # Kenya
+    ( -4.0, 39.0): ("Kenya", "KE"),
+    ( 0.0, 38.0): ("Kenya", "KE"),
+    # Ghana
+    ( 8.0, -2.0): ("Ghana", "GH"),
+    ( 6.0, 0.0): ("Ghana", "GH"),
+    # Nigeria
+    ( 9.0, 8.0): ("Nigeria", "NG"),
+    ( 7.0, 5.0): ("Nigeria", "NG"),
+    # South Africa
+    (-26.0, 28.0): ("South Africa", "ZA"),
+    (-29.0, 24.0): ("South Africa", "ZA"),
+    # Tanzania
+    (-6.0, 35.0): ("Tanzania", "TZ"),
+    (-9.0, 33.0): ("Tanzania", "TZ"),
+    # Uganda
+    ( 1.0, 32.0): ("Uganda", "UG"),
+    ( 0.3, 32.0): ("Uganda", "UG"),
+    # Ethiopia
+    ( 9.0, 38.0): ("Ethiopia", "ET"),
+    ( 8.0, 39.0): ("Ethiopia", "ET"),
+}
+
+# database/geoutils.py
+
+import reverse_geocode as rg
+import numpy as np
+from typing import Tuple, Optional
+import pandas as pd
+from functools import lru_cache
+
+from database.constants import COUNTRY_LOOKUP
+
+
+@lru_cache(maxsize=1000)
+def get_country_from_coords(lat: float, lon: float) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get country name and country code from latitude and longitude coordinates.
+    
+    Args:
+        lat: Latitude in decimal degrees
+        lon: Longitude in decimal degrees
+        
+    Returns:
+        Tuple of (country_name, country_code) or (None, None) if not found
+    """
+    if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+        return None, None
+    
+    try:
+        # Try reverse_geocode first (requires internet for first lookup, caches results)
+        result = rg.search([(lat, lon)])
+        if result and len(result) > 0:
+            country_name = result[0].get('country')
+            country_code = result[0].get('country_code')
+            return country_name, country_code
+    except Exception as e:
+        print(f"Reverse geocode failed for ({lat}, {lon}): {e}")
+    
+    # Fallback to nearest known point lookup
+    return _get_country_from_nearest(lat, lon)
+
+
+def _get_country_from_nearest(lat: float, lon: float) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fallback method: find nearest known coordinate in lookup table.
+    Useful for offline operation or when reverse_geocode fails.
+    """
+    if not COUNTRY_LOOKUP:
+        return None, None
+    
+    # Find nearest known coordinate
+    min_dist = float('inf')
+    best_match = None
+    
+    for (ref_lat, ref_lon), country_info in COUNTRY_LOOKUP.items():
+        # Simple Euclidean distance (not accurate for large distances but works for rough matching)
+        dist = np.sqrt((lat - ref_lat)**2 + (lon - ref_lon)**2)
+        if dist < min_dist and dist < 5.0:  # Within ~5 degrees (~550km at equator)
+            min_dist = dist
+            best_match = country_info
+    
+    return best_match if best_match else (None, None)
+
+
+def bulk_get_countries(coords_list):
+    """
+    Get countries for multiple coordinates in batch.
+    
+    Args:
+        coords_list: List of (lat, lon) tuples
+        
+    Returns:
+        List of (country_name, country_code) tuples
+    """
+    results = []
+    for lat, lon in coords_list:
+        results.append(get_country_from_coords(lat, lon))
+    return results
+
+
+def add_country_to_dataframe(df, lat_col='centroid_lat', lon_col='centroid_lon'):
+    """
+    Add country columns to a DataFrame containing coordinates.
+    
+    Args:
+        df: DataFrame with lat/lon columns
+        lat_col: Name of latitude column
+        lon_col: Name of longitude column
+        
+    Returns:
+        DataFrame with added 'country_name' and 'country_code' columns
+    """
+    df = df.copy()
+    countries = []
+    codes = []
+    
+    for idx, row in df.iterrows():
+        country, code = get_country_from_coords(row[lat_col], row[lon_col])
+        countries.append(country)
+        codes.append(code)
+    
+    df['country_name'] = countries
+    df['country_code'] = codes
+    return df
+# database/models.py
+#-*- coding:utf-8 -*-
+
+import datetime
+
+from sqlalchemy import Column, DateTime, Integer, String, Float, Date, ForeignKey, Text, UniqueConstraint
+from sqlalchemy.orm import relationship
+from sqlalchemy.ext.declarative import declarative_base
+from geoalchemy2 import Geometry 
+from database.session import Base
+
+
+class DimTime(Base):
+    """Time dimension table for easy temporal analysis"""
+    __tablename__ = "dim_time"
+    
+    date_id = Column(String(10), primary_key=True)  # YYYY-MM-DD
+    date = Column(Date, nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    week = Column(Integer)
+    day_of_year = Column(Integer)
+    season = Column(String(20))  # 'dry', 'wet', 'spring', etc.
+    is_holiday = Column(String(3), default='no')  # 'yes' or 'no'
+
+
+class Location(Base):
+    """Geographic locations hierarchy"""
+    __tablename__ = "location"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    admin_level = Column(String(50))  # country, state, district, village
+    parent_location_code = Column(String(50), ForeignKey("location.location_code"))
+    # For spatial: use Geometry column for PostGIS, Text for SQLite
+    geometry_wkt = Column(Text)  # WKT representation
+    centroid_lat = Column(Float)
+    centroid_lon = Column(Float)
+    country_name = Column(String)
+    country_code = Column(String)
+    # Self-referential relationship
+    parent = relationship("Location", remote_side=[location_code], backref="children")
+
+    def set_country_from_coords(self):
+        """
+        Automatically set country_name and country_code from centroid coordinates.
+        """
+        from database.geoutils import get_country_from_coords
+        
+        if self.centroid_lat and self.centroid_lon:
+            country_name, country_code = get_country_from_coords(
+                self.centroid_lat, self.centroid_lon
+            )
+            self.country_name = country_name
+            self.country_code = country_code
+
+
+class HostCase(Base):
+    """Human or animal disease cases"""
+    __tablename__ = "host_case"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    case_identifier = Column(String(100), unique=True)  # External ID
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"))
+    date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Disease classification
+    disease = Column(String(100), nullable=False)  # 'malaria', 'dengue'
+    pathogen = Column(String(100))  # 'Plasmodium falciparum'
+    case_status = Column(String(50))  # 'suspected', 'probable', 'confirmed'
+    confirmation_method = Column(String(100))  # 'PCR', 'RDT', 'clinical'
+    
+    # Host details
+    host_type = Column(String(50), default='human')  # 'human', 'animal'
+    age_years = Column(Integer)
+    age_group = Column(String(50))
+    sex = Column(String(10))
+    outcome = Column(String(50))  # 'recovered', 'died', 'unknown'
+    
+    # Relationships
+    location = relationship("Location")
+    onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
+    reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
+
+
+class DiseaseBurden(Base):
+    """Disease burden data from sources like Malaria Atlas Project"""
+    __tablename__ = "disease_burden"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+    year = Column(Integer, nullable=False)
+    disease = Column(String(50), nullable=False)  # 'malaria', 'dengue', etc.
+    
+    # Incidence and prevalence metrics
+    incidence_rate = Column(Float)  # Cases per 1000 population per year
+    prevalence_rate = Column(Float)  # Percentage of population infected
+    mortality_rate = Column(Float)  # Deaths per 1000 population per year
+    cases_lower = Column(Float)  # Lower confidence interval
+    cases_upper = Column(Float)  # Upper confidence interval
+    cases_mean = Column(Float)   # Mean estimate
+    
+    # Metadata
+    source = Column(String(200))  # e.g., 'Malaria Atlas Project'
+    version = Column(String(50))   # Dataset version
+    raster_file = Column(String(500))  # Original raster file name
+    extraction_method = Column(String(50))  # 'mean', 'median', etc.
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    
+    # Relationships
+    location = relationship("Location")
+    
+    __table_args__ = (
+        UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease'),
+    )
+
+
+class VectorObservation(Base):
+    """Vector surveillance data"""
+    __tablename__ = "vector_observation"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Vector details
+    vector_species = Column(String(100), nullable=False)
+    vector_subspecies = Column(String(100))
+    life_stage = Column(String(50))  # 'egg', 'larva', 'pupa', 'adult'
+    sex = Column(String(10))  # 'male', 'female', 'mixed'
+    
+    # Collection methods
+    collection_method = Column(String(100))  # 'CDC_light_trap', 'BG_sentinel'
+    count = Column(Integer)
+    density_per_trap = Column(Float)  # Calculated field
+    
+    # Infection status
+    tested_for_pathogen = Column(String(100))
+    infection_status = Column(String(50))  # 'positive', 'negative'
+    infection_rate = Column(Float)  # Proportion positive
+    
+    # Relationships
+    location = relationship("Location")
+    date = relationship("DimTime")
+
+
+class EnvironmentalFactor(Base):
+    """Climate and environmental data"""
+    __tablename__ = "environmental_factor"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
+    
+    # Climate variables
+    temperature_mean = Column(Float)  # °C
+    temperature_min = Column(Float)
+    temperature_max = Column(Float)
+    rainfall_total = Column(Float)  # mm
+    relative_humidity = Column(Float)  # %
+    
+    # Remote sensing indices
+    ndvi = Column(Float)  # Normalized Difference Vegetation Index
+    evi = Column(Float)   # Enhanced Vegetation Index
+    lst_day = Column(Float)  # Land Surface Temperature (day)
+    
+    # Derived indicators
+    aridity_index = Column(Float)
+    potential_breeding_sites = Column(Integer)  # Estimated from rainfall
+    
+    __table_args__ = (UniqueConstraint('location_code', 'date_id', name='uq_env_location_date'),)
+    
+    # Relationships
+    location = relationship("Location")
+    date = relationship("DimTime")
+
+
+class HealthFacility(Base):
+    __tablename__ = "health_facility"
+    id = Column(Integer, primary_key=True)
+    facility_code = Column(String(50), unique=True)
+    name = Column(String(200))
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    lat = Column(Float)
+    lon = Column(Float)
+    type = Column(String(50))  # hospital, clinic, dispensary
+    catchment_population = Column(Integer)
+
+
+class Intervention(Base):
+    __tablename__ = "intervention"
+    id = Column(Integer, primary_key=True)
+    intervention_type = Column(String(50))  # 'IRS', 'ITN', 'larviciding'
+    date_start = Column(Date)
+    date_end = Column(Date)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    coverage = Column(Float)  # percentage or number
+    target_disease = Column(String(50))  # 'malaria', 'dengue', 'both'
+
+
+class ResistanceTest(Base):
+    __tablename__ = "resistance_test"
+    id = Column(Integer, primary_key=True)
+    vector_observation_id = Column(Integer, ForeignKey("vector_observation.id"))
+    test_type = Column(String(50))  # 'WHO tube', 'CDC bottle'
+    insecticide = Column(String(100))
+    concentration = Column(Float)
+    exposure_time = Column(Integer)  # minutes
+    mortality = Column(Float)        # proportion dead
+    resistance_status = Column(String(50))  # 'susceptible', 'confirmed', 'possible'
+
+
+class SocioEconomic(Base):
+    __tablename__ = "socioeconomic"
+    id = Column(Integer, primary_key=True)
+    location_code = Column(String(50), ForeignKey("location.location_code"))
+    year = Column(Integer)
+    indicator_name = Column(String(100))  # e.g., 'ITN_use', 'poverty_rate'
+    indicator_value = Column(Float)
+    source = Column(String(100))
+
+
+
+# class Intervention(Base):
+#     __tablename__ = "intervention"
+    
+#     id = Column(Integer, primary_key=True)
+#     campaign_id = Column(String(100), nullable=True)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     year = Column(Integer, nullable=False)
+#     month = Column(Integer, nullable=False)
+#     intervention_type = Column(String(50), nullable=False)
+#     sub_type = Column(String(100))
+#     coverage_numeric = Column(Float)
+#     coverage_unit = Column(String(50))
+#     coverage_percent = Column(Float)
+#     target_population = Column(Integer)
+#     source = Column(String(200))
+#     notes = Column(Text)
+#     last_updated = Column(DateTime, default=datetime.utcnow)
+    
+#     __table_args__ = (
+#         UniqueConstraint('location_code', 'year', 'month', 'intervention_type', 
+#                          name='uq_intervention_loc_date_type'),
+#     )
+
+
+# class CaseLine(Base):
+#     __tablename__ = "case_line"
+
+#     id = Column(Integer, primary_key=True)
+#     case_identifier = Column(String(100), unique=True)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     date_onset = Column(Date)
+#     date_report = Column(Date)
+#     date_confirmation = Column(Date)
+#     disease = Column(String(50), nullable=False)
+#     pathogen = Column(String(100))
+#     case_status = Column(String(20), nullable=False)
+#     confirmation_method = Column(String(50))
+#     age_years = Column(Integer)
+#     age_group = Column(String(20))
+#     sex = Column(String(10))
+#     pregnancy_status = Column(String(20))
+#     severity = Column(String(20))
+#     outcome = Column(String(20))
+#     outcome_date = Column(Date)
+#     treatment = Column(String(100))
+#     source = Column(String(200))
+#     last_updated = Column(DateTime, default=datetime.utcnow)
+
+
+# class HealthFacility(Base):
+#     __tablename__ = "health_facility"
+
+#     id = Column(Integer, primary_key=True)
+#     facility_code = Column(String(50), unique=True, nullable=False)
+#     name = Column(String(200), nullable=False)
+#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
+#     facility_type = Column(String(50))
+#     ownership = Column(String(50))
+#     operational_status = Column(String(20), default='functional')
+#     latitude = Column(Float, nullable=False)
+#     longitude = Column(Float, nullable=False)
+#     geocoding_method = Column(String(50))
+#     address = Column(Text)
+#     catchment_population = Column(Integer)
+#     catchment_area_km2 = Column(Float)
+#     has_maternity = Column(Boolean, default=False)
+#     has_lab = Column(Boolean, default=False)
+#     has_microscopy = Column(Boolean, default=False)
+#     has_rdt = Column(Boolean, default=False)
+#     has_act = Column(Boolean, default=False)
+#     inpatient_beds = Column(Integer)
+#     outpatient_visits_2023 = Column(Integer)  # or use a separate year table for multiple years
+#     source = Column(String(200))
+#     last_updated = Column(DateTime)
+# database/schemas.py
+#-*- coding:utf-8 -*-
+
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional, List
+from datetime import date, datetime
+
+
+# -------------------- DimTime --------------------
+class DimTimeCreate(BaseModel):
+    """Schema for creating time dimension records."""
+    date_id: str = Field(..., description="Date in YYYY-MM-DD format")
+    date: date
+    year: int
+    month: int
+    week: Optional[int] = None
+    day_of_year: Optional[int] = None
+    season: Optional[str] = None
+    is_holiday: Optional[str] = "no"
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('month')
+    def validate_month(cls, v):
+        if not 1 <= v <= 12:
+            raise ValueError("month must be between 1 and 12")
+        return v
+
+
+# -------------------- Location --------------------
+class LocationCreate(BaseModel):
+    """Schema for creating/updating locations."""
+    location_code: str = Field(..., description="Unique identifier for the location")
+    name: str
+    admin_level: str = Field(..., description="e.g., country, state, district, village")
+    parent_location_code: Optional[str] = None
+    geometry_wkt: Optional[str] = None
+    centroid_lat: Optional[float] = None
+    centroid_lon: Optional[float] = None
+
+    @field_validator('centroid_lat')
+    def validate_lat(cls, v):
+        if v is not None and (v < -90 or v > 90):
+            raise ValueError("latitude must be between -90 and 90")
+        return v
+
+    @field_validator('centroid_lon')
+    def validate_lon(cls, v):
+        if v is not None and (v < -180 or v > 180):
+            raise ValueError("longitude must be between -180 and 180")
+        return v
+
+
+# -------------------- HostCase --------------------
+class HostCaseCreate(BaseModel):
+    """Schema for creating disease case records."""
+    case_identifier: str = Field(..., description="External identifier for the case")
+    location_code: str
+    date_id_onset: str = Field(..., description="Date of symptom onset (YYYY-MM-DD)")
+    date_id_reported: str = Field(..., description="Date case was reported (YYYY-MM-DD)")
+    disease: str
+    pathogen: Optional[str] = None
+    case_status: str = "suspected"
+    confirmation_method: Optional[str] = None
+    host_type: str = "human"
+    age_years: Optional[int] = None
+    age_group: Optional[str] = None
+    sex: Optional[str] = None
+    outcome: Optional[str] = "unknown"
+
+    @field_validator('date_id_onset', 'date_id_reported')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError(f"Invalid date format: {v}. Use YYYY-MM-DD")
+        return v
+
+    @field_validator('age_years')
+    def validate_age(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("age_years cannot be negative")
+        return v
+
+    @field_validator('sex')
+    def validate_sex(cls, v):
+        if v is not None and v.upper() not in {'M', 'F', 'OTHER', 'UNKNOWN'}:
+            raise ValueError("sex must be one of: M, F, OTHER, UNKNOWN")
+        return v
+
+
+# -------------------- VectorObservation --------------------
+class VectorObservationCreate(BaseModel):
+    """Schema for creating vector surveillance records."""
+    location_code: str
+    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
+    vector_species: str
+    vector_subspecies: Optional[str] = None
+    life_stage: Optional[str] = None  # egg, larva, pupa, adult
+    sex: Optional[str] = None          # male, female, mixed
+    collection_method: Optional[str] = None
+    trap_id: Optional[str] = None
+    count: Optional[int] = None
+    density_per_trap: Optional[float] = None
+    tested_for_pathogen: Optional[str] = None
+    infection_status: Optional[str] = None  # positive, negative
+    infection_rate: Optional[float] = None
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('infection_rate')
+    def validate_rate(cls, v):
+        if v is not None and (v < 0 or v > 1):
+            raise ValueError("infection_rate must be between 0 and 1")
+        return v
+
+
+# -------------------- EnvironmentalFactor --------------------
+class EnvironmentalFactorCreate(BaseModel):
+    """Schema for creating environmental data records."""
+    location_code: str
+    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
+    temperature_mean: Optional[float] = None
+    temperature_min: Optional[float] = None
+    temperature_max: Optional[float] = None
+    rainfall_total: Optional[float] = None
+    relative_humidity: Optional[float] = None
+    ndvi: Optional[float] = None
+    evi: Optional[float] = None
+    lst_day: Optional[float] = None
+    aridity_index: Optional[float] = None
+    potential_breeding_sites: Optional[int] = None
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('temperature_mean', 'temperature_min', 'temperature_max')
+    def validate_temperature(cls, v):
+        if v is not None and v < -100:
+            raise ValueError("unrealistically low temperature")
+        return v
+
+    @field_validator('rainfall_total')
+    def validate_rainfall(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("rainfall cannot be negative")
+        return v
+
+    @field_validator('relative_humidity')
+    def validate_humidity(cls, v):
+        if v is not None and (v < 0 or v > 100):
+            raise ValueError("relative humidity must be between 0 and 100")
+        return v
+
+    @field_validator('ndvi', 'evi')
+    def validate_vegetation_indices(cls, v):
+        if v is not None and (v < -1 or v > 1):
+            raise ValueError("NDVI and EVI must be between -1 and 1")
+        return v
+
+
+# -------------------- Optional: Response Schemas (if you ever need to return data via API) --------------------
+class LocationResponse(LocationCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class HostCaseResponse(HostCaseCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class VectorObservationResponse(VectorObservationCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+class EnvironmentalFactorResponse(EnvironmentalFactorCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+
+# -------------------- DiseaseBurden --------------------
+class DiseaseBurdenBase(BaseModel):
+    """Base schema for disease burden data."""
+    location_code: str
+    year: int
+    disease: str
+    incidence_rate: Optional[float] = None
+    prevalence_rate: Optional[float] = None
+    mortality_rate: Optional[float] = None
+    cases_lower: Optional[float] = None
+    cases_upper: Optional[float] = None
+    cases_mean: Optional[float] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    raster_file: Optional[str] = None
+    extraction_method: Optional[str] = None
+
+
+class DiseaseBurdenCreate(DiseaseBurdenBase):
+    """Schema for creating disease burden records."""
+    pass
+
+
+class DiseaseBurdenUpdate(BaseModel):
+    """Schema for updating disease burden records."""
+    incidence_rate: Optional[float] = None
+    prevalence_rate: Optional[float] = None
+    mortality_rate: Optional[float] = None
+    cases_lower: Optional[float] = None
+    cases_upper: Optional[float] = None
+    cases_mean: Optional[float] = None
+    source: Optional[str] = None
+    version: Optional[str] = None
+    extraction_method: Optional[str] = None
+
+
+class DiseaseBurdenResponse(DiseaseBurdenBase):
+    """Schema for disease burden response."""
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class DiseaseBurdenInDB(DiseaseBurdenBase):
+    """Schema for disease burden in database."""
+    id: int
+    
+    class Config:
+        from_attributes = True
+# database/session.py
+#-*- coding:utf-8 -*-
+
+import os
+from pathlib import Path
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
+
+load_dotenv()
+
+project_root = Path(__file__).parent.parent
+default_db_path = project_root / os.getenv("SQL_LITE_DB_NAME")
+
+SQLITE_URL = "sqlite:///%s" % (default_db_path)
+POSTGRES_URL = "postgresql://%s:%s@%s:%s/%s" % (
+    os.getenv("DB_USER"),
+    os.getenv("DB_PASSWORD"),
+    os.getenv("DB_HOST"),
+    os.getenv("DB_PORT"),
+    os.getenv("DB_NAME"),
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL", SQLITE_URL)
+
+# Special handling for SQLite (needs connect_args for foreign keys)
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=connect_args,
+    echo=False  # Set to True for SQL logging
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    """Dependency for FastAPI or context manager for notebooks"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+# database/utils.py
+import xarray as xr
+import geopandas as gpd
+from shapely.geometry import mapping
+import os
+import tempfile
+import pandas as pd
+from database.session import SessionLocal
+from database.models import DimTime
+import pandas as pd
+import traceback
+import cfgrib
+import xarray as xr
+import cfgrib
+import dask
+
+
+def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None, 
+                          output_dir='./clipped_data', buffer_degrees=0.5):
+    """
+    Clip ERA5-Land GRIB files to features from any shapefile.
+    (parameters unchanged)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    def load_shapefile_features():
+        """Load and filter features from shapefile (uses closure for filter_params, shapefile_path)"""
+        try:
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.crs is None:
+                gdf = gdf.set_crs('EPSG:4326', allow_override=True)
+            print(f"Shapefile loaded: {len(gdf)} features")
+            print(f"Available columns: {list(gdf.columns)}")
+
+            if filter_params is None:
+                return gdf
+
+            if isinstance(filter_params, dict):
+                column = filter_params.get('column')
+                value = filter_params.get('value')
+                if column not in gdf.columns:
+                    raise ValueError(f"Column '{column}' not found in shapefile")
+                filtered_gdf = gdf[gdf[column] == value]
+
+            elif isinstance(filter_params, list):
+                masks = []
+                for param in filter_params:
+                    column = param.get('column')
+                    value = param.get('value')
+                    if column not in gdf.columns:
+                        print(f"Warning: Column '{column}' not found, skipping")
+                        continue
+                    masks.append(gdf[column] == value)
+                if not masks:
+                    raise ValueError("No valid filter conditions found")
+                combined_mask = masks[0]
+                for mask in masks[1:]:
+                    combined_mask = combined_mask | mask
+                filtered_gdf = gdf[combined_mask]
+            else:
+                raise ValueError("filter_params must be dict, list of dicts, or None")
+
+            print(f"Filtered to {len(filtered_gdf)} feature(s)")
+            return filtered_gdf
+        except Exception as e:
+            print(f"Error loading shapefile: {e}")
+            raise
+
+    
+    def process_feature(feature_gdf, feature_name, grib_file_path, output_dir):
+        print(f"\nProcessing {feature_name}...")
+        bbox = feature_gdf.total_bounds
+        lon_slice = slice(bbox[0] - buffer_degrees, bbox[2] + buffer_degrees)
+        lat_slice = slice(bbox[3] + buffer_degrees, bbox[1] - buffer_degrees)
+
+        # Smaller chunk size to control memory
+        chunk_size = 10  # time steps per chunk
+
+        # Define daily aggregation methods per variable
+        agg_methods = {
+            't2m': 'mean',   # 2m temperature → daily mean
+            'tp': 'sum',      # total precipitation → daily sum
+        }
+
+        try:
+            # Open all variable groups lazily
+            print("Opening GRIB file with lazy loading...")
+            ds_list = cfgrib.open_datasets(
+                grib_file_path,
+                chunks={'time': chunk_size},
+                backend_kwargs={'errors': 'raise'}
+            )
+            print(f"Found {len(ds_list)} separate variable groups.")
+        except Exception as e:
+            print(f"Error opening GRIB file: {e}")
+            return None
+
+        # Generate output filename
+        base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
+        safe_feature_name = feature_name.replace(' ', '_').replace('/', '_')
+        output_path = os.path.join(output_dir, f"{base_name}_{safe_feature_name}.nc")
+
+        daily_datasets = []  # store daily versions of each variable
+
+        for i, ds in enumerate(ds_list):
+            print(f"  Processing group {i+1}: {list(ds.data_vars)}")
+            # Determine dimension names (CF convention)
+            lon_dim = 'longitude' if 'longitude' in ds.dims else 'lon'
+            lat_dim = 'latitude' if 'latitude' in ds.dims else 'lat'
+            # Subset to bounding box
+            ds_sel = ds.sel(**{lon_dim: lon_slice, lat_dim: lat_slice})
+
+            # Ensure CRS for clipping
+            ds_sel = ds_sel.rio.write_crs("EPSG:4326")
+            # Clip to feature boundary
+            try:
+                clipped = ds_sel.rio.clip(
+                    feature_gdf.geometry.apply(mapping),
+                    feature_gdf.crs,
+                    all_touched=True,
+                    drop=True
+                )
+            except Exception as e:
+                print(f"Error during clipping for group {i+1}: {e}")
+                continue
+
+            # For each variable in this group, aggregate to daily
+            for var in clipped.data_vars:
+                method_name = agg_methods.get(var, 'mean')
+                print(f"    Aggregating {var} to daily using '{method_name}'...")
+                resampler = clipped[var].resample(time='1D')
+                daily = getattr(resampler, method_name)()
+                daily_ds = daily.to_dataset()
+                daily_datasets.append(daily_ds)
+
+        if not daily_datasets:
+            print("No data after processing.")
+            return None
+
+        # Merge all daily datasets (they now share the same time dimension)
+        print("Merging daily datasets...")
+        merged = xr.merge(daily_datasets, compat='override', join='outer')
+        print(f"Merged dataset variables: {list(merged.data_vars)}")
+
+        # Save with compression
+        try:
+            encoding = {var: {'zlib': True, 'complevel': 1, 'dtype': 'float32'}
+                        for var in merged.data_vars}
+            merged.to_netcdf(output_path, encoding=encoding, compute=True)
+            print(f"Success! Output saved to {output_path}")
+        except Exception as e:
+            print(f"Error saving file: {e}")
+            return None
+
+        return output_path
+
+
+    # --- Main flow of clip_era5_by_shapefile ---
+    filtered_gdf = load_shapefile_features()
+    if filtered_gdf.empty:
+        print("No features found after filtering")
+        return []
+
+    output_files = []
+    for idx, row in filtered_gdf.iterrows():
+        single_feature_gdf = gpd.GeoDataFrame([row], geometry='geometry', crs=filtered_gdf.crs)
+
+        # Try to create a meaningful feature name
+        feature_name = None
+        for name_col in ['NAME', 'name', 'COUNTY', 'county', 'ADM2_NAME', 'ADM1_NAME', 'adm1_name']:
+            if name_col in row.index and pd.notna(row[name_col]):
+                feature_name = str(row[name_col])
+                break
+        if feature_name is None:
+            feature_name = f"feature_{idx}"
+        for id_col in ['ID', 'id', 'OBJECTID', 'FID']:
+            if id_col in row.index and pd.notna(row[id_col]):
+                feature_name = f"{feature_name}_{row[id_col]}"
+                break
+
+        output_file = process_feature(single_feature_gdf, feature_name, grib_file_path, output_dir)
+        if output_file:
+            output_files.append(output_file)
+
+    return output_files    
+
+
+def clip_era5_to_kenya_counties(grib_file_path, county_names, shapefile_path=None, 
+                               county_column='COUNTY', output_dir='./clipped_data'):
+    """
+    Convenience function specifically for Kenya counties.
+    
+    Parameters:
+    -----------
+    grib_file_path : str
+        Path to the input GRIB file
+    county_names : list or str
+        Name(s) of Kenyan county/counties to clip to
+    shapefile_path : str, optional
+        Path to Kenya counties shapefile. If None, tries default locations
+    county_column : str
+        Column name in shapefile containing county names
+    output_dir : str
+        Directory to save clipped NetCDF files
+    
+    Returns:
+    --------
+    list
+        Paths to saved clipped files
+    """
+    
+    # Convert county_names to list if string
+    if isinstance(county_names, str):
+        county_names = [county_names]
+    
+    # Try to find Kenya shapefile if not provided
+    if shapefile_path is None:
+        possible_paths = [
+            "kenya_counties.shp",
+            "/path/to/kenya/counties.shp",  # Add your common paths here
+            "data/shapefiles/kenya/admin2.shp"
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                shapefile_path = path
+                print(f"Using shapefile: {shapefile_path}")
+                break
+        
+        if shapefile_path is None:
+            raise FileNotFoundError(
+                "Kenya shapefile not found. Please provide shapefile_path parameter or "
+                "download from: https://data.humdata.org/dataset/ken-administrative-boundaries"
+            )
+    
+    # Build filter parameters
+    if len(county_names) == 1:
+        filter_params = {'column': county_column, 'value': county_names[0]}
+    else:
+        filter_params = [
+            {'column': county_column, 'value': county_name}
+            for county_name in county_names
+        ]
+    
+    # Use the general function
+    return clip_era5_by_shapefile(
+        grib_file_path=grib_file_path,
+        shapefile_path=shapefile_path,
+        filter_params=filter_params,
+        output_dir=output_dir
+    )
+
+
+def clip_era5_to_region(grib_file_path, geometry, region_name, output_dir='./clipped_data'):
+    """
+    Clip ERA5 data to a custom geometry (GeoDataFrame, GeoSeries, or Shapely geometry).
+    
+    Parameters:
+    -----------
+    grib_file_path : str
+        Path to the input GRIB file
+    geometry : geopandas.GeoDataFrame, geopandas.GeoSeries, or shapely.geometry
+        Geometry to clip to
+    region_name : str
+        Name for the output file
+    output_dir : str
+        Directory to save clipped NetCDF file
+    
+    Returns:
+    --------
+    str
+        Path to saved clipped file
+    """
+    
+    import pandas as pd
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Convert geometry to GeoDataFrame if needed
+    if isinstance(geometry, gpd.GeoDataFrame):
+        gdf = geometry
+    elif isinstance(geometry, gpd.GeoSeries):
+        gdf = gpd.GeoDataFrame(geometry=geometry)
+    else:
+        # Assume it's a shapely geometry
+        gdf = gpd.GeoDataFrame(geometry=[geometry], crs='EPSG:4326')
+    
+    # Ensure CRS is set
+    if gdf.crs is None:
+        gdf = gdf.set_crs('EPSG:4326', allow_override=True)
+    
+    # Create a temporary shapefile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_shapefile = os.path.join(tmpdir, 'temp_region.shp')
+        gdf.to_file(temp_shapefile)
+        
+        # Use the general function with no filtering
+        output_files = clip_era5_by_shapefile(
+            grib_file_path=grib_file_path,
+            shapefile_path=temp_shapefile,
+            filter_params=None,  # Use all features (just one in this case)
+            output_dir=output_dir
+        )
+    
+    # Rename the output file to use the region_name
+    if output_files:
+        original_path = output_files[0]
+        base_name = os.path.basename(grib_file_path).replace('.grib', '').replace('.grb', '')
+        new_path = os.path.join(output_dir, f"{base_name}_{region_name.replace(' ', '_')}.nc")
+        
+        # Rename the file
+        if os.path.exists(original_path):
+            os.rename(original_path, new_path)
+            return new_path
+    
+    return None
+
+
+def batch_clip_era5(grib_files, shapefile_path, filter_params=None, output_base_dir='./clipped_data'):
+    """
+    Batch clip multiple GRIB files using the same shapefile and filters.
+    
+    Parameters:
+    -----------
+    grib_files : list of str
+        Paths to GRIB files
+    shapefile_path : str
+        Path to the shapefile
+    filter_params : dict or list of dicts, optional
+        Filter parameters (same as clip_era5_by_shapefile)
+    output_base_dir : str
+        Base directory for output
+    
+    Returns:
+    --------
+    dict
+        Dictionary mapping input files to lists of output files
+    """
+    
+    results = {}
+    
+    for grib_file in grib_files:
+        print(f"\nProcessing: {grib_file}")
+        
+        # Create output subdirectory based on input filename
+        base_name = os.path.basename(grib_file).replace('.grib', '').replace('.grb', '')
+        output_dir = os.path.join(output_base_dir, base_name)
+        
+        try:
+            output_files = clip_era5_by_shapefile(
+                grib_file_path=grib_file,
+                shapefile_path=shapefile_path,
+                filter_params=filter_params,
+                output_dir=output_dir
+            )
+            
+            results[grib_file] = output_files
+            print(f"Generated {len(output_files)} output files")
+            
+        except Exception as e:
+            print(f"Error processing {grib_file}: {e}")
+            results[grib_file] = []
+            traceback.print_exc()
+    
+    return results
+
+
+def ensure_dates_exist(start_date, end_date):
+    session = SessionLocal()
+    try:
+        date_range = pd.date_range(start_date, end_date)
+        for date in date_range:
+            date_id = date.strftime('%Y-%m-%d')
+            exists = session.query(DimTime).filter_by(date_id=date_id).first()
+            if not exists:
+                dt = DimTime(
+                    date_id=date_id,
+                    date=date,
+                    year=date.year,
+                    month=date.month,
+                    week=date.isocalendar()[1],
+                    day_of_year=date.timetuple().tm_yday,
+                    season='dry' if date.month in [11,12,1,2,3] else 'wet',  # customize for your region
+                    is_holiday='no'
+                )
+                session.add(dt)
+        session.commit()
+    finally:
+        session.close()
+
+
+# Example usage
+if __name__ == "__main__":
+    import pandas as pd
+
+    BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
+    shapefile = "/mnt/monadworld/library/shapefiles/kenya/kenyan-counties/County.shp"
+    
+    print("\nBatch processing multiple GRIB files")
+    grib_files = [
+        BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
+        BASE_DIR + "/climatic_timeseries_data/2025_data.grib"
+    ]
+    
+    batch_results = batch_clip_era5(
+        grib_files=grib_files,
+        shapefile_path=shapefile,
+        filter_params=[
+            {'column': 'COUNTY', 'value': 'Mombasa'},
+            {'column': 'COUNTY', 'value': 'Siaya'}
+        ],
+        output_base_dir=BASE_DIR + '/clipped/batch_results'
+    )
+    
+    # Print batch results summary
+    for input_file, output_files in batch_results.items():
+        print(f"{os.path.basename(input_file)}: {len(output_files)} output files")
+# etl/__init__.py
+
+# etl/grib_utils.py
+# etl/grib_utils.py
+
+import xarray as xr
+import pandas as pd
+import numpy as np
+import rioxarray
+from shapely.geometry import Point, Polygon
+
+
+
+def open_grib(filepath, variable=None):
+    """Open a GRIB file with xarray + cfgrib engine."""
+    # If variable is specified, try to filter at open time (if file contains multiple)
+    kwargs = {'engine': 'cfgrib'}
+    if variable:
+        kwargs['filter_by_keys'] = {'shortName': variable}
+    return xr.open_dataset(filepath, **kwargs)
+
+
+
+def extract_point(ds, lat, lon, variable):
+    """Extract value at the nearest grid point to (lat, lon)."""
+    # Handle longitude wrapping if needed (assume ds uses 0-360 or -180-180)
+    # Adjust lon to match dataset's coordinate system
+    if hasattr(ds, 'longitude'):
+        lon_vals = ds.longitude.values
+        if lon_vals.min() >= 0 and lon < 0:
+            lon += 360
+        elif lon_vals.max() <= 180 and lon > 180:
+            lon -= 360
+    point = ds[variable].sel(latitude=lat, longitude=lon, method='nearest')
+    return point.values.item() if point.values.size == 1 else float(point.values.mean())
+
+
+def extract_polygon(ds, polygon, variable):
+    """
+    Average variable over a polygon (shapely Polygon) using rioxarray.
+    Returns mean value (float) or None if no overlap.
+    """
+    # Ensure dataset has a proper CRS (usually WGS84)
+    ds = ds.rio.write_crs("EPSG:4326")
+    # Clip to polygon
+    try:
+        clipped = ds[variable].rio.clip([polygon], crs="EPSG:4326")
+        # Compute mean over all remaining grid cells
+        mean_val = clipped.mean(dim=['latitude', 'longitude']).values
+        return mean_val.item() if mean_val.size == 1 else float(mean_val)
+    except Exception:
+        # No overlap or error
+        return None
+
+
+def aggregate_to_daily(ds, variable, method='mean'):
+    """Resample sub-daily data to daily using method (mean, sum, min, max)."""
+    # Ensure time is a datetime coordinate
+    if 'time' not in ds.dims:
+        return ds  # already daily?
+    daily = ds[variable].resample(time='1D').reduce(method)
+    return daily
+# etl/loaders.py
+#-*- coding: utf-8 -*-
+
+from pathlib import Path
+from sqlalchemy.orm import Session
+from database import models, schemas
+from typing import List, Dict, Optional, Any, Union
+import pandas as pd
+import numpy as np
+from sqlalchemy.orm import Session
+from database.models import Location, EnvironmentalFactor, HostCase, VectorObservation, DiseaseBurden
+from database.session import SessionLocal
+from shapely import Point, wkt
+import geopandas as gpd
+import pandas as pd
+import xarray as xr
+import rasterio
+from rasterio.mask import mask
+from datetime import datetime
+import logging
+import re
+from . import mappings
+from . import grib_utils
+from . import netcdf_utils
+from shapely import wkt
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class DatabaseLoader:
+    def __init__(self, db_session: Session):
+        self.session = db_session
+    
+    # ==================== LOCATION METHODS ====================
+    
+    def load_location_from_gpkg(self, gpkg_path: Union[str, Path], 
+                                admin_level: str, 
+                                layer: Optional[str] = None,
+                                parent_code: Optional[str] = None,
+                                auto_populate_country: bool = True) -> Dict[str, Any]:
+        """
+        Load locations from a GeoPackage file.
+    
+        Args:
+            gpkg_path: Path to GeoPackage file
+            admin_level: Administrative level (country, region, district, etc.)
+            layer: Layer name within GeoPackage
+            parent_code: Parent location code
+            auto_populate_country: Whether to automatically set country from coordinates
+        
+        Returns:
+            Statistics dictionary
+        """
+        gpkg_path = Path(gpkg_path)
+        if not gpkg_path.exists():
+            raise FileNotFoundError(f"GeoPackage not found: {gpkg_path}")
+        
+        # Read the GeoPackage
+        gdf = gpd.read_file(gpkg_path, layer=layer)
+        
+        # Ensure CRS is WGS84
+        if gdf.crs and gdf.crs.to_string() != 'EPSG:4326':
+            gdf = gdf.to_crs('EPSG:4326')
+        
+        stats = {
+            'total_features': len(gdf),
+            'inserted': 0,
+            'updated': 0,
+            'errors': []
+        }
+        
+        for idx, row in gdf.iterrows():
+            try:
+                # Extract name from common attribute fields
+                name = None
+                for col in ['NAME', 'name', 'COUNTY', 'county', 'ADMIN', 'admin', 'adm1_name']:
+                    if col in row and row[col]:
+                        name = str(row[col])
+                        break
+                if not name:
+                    name = f"Feature_{idx}"
+                
+                # Generate location code
+                location_code = name.lower().replace(' ', '_').replace('-', '_')
+                
+                # Get geometry as WKT
+                geom_wkt = row.geometry.wkt if row.geometry else None
+                
+                # Compute centroid
+                if row.geometry:
+                    centroid = row.geometry.centroid
+                    centroid_lat = centroid.y
+                    centroid_lon = centroid.x
+                else:
+                    centroid_lat = centroid_lon = None
+                
+                location_data = {
+                    'location_code': location_code,
+                    'name': name,
+                    'admin_level': admin_level,
+                    'parent_location_code': parent_code,
+                    'geometry_wkt': geom_wkt,
+                    'centroid_lat': centroid_lat,
+                    'centroid_lon': centroid_lon
+                }
+                
+                # Upsert
+                existing = self.session.query(models.Location).filter_by(
+                    location_code=location_code
+                ).first()
+                
+                if existing:
+                    for key, value in location_data.items():
+                        setattr(existing, key, value)
+                    stats['updated'] += 1
+                else:
+                    location = models.Location(**location_data)
+                    self.session.add(location)
+                    stats['inserted'] += 1
+                    
+            except Exception as e:
+                stats['errors'].append(f"Row {idx}: {str(e)}")
+                logger.error(f"Error processing row {idx}: {e}")
+        
+        if auto_populate_country:
+            self._populate_location_countries()
+        
+        self.session.commit()
+        logger.info(f"Location loading complete. Inserted: {stats['inserted']}, Updated: {stats['updated']}")
+        return stats
+
+    def _populate_location_countries(self, location_ids=None):
+        """
+        Populate country fields for all locations or specific ones.
+        
+        Args:
+            location_ids: Optional list of location IDs to update. If None, updates all.
+        """
+        from database.geoutils import get_country_from_coords
+        
+        query = self.session.query(models.Location)
+        if location_ids:
+            query = query.filter(models.Location.id.in_(location_ids))
+        
+        locations = query.all()
+        updated_count = 0
+        
+        for loc in locations:
+            if loc.centroid_lat and loc.centroid_lon:
+                country_name, country_code = get_country_from_coords(
+                    loc.centroid_lat, loc.centroid_lon
+                )
+                if country_name != loc.country_name or country_code != loc.country_code:
+                    loc.country_name = country_name
+                    loc.country_code = country_code
+                    updated_count += 1
+        
+        if updated_count > 0:
+            self.session.commit()
+            print(f"Updated country info for {updated_count} locations")
+        
+        return updated_count
+    
+    # ==================== ENVIRONMENTAL METHODS ====================
+    
+    def load_environmental_from_netcdf(self, data_root: Union[str, Path]) -> Dict[str, Any]:
+        """
+        Load environmental data from NetCDF files.
+        """
+        data_root = Path(data_root)
+        
+        # Load all locations with their geometries
+        locations = self.session.query(models.Location).all()
+        loc_dict = {}
+        for loc in locations:
+            geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+            loc_dict[loc.location_code] = {
+                'geometry': geom,
+                'centroid_lat': loc.centroid_lat,
+                'centroid_lon': loc.centroid_lon
+            }
+        
+        if not loc_dict:
+            logger.error("No locations found in database")
+            return {'total_files': 0, 'processed_files': 0, 'errors': ['No locations found']}
+        
+        # Find all NetCDF files
+        nc_files = list(data_root.rglob("*.nc"))
+        logger.info(f"Found {len(nc_files)} NetCDF files")
+        
+        stats = {
+            'total_files': len(nc_files),
+            'processed_files': 0,
+            'skipped_files': 0,
+            'errors': []
+        }
+        
+        for nc_file in nc_files:
+            year, loc_code = self._parse_netcdf_filename(nc_file)
+            if loc_code is None:
+                logger.debug(f"Skipping unrecognized file: {nc_file.name}")
+                stats['skipped_files'] += 1
+                continue
+            if loc_code not in loc_dict:
+                logger.warning(f"Location '{loc_code}' not found in database. Skipping {nc_file.name}")
+                stats['skipped_files'] += 1
+                continue
+            
+            logger.info(f"Processing {nc_file.name} (location: {loc_code}, year: {year})")
+            
+            try:
+                self._process_netcdf_file(nc_file, loc_code, loc_dict[loc_code])
+                stats['processed_files'] += 1
+            except Exception as e:
+                stats['errors'].append(f"{nc_file.name}: {str(e)}")
+                logger.error(f"Error processing {nc_file.name}: {e}")
+        
+        logger.info(f"Environmental loading complete. Processed: {stats['processed_files']}")
+        return stats
+    
+    def _parse_netcdf_filename(self, filepath: Path):
+        """Extract year and location from NetCDF filename."""
+        pattern1 = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z_]+)_\d+\.nc$'
+        match = re.search(pattern1, filepath.name)
+        if match:
+            year = int(match.group('year'))
+            location = match.group('location').lower()
+            return year, location
+        
+        pattern2 = r'(?P<year>\d{4})_data_(?P<location>[A-Za-z_]+)\.nc$'
+        match = re.search(pattern2, filepath.name)
+        if match:
+            year = int(match.group('year'))
+            location = match.group('location').lower()
+            return year, location
+        
+        return None, None
+    
+    def _process_netcdf_file(self, nc_file: Path, loc_code: str, geom_info: dict):
+        """Process a single NetCDF file and load data."""
+        from database.utils import ensure_dates_exist
+        
+        ds = xr.open_dataset(nc_file)
+        
+        # Get all unique dates
+        times = pd.to_datetime(ds.time.values)
+        dates = sorted(set(t.date() for t in times))
+        
+        # Ensure dates exist in dim_time
+        min_date = dates[0].strftime('%Y-%m-%d')
+        max_date = dates[-1].strftime('%Y-%m-%d')
+        ensure_dates_exist(min_date, max_date)
+        
+        geometry = geom_info['geometry']
+        lat, lon = geom_info['centroid_lat'], geom_info['centroid_lon']
+        
+        for nc_var, mapping in mappings.NC_VARIABLE_MAP.items():
+            if nc_var not in ds:
+                continue
+            
+            logger.info(f"  Processing variable: {nc_var}")
+            data = ds[nc_var]
+            
+            # Sum over step dimension if present
+            if 'step' in data.dims:
+                data = data.sum(dim='step')
+            
+            # Aggregate to daily
+            method_name = mapping.get('agg_method', 'mean')
+            method_func = {
+                'mean': np.mean,
+                'sum': np.sum,
+                'max': np.max,
+                'min': np.min,
+            }.get(method_name, np.mean)
+            
+            temp_ds = data.to_dataset()
+            daily_da = netcdf_utils.aggregate_to_daily(temp_ds, nc_var, method=method_func)
+            
+            # Process each day
+            for time_idx in range(len(daily_da.time)):
+                day_slice = daily_da.isel(time=time_idx)
+                current_date = pd.to_datetime(daily_da.time.values[time_idx]).date()
+                date_id = current_date.strftime('%Y-%m-%d')
+                
+                # Extract value
+                if geometry is None or geometry.is_empty:
+                    if lat is None or lon is None:
+                        continue
+                    value = netcdf_utils.extract_point(day_slice, lat, lon)
+                else:
+                    value = netcdf_utils.extract_polygon(day_slice, geometry)
+                
+                if value is None:
+                    continue
+                
+                # Apply unit conversion
+                if mapping.get('convert'):
+                    value = mapping['convert'](value)
+                
+                # Upsert
+                self._upsert_environmental({
+                    'location_code': loc_code,
+                    'date_id': date_id,
+                    mapping['column']: value
+                })
+        
+        ds.close()
+    
+    def _upsert_environmental(self, record):
+        """Insert or update environmental factor record with better error handling."""
+        try:
+            existing = self.session.query(models.EnvironmentalFactor).filter_by(
+                location_code=record['location_code'],
+                date_id=record['date_id']
+            ).first()
+            
+            if existing:
+                # Update existing record
+                for key, value in record.items():
+                    if key not in ['location_code', 'date_id'] and value is not None:
+                        setattr(existing, key, value)
+                logger.debug(f"Updated environmental record for {record['location_code']} on {record['date_id']}")
+            else:
+                # Create new record
+                env_factor = models.EnvironmentalFactor(**record)
+                self.session.add(env_factor)
+                logger.debug(f"Added environmental record for {record['location_code']} on {record['date_id']}")
+            
+            # Flush immediately to catch any errors
+            self.session.flush()
+            
+        except Exception as e:
+            logger.error(f"Error in _upsert_environmental: {e}")
+            raise
+    
+    # ==================== VECTOR OBSERVATION METHODS ====================
+    
+    def load_vector_from_csv(self, data_dir: Union[str, Path], 
+                            pattern: str = "*.csv",
+                            column_mapping: Optional[Dict] = None,
+                            **pandas_kwargs) -> Dict[str, Any]:
+        """
+        Load vector observation data from CSV/Excel files.
+        """
+        data_dir = Path(data_dir)
+        files = list(data_dir.glob(pattern))
+        
+        if not files:
+            logger.warning(f"No files matching {pattern} found in {data_dir}")
+            return {'total_files': 0, 'processed_files': 0}
+        
+        stats = {
+            'total_files': len(files),
+            'processed_files': 0,
+            'total_records': 0,
+            'loaded_records': 0,
+            'errors': []
+        }
+        
+        for file_path in files:
+            try:
+                file_stats = self._process_vector_file(file_path, column_mapping, **pandas_kwargs)
+                stats['processed_files'] += 1
+                stats['total_records'] += file_stats['total_records']
+                stats['loaded_records'] += file_stats['loaded_records']
+                if file_stats.get('errors'):
+                    stats['errors'].extend(file_stats['errors'])
+            except Exception as e:
+                stats['errors'].append(f"{file_path.name}: {str(e)}")
+                logger.error(f"Error processing {file_path.name}: {e}")
+        
+        logger.info(f"Vector loading complete. Loaded: {stats['loaded_records']} records")
+        return stats
+    
+    def _process_vector_file(self, file_path: Path, column_mapping: Optional[Dict], 
+                        **pandas_kwargs) -> Dict[str, Any]:
+        """Process a single vector observation file with enhanced GBIF support."""
+        from database.utils import ensure_dates_exist
+        
+        stats = {
+            'total_records': 0,
+            'loaded_records': 0,
+            'errors': []
+        }
+        
+        # Read file
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path, **pandas_kwargs)
+        elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+            df = pd.read_excel(file_path, **pandas_kwargs)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
+        stats['total_records'] = len(df)
+        logger.info(f"Processing {file_path.name}: {len(df)} rows")
+        
+        # Extract required columns
+        lat_col = column_mapping.get('__latitude__')
+        lon_col = column_mapping.get('__longitude__')
+        year_col = column_mapping.get('__year__')
+        month_col = column_mapping.get('__month__')
+        count_spec = column_mapping.get('__count__')
+        event_date_col = column_mapping.get('__event_date_full__')
+        
+        # ===== ENHANCED DATE HANDLING =====
+        # Process year and month, using eventDate as fallback if needed
+        if year_col in df.columns and month_col in df.columns:
+            df['year'] = pd.to_numeric(df[year_col], errors='coerce')
+            df['month'] = pd.to_numeric(df[month_col], errors='coerce')
+        else:
+            df['year'] = np.nan
+            df['month'] = np.nan
+        
+        # If year/month are missing but eventDate exists, try to extract
+        if event_date_col and event_date_col in df.columns:
+            # Check if we need to fill missing dates
+            if df['year'].isna().any() or df['month'].isna().any():
+                logger.info(f"  Using {event_date_col} to fill missing dates")
+                df['eventDate_parsed'] = pd.to_datetime(df[event_date_col], errors='coerce')
+                
+                # Fill missing year/month from eventDate
+                df.loc[df['year'].isna(), 'year'] = df['eventDate_parsed'].dt.year
+                df.loc[df['month'].isna(), 'month'] = df['eventDate_parsed'].dt.month
+                
+                # Also capture full date if needed for reference
+                df['event_date_full'] = df['eventDate_parsed'].dt.strftime('%Y-%m-%d')
+                df = df.drop(columns=['eventDate_parsed'])
+        
+        # Drop rows with missing year/month after all attempts
+        initial_len = len(df)
+        df = df.dropna(subset=['year', 'month'])
+        logger.info(f"  Dropped {initial_len - len(df)} rows with missing year/month")
+        
+        # Validate ranges
+        df = df[(df['year'] >= 1900) & (df['year'] <= 2100) & 
+                (df['month'].between(1, 12))]
+        
+        if df.empty:
+            logger.warning("No rows with valid year/month after cleaning")
+            return stats
+        
+        # Convert to integer (now safe)
+        df['year'] = df['year'].astype(int)
+        df['month'] = df['month'].astype(int)
+        
+        # Create date_id (first day of month)
+        df['date_id'] = df.apply(
+            lambda r: f"{int(r['year']):04d}-{int(r['month']):02d}-01", 
+            axis=1
+        )
+        
+        # ===== COUNT HANDLING =====
+        # Handle count column
+        if isinstance(count_spec, str):
+            if count_spec not in df.columns:
+                df['_count'] = 1
+                logger.info(f"  Count column '{count_spec}' not found, using default count=1")
+            else:
+                df['_count'] = pd.to_numeric(df[count_spec], errors='coerce').fillna(1)
+        else:
+            df['_count'] = 1
+        
+        # ===== COORDINATE PROCESSING =====
+        # Process coordinates
+        df['_lat'] = pd.to_numeric(df[lat_col], errors='coerce')
+        df['_lon'] = pd.to_numeric(df[lon_col], errors='coerce')
+        initial_coord_len = len(df)
+        df = df.dropna(subset=['_lat', '_lon'])
+        logger.info(f"  Dropped {initial_coord_len - len(df)} rows with invalid coordinates")
+        
+        if df.empty:
+            logger.warning("No rows with valid coordinates after cleaning")
+            return stats
+        
+        # ===== LOCATION CODE GENERATION =====
+        # Generate location codes and upsert locations
+        df['location_code'] = df.apply(
+            lambda r: self._generate_location_code(r['_lat'], r['_lon']), axis=1
+        )
+        
+        # Upsert unique locations
+        unique_locs = df[['location_code', '_lat', '_lon']].drop_duplicates(subset=['location_code'])
+        self._upsert_vector_locations(unique_locs)
+        logger.info(f"  Created/updated {len(unique_locs)} unique location sites")
+        
+        # ===== ENSURE DIM_TIME RECORDS EXIST =====
+        min_date = df['date_id'].min()
+        max_date = df['date_id'].max()
+        ensure_dates_exist(min_date, max_date)
+        logger.info(f"  Date range: {min_date} to {max_date}")
+        
+        # ===== FIELD MAPPING FOR VECTOR OBSERVATION =====
+        # Build field mapping for direct attributes (excluding special keys)
+        field_mapping = {}
+        for key, value in column_mapping.items():
+            if not key.startswith('__') and value in df.columns:
+                field_mapping[key] = value
+        
+        # ===== CREATE VALIDATED RECORDS =====
+        records = []
+        for _, row in df.iterrows():
+            record = {
+                'location_code': row['location_code'],
+                'date_id': row['date_id'],
+                'count': int(row['_count']),
+            }
+            
+            # Add directly mapped fields
+            for out_field, src_col in field_mapping.items():
+                if pd.notna(row[src_col]):
+                    # Handle potential type conversions
+                    if out_field in ['life_stage', 'sex', 'collection_method', 
+                                    'tested_for_pathogen', 'infection_status']:
+                        record[out_field] = str(row[src_col])
+                    elif out_field in ['infection_rate']:
+                        try:
+                            record[out_field] = float(row[src_col])
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        record[out_field] = row[src_col]
+            
+            # Validate with Pydantic
+            try:
+                validated = schemas.VectorObservationCreate(**record)
+                records.append(validated.model_dump())
+            except Exception as e:
+                stats['errors'].append(f"Validation error for record: {record.get('location_code')} - {str(e)}")
+        
+        # ===== LOAD RECORDS =====
+        if records:
+            # Load in batches to avoid memory issues
+            batch_size = 1000
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                self.load_from_dataframe(pd.DataFrame(batch), models.VectorObservation)
+            stats['loaded_records'] = len(records)
+            logger.info(f"  Loaded {len(records)} vector observations")
+        else:
+            logger.warning("  No valid observation records after validation")
+        
+        return stats
+    
+    def _generate_location_code(self, lat, lon):
+        """Generate a unique location code from coordinates."""
+        return f"point_{lat:.4f}_{lon:.4f}".replace('-', 'n').replace('.', '_')
+    
+    def _upsert_vector_locations(self, unique_locs):
+        """Upsert unique vector sampling locations."""
+        for _, row in unique_locs.iterrows():
+            existing = self.session.query(models.Location).filter_by(
+                location_code=row['location_code']
+            ).first()
+            
+            if not existing:
+                point = Point(row['_lon'], row['_lat'])
+                loc = models.Location(
+                    location_code=row['location_code'],
+                    name=f"Sampling site at {row['_lat']:.4f}, {row['_lon']:.4f}",
+                    admin_level='site',
+                    geometry_wkt=point.wkt,
+                    centroid_lat=row['_lat'],
+                    centroid_lon=row['_lon']
+                )
+                self.session.add(loc)
+        
+        self.session.commit()
+    
+    # ==================== CASE DATA METHODS ====================
+    
+    def load_cases_from_file(self, file_path: Union[str, Path],
+                            column_mapping: Optional[Dict[str, str]] = None,
+                            constants: Optional[Dict[str, Any]] = None,
+                            date_format: Optional[str] = None,
+                            batch_size: int = 1000,
+                            **pandas_kwargs) -> Dict[str, Any]:
+        """
+        Load case data from a CSV or Excel file.
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Read file
+        logger.info(f"Reading file: {file_path}")
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path, **pandas_kwargs)
+        elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+            df = pd.read_excel(file_path, **pandas_kwargs)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
+        logger.info(f"Read {len(df)} rows from file")
+        
+        return self._process_case_dataframe(df, column_mapping, constants, date_format, batch_size)
+    
+    def _process_case_dataframe(self, df: pd.DataFrame,
+                               column_mapping: Optional[Dict[str, str]] = None,
+                               constants: Optional[Dict[str, Any]] = None,
+                               date_format: Optional[str] = None,
+                               batch_size: int = 1000) -> Dict[str, Any]:
+        """Process and load case data from a DataFrame."""
+        from database.utils import ensure_dates_exist
+        
+        stats = {
+            'total_records': len(df),
+            'loaded_records': 0,
+            'failed_records': 0,
+            'errors': []
+        }
+        
+        # Apply column mapping
+        if column_mapping:
+            df = df.rename(columns=column_mapping)
+        
+        # Add constants
+        if constants:
+            for field, value in constants.items():
+                df[field] = value
+        
+        # Clean data
+        df = self._clean_case_data(df, date_format)
+        
+        # Ensure dates exist in dim_time
+        all_dates = []
+        for date_field in ['date_id_onset', 'date_id_reported']:
+            if date_field in df.columns:
+                all_dates.extend(df[date_field].dropna().unique())
+        
+        if all_dates:
+            all_dates = pd.Series(all_dates).dropna().unique()
+            if len(all_dates) > 0:
+                ensure_dates_exist(min(all_dates), max(all_dates))
+        
+        # Convert to records and validate
+        records = df.to_dict('records')
+        validated_records = []
+        
+        for i, record in enumerate(records):
+            try:
+                clean_record = {k: v for k, v in record.items() 
+                              if pd.notna(v) and v is not None}
+                validated = schemas.HostCaseCreate(**clean_record)
+                validated_records.append(validated.model_dump())
+            except Exception as e:
+                stats['failed_records'] += 1
+                stats['errors'].append(f"Record {i}: {str(e)}")
+        
+        # Load in batches
+        if validated_records:
+            for i in range(0, len(validated_records), batch_size):
+                batch = validated_records[i:i+batch_size]
+                self.load_from_dataframe(pd.DataFrame(batch), models.HostCase)
+                stats['loaded_records'] += len(batch)
+        
+        logger.info(f"Case loading complete. Loaded: {stats['loaded_records']}")
+        return stats
+    
+    def _clean_case_data(self, df: pd.DataFrame, date_format: Optional[str] = None) -> pd.DataFrame:
+        """Clean and validate case data."""
+        df = df.copy()
+        
+        # Convert date fields
+        date_fields = ['date_id_onset', 'date_id_reported']
+        for field in date_fields:
+            if field in df.columns:
+                if date_format:
+                    df[field] = pd.to_datetime(df[field], format=date_format, errors='coerce')
+                else:
+                    df[field] = pd.to_datetime(df[field], errors='coerce')
+                df[field] = df[field].dt.strftime('%Y-%m-%d')
+        
+        # Clean age_years
+        if 'age_years' in df.columns:
+            df['age_years'] = pd.to_numeric(df['age_years'], errors='coerce')
+            df.loc[df['age_years'] < 0, 'age_years'] = None
+            df.loc[df['age_years'] > 120, 'age_years'] = None
+        
+        # Clean categorical fields
+        if 'sex' in df.columns:
+            df['sex'] = df['sex'].astype(str).str.lower().str.strip()
+            df['sex'] = df['sex'].replace({'m': 'male', 'f': 'female'})
+            valid_sex = {'male', 'female', 'other', 'unknown'}
+            df.loc[~df['sex'].isin(valid_sex), 'sex'] = None
+        
+        if 'case_status' in df.columns:
+            df['case_status'] = df['case_status'].astype(str).str.lower().str.strip()
+            valid_status = {'suspected', 'probable', 'confirmed'}
+            df.loc[~df['case_status'].isin(valid_status), 'case_status'] = 'suspected'
+        
+        # Remove rows with missing required fields
+        required = ['case_identifier', 'location_code', 'date_id_onset', 'disease']
+        for req in required:
+            if req not in df.columns:
+                df[req] = None
+        
+        initial_len = len(df)
+        df = df.dropna(subset=required)
+        dropped = initial_len - len(df)
+        if dropped > 0:
+            logger.warning(f"Dropped {dropped} rows with missing required fields")
+        
+        # Handle duplicates
+        if 'case_identifier' in df.columns:
+            duplicates = df['case_identifier'].duplicated().sum()
+            if duplicates > 0:
+                logger.warning(f"Found {duplicates} duplicate case_identifiers")
+                df = df.drop_duplicates(subset=['case_identifier'], keep='first')
+        
+        return df
+    
+    # ==================== DISEASE BURDEN METHODS ====================
+    
+    def load_disease_burden_from_raster(self, 
+                                       raster_path: Union[str, Path],
+                                       year: int,
+                                       disease: str = 'malaria',
+                                       source: str = 'Malaria Atlas Project',
+                                       band: int = 1,
+                                       stat: str = 'mean') -> Dict[str, Any]:
+        """
+        Load disease burden data from a raster file.
+        """
+        raster_path = Path(raster_path)
+        if not raster_path.exists():
+            raise FileNotFoundError(f"Raster file not found: {raster_path}")
+        
+        logger.info(f"Loading disease burden from raster: {raster_path}")
+        
+        # Load all locations with geometries
+        locations = self.session.query(models.Location).all()
+        if not locations:
+            logger.error("No locations found in database")
+            return {'loaded': 0, 'total_locations': 0, 'failed': 0, 'errors': ['No locations found']}
+        
+        stats = {
+            'total_locations': len(locations),
+            'loaded': 0,
+            'failed': 0,
+            'errors': [],
+            'raster_file': str(raster_path),
+            'year': year,
+            'disease': disease
+        }
+        
+        with rasterio.open(raster_path) as src:
+            raster_crs = src.crs or 'EPSG:4326'
+            nodata = src.nodata
+            
+            for loc in locations:
+                try:
+                    if not loc.geometry_wkt:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"Location {loc.location_code} has no geometry")
+                        continue
+                    
+                    geom = wkt.loads(loc.geometry_wkt)
+                    
+                    # Transform CRS if needed
+                    if raster_crs != 'EPSG:4326':
+                        gdf = gpd.GeoDataFrame([{'geometry': geom}], crs='EPSG:4326')
+                        gdf = gdf.to_crs(raster_crs)
+                        geom = gdf.geometry.iloc[0]
+                    
+                    # Extract values
+                    out_image, _ = mask(src, [geom], crop=True, all_touched=True)
+                    values = out_image[band-1]
+                    
+                    if nodata is not None:
+                        values = values[values != nodata]
+                    
+                    if len(values) > 0:
+                        if stat == 'mean':
+                            value = float(np.mean(values))
+                        elif stat == 'median':
+                            value = float(np.median(values))
+                        elif stat == 'min':
+                            value = float(np.min(values))
+                        elif stat == 'max':
+                            value = float(np.max(values))
+                        elif stat == 'sum':
+                            value = float(np.sum(values))
+                        else:
+                            value = float(np.mean(values))
+                    else:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"{loc.location_code}: No data in polygon")
+                        continue
+                    
+                    # Upsert
+                    existing = self.session.query(models.DiseaseBurden).filter_by(
+                        location_code=loc.location_code,
+                        year=year,
+                        disease=disease
+                    ).first()
+                    
+                    burden_data = {
+                        'location_code': loc.location_code,
+                        'year': year,
+                        'disease': disease,
+                        'incidence_rate': value,
+                        'source': source,
+                        'raster_file': raster_path.name,
+                        'extraction_method': stat
+                    }
+                    
+                    if existing:
+                        for key, val in burden_data.items():
+                            setattr(existing, key, val)
+                    else:
+                        new_burden = models.DiseaseBurden(**burden_data)
+                        self.session.add(new_burden)
+                    
+                    stats['loaded'] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error processing location {loc.location_code}: {e}")
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{loc.location_code}: {str(e)}")
+            
+            self.session.commit()
+        
+        logger.info(f"Disease burden loading complete. Loaded: {stats['loaded']}, Failed: {stats['failed']}")
+        return stats
+
+    def load_map_raster_to_disease_burden(self, 
+                                      raster_path: Union[str, Path],
+                                      year: int,
+                                      disease: str = 'malaria',
+                                      source: str = 'Malaria Atlas Project',
+                                      version: str = None,
+                                      band: int = 1,
+                                      stat: str = 'mean',
+                                      metric_type: str = 'incidence_rate') -> Dict[str, Any]:
+        """
+        Load Malaria Atlas Project raster data into disease_burden table.
+        
+        Args:
+            raster_path: Path to the raster file (GeoTIFF)
+            year: Year of the data
+            disease: Disease name (e.g., 'malaria')
+            source: Data source
+            version: Dataset version
+            band: Band number to extract
+            stat: Statistic to compute for polygons ('mean', 'median', 'min', 'max', 'sum')
+            metric_type: Type of metric ('incidence_rate', 'prevalence_rate', 'mortality_rate', 'cases_mean')
+        
+        Returns:
+            Dictionary with loading statistics
+        """
+        raster_path = Path(raster_path)
+        if not raster_path.exists():
+            raise FileNotFoundError(f"Raster file not found: {raster_path}")
+        
+        logger.info(f"Loading MAP disease burden from raster: {raster_path}")
+        logger.info(f"Year: {year}, Disease: {disease}, Metric: {metric_type}")
+        
+        # Load all locations with geometries
+        locations = self.session.query(models.Location).all()
+        if not locations:
+            logger.error("No locations found in database")
+            return {'loaded': 0, 'total_locations': 0, 'failed': 0, 'errors': ['No locations found']}
+        
+        stats = {
+            'total_locations': len(locations),
+            'loaded': 0,
+            'failed': 0,
+            'errors': [],
+            'raster_file': str(raster_path),
+            'year': year,
+            'disease': disease,
+            'metric_type': metric_type
+        }
+        
+        with rasterio.open(raster_path) as src:
+            raster_crs = src.crs
+            if raster_crs is None:
+                logger.warning("Raster has no CRS, assuming EPSG:4326")
+                raster_crs = 'EPSG:4326'
+            
+            nodata = src.nodata
+            
+            for loc in locations:
+                try:
+                    if not loc.geometry_wkt:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"Location {loc.location_code} has no geometry")
+                        continue
+                    
+                    geom = wkt.loads(loc.geometry_wkt)
+                    
+                    # Transform CRS if needed
+                    if raster_crs != 'EPSG:4326':
+                        gdf = gpd.GeoDataFrame([{'geometry': geom}], crs='EPSG:4326')
+                        gdf = gdf.to_crs(raster_crs)
+                        geom = gdf.geometry.iloc[0]
+                    
+                    # Extract values
+                    out_image, _ = mask(src, [geom], crop=True, all_touched=True)
+                    values = out_image[band-1]
+                    
+                    if nodata is not None:
+                        values = values[values != nodata]
+                    
+                    if len(values) > 0:
+                        if stat == 'mean':
+                            value = float(np.mean(values))
+                        elif stat == 'median':
+                            value = float(np.median(values))
+                        elif stat == 'min':
+                            value = float(np.min(values))
+                        elif stat == 'max':
+                            value = float(np.max(values))
+                        elif stat == 'sum':
+                            value = float(np.sum(values))
+                        else:
+                            value = float(np.mean(values))
+                    else:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"{loc.location_code}: No data in polygon")
+                        continue
+                    
+                    # Check if record already exists
+                    existing = self.session.query(models.DiseaseBurden).filter_by(
+                        location_code=loc.location_code,
+                        year=year,
+                        disease=disease
+                    ).first()
+                    
+                    burden_data = {
+                        'location_code': loc.location_code,
+                        'year': year,
+                        'disease': disease,
+                        metric_type: value,
+                        'source': source,
+                        'version': version,
+                        'raster_file': raster_path.name,
+                        'extraction_method': stat
+                    }
+                    
+                    if existing:
+                        # Update existing record
+                        for key, val in burden_data.items():
+                            setattr(existing, key, val)
+                        logger.debug(f"Updated disease burden for {loc.location_code}")
+                    else:
+                        # Create new record
+                        new_burden = models.DiseaseBurden(**burden_data)
+                        self.session.add(new_burden)
+                        logger.debug(f"Added disease burden for {loc.location_code}")
+                    
+                    stats['loaded'] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error processing location {loc.location_code}: {e}")
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{loc.location_code}: {str(e)}")
+            
+            self.session.commit()
+        
+        logger.info(f"Disease burden loading complete. Loaded: {stats['loaded']}, Failed: {stats['failed']}")
+        return stats
+
+    def load_multiple_map_rasters(self, 
+                             raster_files: List[Union[str, Path]],
+                             years: List[int],
+                             disease: str = 'malaria',
+                             source: str = 'Malaria Atlas Project',
+                             metric_mapping: Dict[int, str] = None) -> List[Dict[str, Any]]:
+        """
+        Load multiple MAP raster files (e.g., different years or different metrics).
+        
+        Args:
+            raster_files: List of raster file paths
+            years: List of years corresponding to each raster file
+            disease: Disease name
+            source: Data source
+            metric_mapping: Mapping from index to metric type
+                        e.g., {0: 'incidence_rate', 1: 'prevalence_rate'}
+        
+        Returns:
+            List of statistics for each raster
+        """
+        if metric_mapping is None:
+            # Default: assume all are incidence rates
+            metric_mapping = {i: 'incidence_rate' for i in range(len(raster_files))}
+        
+        results = []
+        
+        for i, (raster_file, year) in enumerate(zip(raster_files, years)):
+            metric_type = metric_mapping.get(i, 'incidence_rate')
+            
+            logger.info(f"Processing raster {i+1}/{len(raster_files)} for year {year}, metric {metric_type}")
+            
+            stats = self.load_map_raster_to_disease_burden(
+                raster_path=raster_file,
+                year=year,
+                disease=disease,
+                source=source,
+                metric_type=metric_type
+            )
+            results.append(stats)
+        
+        return results
+        
+    # ==================== GENERIC METHODS ====================
+    
+    def load_from_dataframe(self, df: pd.DataFrame, model_class):
+        """Generic method to load pandas DataFrame to any model."""
+        records = df.to_dict('records')
+        for record in records:
+            filtered_record = {k: v for k, v in record.items() 
+                             if hasattr(model_class, k)}
+            db_obj = model_class(**filtered_record)
+            self.session.add(db_obj)
+        self.session.commit()
+    
+    def load_from_file(self, file_path, model_class, schema_class=None, 
+                      column_mapping=None, **pandas_kwargs):
+        """Generic method to load from CSV/Excel file."""
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Read file based on extension
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path, **pandas_kwargs)
+        elif file_path.suffix.lower() in ['.xls', '.xlsx']:
+            df = pd.read_excel(file_path, **pandas_kwargs)
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+        
+        # Apply column mapping
+        if column_mapping:
+            df = df.rename(columns=column_mapping)
+        
+        # Validate with Pydantic if schema provided
+        records = df.to_dict('records')
+        if schema_class:
+            validated_records = []
+            for rec in records:
+                schema_fields = set(schema_class.model_fields.keys())
+                filtered = {k: v for k, v in rec.items() if k in schema_fields}
+                validated = schema_class(**filtered)
+                validated_records.append(validated.model_dump())
+            records = validated_records
+        
+        self.load_from_dataframe(pd.DataFrame(records), model_class)
+    
+    def _get_locations_as_geodataframe(self):
+        """Load all locations with WKT geometry into a GeoDataFrame."""
+        locations = self.session.query(models.Location).all()
+        data = []
+        for loc in locations:
+            geom = wkt.loads(loc.geometry_wkt) if loc.geometry_wkt else None
+            data.append({
+                'location_code': loc.location_code,
+                'geometry': geom,
+                'centroid_lat': loc.centroid_lat,
+                'centroid_lon': loc.centroid_lon
+            })
+        return gpd.GeoDataFrame(data, crs='EPSG:4326', geometry='geometry')
+# etl/mappings.py
+#!-*- coding: utf8 -*-
+
+
+#!-*- coding: utf8 -*-
+
+# Mapping from NetCDF variable name to database column and conversion
+NC_VARIABLE_MAP = {
+    't2m': {
+        'column': 'temperature_mean',
+        'convert': lambda k: k - 273.15,   # Kelvin to Celsius
+        'agg_method': 'mean',
+        'description': '2m temperature'
+    },
+    'tp': {
+        'column': 'rainfall_total',
+        'convert': lambda m: m * 1000,  # meters to mm
+        'agg_method': 'sum',
+        'description': 'Total precipitation'
+    },
+}
+
+# Vector Atlas vector occurrence mapping
+VECTOR_OBSERVATION_MAPPING = {
+    '__latitude__': 'site_latitude',
+    '__longitude__': 'site_longitude',
+    '__year__': 'year_start',
+    '__month__': 'month_start',
+    '__count__': 'sample_occurrence_n_tot',
+    'vector_species': 'recordedSpecies_species',
+}
+
+# GBIF vector observation mapping
+GBIF_VECTOR_OBSERVATION_MAPPING = {
+    # Core required fields
+    '__latitude__': 'decimalLatitude',
+    '__longitude__': 'decimalLongitude',
+    '__year__': 'year',
+    '__month__': 'month',
+    '__count__': 'individualCount',
+    '__event_date_full__': 'eventDate',  # Full date for fallback
+    
+    # Species information
+    'vector_species': 'scientificName',
+    'vector_subspecies': 'infraspecificEpithet',  # Optional subspecies info
+    
+    # Additional GBIF fields that might be useful
+    'collection_method': 'basisOfRecord',  # Maps to collection method type
+    
+    # Note: These fields are not typically in GBIF, so they're omitted
+    # 'life_stage': None,
+    # 'sex': None,
+    # 'tested_for_pathogen': None,
+    # 'infection_status': None,
+    # 'infection_rate': None,
+}
+
+
+# Case data mapping example
+CASE_DATA_MAPPING = {
+    'case_identifier': 'case_id',
+    'location_code': 'district',
+    'date_id_onset': 'onset_date',
+    'date_id_reported': 'report_date',
+    'disease': 'disease',
+    'age_years': 'age',
+    'sex': 'gender',
+    'outcome': 'outcome',
+    '__constants__': {
+        'disease': 'malaria',
+        'host_type': 'human',
+    }
+}
+
+
+VECTOR_ATLAS_MAPPING = {
+    # ===== LOCATION COORDINATES =====
+    # The dataset has multiple coordinate columns - using site_latitude/site_longitude as primary
+    '__latitude__': 'site_latitude',                    # Primary latitude
+    '__longitude__': 'site_longitude',                  # Primary longitude
+    
+    # Fallback coordinates if primary is missing
+    '__latitude_fallback__': 'location_coordinates_0',  # Fallback latitude
+    '__longitude_fallback__': 'location_coordinates_1', # Fallback longitude
+    
+    # Secondary coordinate system (if needed for verification)
+    '__latitude_alt__': 'site_latitude_2',
+    '__longitude_alt__': 'site_longitude_2',
+    
+    # ===== DATE INFORMATION =====
+    '__year__': 'year_start',                            # Year of observation
+    '__month__': 'month_start',                          # Month of observation
+    
+    # Optional date range (if sampling spanned multiple months)
+    '__year_end__': 'year_end',
+    '__month_end__': 'month_end',
+    
+    # ===== COUNT/ABUNDANCE DATA =====
+    # Primary count column (total across all sampling events)
+    '__count__': 'sample_occurrence_n_tot',
+    
+    # Individual sampling event counts
+    '__count_1__': 'sample_occurrence_n_1',
+    '__count_2__': 'sample_occurrence_n_2',
+    '__count_3__': 'sample_occurrence_n_3',
+    '__count_4__': 'sample_occurrence_n_4',
+    
+    # Sampling method descriptions
+    '__sampling_1__': 'sample_sampling_occurrence_1',
+    '__sampling_2__': 'sample_sampling_occurrence_2',
+    '__sampling_3__': 'sample_sampling_occurrence_3',
+    '__sampling_4__': 'sample_sampling_occurrence_4',
+    
+    # ===== VECTOR OBSERVATION FIELDS =====
+    # These map directly to your VectorObservation model
+    
+    # Species identification
+    'vector_species': 'recordedSpecies_species',        # Primary species name
+    'vector_subspecies': 'species',                     # Secondary species identifier
+    
+    # Presence/absence
+    'binary_presence': 'binary_presence',
+    
+    # Collection metadata
+    'collection_method': 'dataset_dataType',            # Type of data collection
+    'life_stage': 'bionomics_adult_data',               # Adult/larval data
+    
+    # Infection/parasite data
+    'tested_for_pathogen': 'bionomics_infection',
+    'infection_status': {
+        'source': 'bionomics_infection',
+        'function': lambda x: 'positive' if x and 'positive' in str(x).lower() 
+                              else 'negative' if x and 'negative' in str(x).lower()
+                              else 'unknown'
+    },
+    
+    # ===== SITE METADATA =====
+    'site_name': 'site_site',
+    'country': 'site_country',
+    'admin_level_1': 'site_admin_level_1',
+    'admin_level_2': 'site_admin_level_2',
+    'location_type': 'site_location_type',
+    'georef_confidence': 'site_confidence_in_georef',
+    'georef_source': 'site_georef_source',
+    'area_type': 'site_area_type',
+    
+    # ===== DATASET METADATA =====
+    'dataset_id': 'id',
+    'dataset_doi': 'dataset_doi',
+    'dataset_title': 'dataset_title',
+    'dataset_source': 'dataset_dataSource',
+    'dataset_description': 'dataset_description',
+    'dataset_location': 'dataset_location',
+    'dataset_region': 'dataset_region',
+    
+    # ===== BIONOMICS DATA =====
+    'bionomics_adult': 'bionomics_adult_data',
+    'bionomics_larval': 'bionomics_larval_site_data',
+    'bionomics_sampling_design': 'bionomics_study_sampling_design',
+    'bionomics_season': 'bionomics_season_given',
+    'bionomics_rainfall': 'bionomics_rainfall_time',
+    'biting_rate': 'bionomics_bitingRate',
+    'anthropo_zoophagic': 'bionomics_anthropoZoophagic',
+    'endo_exophagic': 'bionomics_endoExophagic',
+    'biting_activity': 'bionomics_bitingActivity',
+    'environment_type': 'bionomics_environment',
+    'larval_site': 'bionomics_LarvalSite',
+    
+    # ===== REFERENCE INFORMATION =====
+    'reference_author': 'reference_author',
+    'reference_title': 'reference_article_title',
+    'reference_journal': 'reference_journal_title',
+    'reference_citation': 'reference_citation',
+    'reference_year': 'reference_year',
+    'reference_published': 'reference_published',
+    
+    # ===== RESISTANCE DATA (for ResistanceTest table) =====
+    'resistance': {
+        'test_type': 'insecticideResistanceBioassays_test_protocal',
+        'insecticide': 'insecticideResistanceBioassays_insecticide_tested',
+        'insecticide_class': 'insecticideResistanceBioassays_insecticide_class',
+        'irac_moa': 'insecticideResistanceBioassays_irac_moa',
+        'irac_moa_code': 'insecticideResistanceBioassays_irac_moa_code',
+        'concentration_percent': 'insecticideResistanceBioassays_concentration_percent',
+        'concentration_microgram': 'insecticideResistanceBioassays_concentration_microgram',
+        'exposure_period': 'insecticideResistanceBioassays_exposure_period_min',
+        'intensity_multiplier': 'insecticideResistanceBioassays_intensity_multiplier',
+        'synergist_tested': 'insecticideResistanceBioassays_synergist_tested',
+        'synergist_concentration': 'insecticideResistanceBioassays_synergist_concentration',
+        'synergist_unit': 'insecticideResistanceBioassays_synergist_concentration_unit',
+        'mosquitoes_tested': 'insecticideResistanceBioassays_mosquitors_tested_n',
+        'mosquitoes_dead': 'insecticideResistanceBioassays_mosquitors_dead_n',
+        'percent_mortality': 'insecticideResistanceBioassays_percent_mortality',
+        'knockdown_time': 'insecticideResistanceBioassays_knock_down_expo_time_min',
+        'knockdown_count': 'insecticideResistanceBioassays_no_mosq_knock_down',
+        'knockdown_percent': 'insecticideResistanceBioassays_knock_down_percent',
+        'ktd50': 'insecticideResistanceBioassays_ktd_50_percent_min',
+        'ktd90': 'insecticideResistanceBioassays_ktd_90_percent_min',
+        'ktd95': 'insecticideResistanceBioassays_ktd_95_percent_min',
+        'bioassay_notes': 'insecticideResistanceBioassays_bioassay_notes',
+        'generation': 'insecticideResistanceBioassays_generation',
+        'wild_caught': 'insecticideResistanceBioassays_wild_caught_larvae_adults',
+    },
+    
+    # ===== MOLECULAR DATA (KDR mutations etc.) =====
+    'molecular': {
+        'vgsc_method': 'insecticideResistanceBioassays_vgscMethodAndSample',
+        'kdr_genotypes': 'insecticideResistanceBioassays_kdrGenotypeFrequencies',
+        'vgsc995_allele': 'insecticideResistanceBioassays_vgsc995AlleleFrequencies',
+        'vgsc402_genotypes': 'insecticideResistanceBioassays_vgsc402GenotypeFrequencies',
+        'vgsc402_allele': 'insecticideResistanceBioassays_vgsc402AlleleFrequencies',
+        'cyp6aap_allele': 'insecticideResistanceBioassays_cyp6aapAlleleFrequencies',
+        'cyp6aap_genotypes': 'insecticideResistanceBioassays_cyp6aapGenotypeFrequencies',
+        'cyp6p4_allele': 'insecticideResistanceBioassays_cyp6p4AlleleFrequencies',
+        'cyp6p4_genotypes': 'insecticideResistanceBioassays_cyp6p4GenotypeFrequencies',
+        'cyp4j5_allele': 'insecticideResistanceBioassays_cyp4j5AlleleFrequencies',
+        'cyp4j5_genotypes': 'insecticideResistanceBioassays_cyp4j5GenotypeFrequencies',
+        'gste2_119_allele': 'insecticideResistanceBioassays_gste2_119AlleleFrequencies',
+        'gste2_119_genotypes': 'insecticideResistanceBioassays_gste2_119GenotypeFrequencies',
+        'gste2_114_allele': 'insecticideResistanceBioassays_gste2_114AlleleFrequencies',
+        'gste2_114_genotypes': 'insecticideResistanceBioassays_gste2_114GenotypeFrequencies',
+        'rdl_method': 'insecticideResistanceBioassays_rdlMethodAndSample',
+        'rdl296_genotypes': 'insecticideResistanceBioassays_rdl296GenotypeFrequencies',
+        'rdl296_allele': 'insecticideResistanceBioassays_rdl296AlleleFrequencies',
+        'ace1_method': 'insecticideResistanceBioassays_ace1MethodAndSample',
+        'ace1_genotypes': 'insecticideResistanceBioassays_ace1GenotypeFrequencies',
+        'ace1_allele': 'insecticideResistanceBioassays_ace1AlleleFrequencies',
+    }
+}
+
+
+VECTOR_ATLAS_SIMPLE_MAPPING = {
+    # Primary coordinates (site_latitude/site_longitude exist in your data)
+    '__latitude__': 'site_latitude',
+    '__longitude__': 'site_longitude',
+    
+    # Fallback coordinates (if primary is missing)
+    '__latitude_fallback__': 'location_coordinates_0',
+    '__longitude_fallback__': 'location_coordinates_1',
+    
+    # Date information
+    '__year__': 'year_start',
+    '__month__': 'month_start',
+    
+    # Count - use total first, then sum individual counts
+    '__count__': 'sample_occurrence_n_tot',
+    '__count_alt__': ['sample_occurrence_n_1', 'sample_occurrence_n_2', 
+                      'sample_occurrence_n_3', 'sample_occurrence_n_4'],
+    
+    # Vector species
+    'vector_species': 'recordedSpecies_species',
+    
+    # Optional: infection data
+    'tested_for_pathogen': 'bionomics_infection',
+    
+    # Site name for reference
+    'site_name': 'site_site',
+}
+
+
+# etl/netcdf_utils.py
+# etl/netcdf_utils.py
+import xarray as xr
+import pandas as pd
+import numpy as np
+import rioxarray
+from shapely.geometry import Point, Polygon
+
+
+def open_netcdf(filepath):
+    """Open a NetCDF file with xarray."""
+    return xr.open_dataset(filepath)
+
+
+def extract_point(da, lat, lon):
+    """
+    Extract value from a DataArray at the nearest grid point.
+    da: DataArray with dimensions latitude, longitude (and possibly time).
+    """
+    # Align longitude system if needed
+    if 'longitude' in da.dims:
+        lon_vals = da.longitude.values
+        if lon_vals.min() >= 0 and lon < 0:
+            lon += 360
+        elif lon_vals.max() <= 180 and lon > 180:
+            lon -= 360
+    # Select nearest point – if time dimension exists, take first time?
+    # For daily aggregated data, time should be a single step.
+    point = da.sel(latitude=lat, longitude=lon, method='nearest')
+    # If time still present, average over time (should be single after aggregation)
+    if 'time' in point.dims and point.sizes['time'] > 1:
+        point = point.mean(dim='time')
+    return point.values.item() if point.values.size == 1 else float(point.values.mean())
+
+
+def extract_polygon(da, polygon):
+    """
+    Average variable over a polygon using rioxarray.
+    da: DataArray with latitude/longitude dimensions.
+    """
+    # Ensure CRS
+    da = da.rio.write_crs("EPSG:4326")
+    try:
+        clipped = da.rio.clip([polygon], crs="EPSG:4326")
+        mean_val = clipped.mean(dim=['latitude', 'longitude']).values
+        # If time still present, average over time
+        if 'time' in clipped.dims:
+            mean_val = mean_val.mean()
+        return mean_val.item() if mean_val.size == 1 else float(mean_val)
+    except Exception:
+        return None
+
+
+def aggregate_to_daily(ds, variable, method='mean'):
+    """
+    Resample sub-daily data to daily using method.
+    Returns a DataArray with a single time step per day.
+    """
+    # Ensure time is datetime
+    if not np.issubdtype(ds.time.dtype, np.datetime64):
+        ds['time'] = pd.to_datetime(ds.time.values)
+    daily = ds[variable].resample(time='1D').reduce(method)
+    return daily
+
+# etl/transformers.py
+
+# main.py
+#!/usr/bin/env python
+# main.py
+
+import sys
+from pathlib import Path
+
+# Ensure the project root is in sys.path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from database.session import engine, Base, SessionLocal
+from etl.loaders import DatabaseLoader
+from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING, VECTOR_ATLAS_MAPPING, VECTOR_ATLAS_SIMPLE_MAPPING
+import logging
+import os
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def create_tables_if_not_exist():
+    """Create all tables defined in Base.metadata."""
+    Base.metadata.create_all(bind=engine)
+    print("Tables checked/created.")
+
+
+def load_map_rasters(loader, map_data_dir, years=None, disease='malaria', source='Malaria Atlas Project'):
+    """
+    Helper function to load multiple MAP raster files.
+    
+    Args:
+        loader: DatabaseLoader instance
+        map_data_dir: Base directory containing MAP raster files
+        years: List of years to load (if None, attempts to load all years found)
+        disease: Disease name
+        source: Data source name
+    
+    Returns:
+        Dictionary with loading statistics for each year
+    """
+    map_data_dir = Path(map_data_dir)
+    
+    # Common MAP file naming patterns - adjust these to match your files
+    patterns = [
+        "*_Incidence_*.tif",
+        "*_Pf_Incidence_*.tif",
+        "*_incidence_*.tif",
+        "*_Incidence_Count_*.tif"
+    ]
+    
+    if not map_data_dir.exists():
+        print(f"MAP data directory not found: {map_data_dir}")
+        return {}
+    
+    # Find all raster files
+    raster_files = []
+    for pattern in patterns:
+        raster_files.extend(list(map_data_dir.rglob(pattern)))
+    
+    if not raster_files:
+        print(f"No MAP raster files found in {map_data_dir}")
+        return {}
+    
+    print(f"Found {len(raster_files)} MAP raster files")
+    
+    # Group files by year (attempt to extract year from filename)
+    files_by_year = {}
+    for raster_file in raster_files:
+        # Try to extract year from filename (look for 4-digit number)
+        import re
+        year_matches = re.findall(r'((?:19|20)\d{2})', raster_file.name)
+        if year_matches:
+            year = int(year_matches[len(year_matches) - 1])
+            if years is None or year in years:
+                files_by_year[year] = raster_file
+        else:
+            print(f"Could not extract year from filename: {raster_file.name}")
+    
+    if not files_by_year:
+        print("No files with identifiable years found")
+        return {}
+    
+    # Load each year's raster
+    results = {}
+    for year, raster_file in sorted(files_by_year.items()):
+        print(f"\nLoading MAP data for year {year} from {raster_file.name}")
+        
+        try:
+            stats = loader.load_map_raster_to_disease_burden(
+                raster_path=raster_file,
+                year=year,
+                disease=disease,
+                source=source,
+                version=f"MAP_{year}",
+                metric_type='incidence_rate',
+                stat='mean'
+            )
+            results[year] = stats
+            print(f"  ✓ Loaded {stats['loaded']} locations for {year}")
+            
+        except Exception as e:
+            print(f"  ❌ Failed to load {year}: {e}")
+            results[year] = {'error': str(e)}
+    
+    return results
+
+
+def run_etl_pipeline():
+    """Run the complete ETL pipeline with proper error handling."""
+    
+    # Initialize database session
+    db = SessionLocal()
+    loader = DatabaseLoader(db)
+    
+    pipeline_results = {}
+    
+    try:
+        # ==================== STEP 1: Load Location Data ====================
+        print("\n" + "="*50)
+        print("STEP 1: Loading location data")
+        print("="*50)
+        
+        region_gpkg = Path(__file__).parent / "study_areas" / "ghana" / "greater_accra.gpkg"
+        if region_gpkg.exists():
+            stats = loader.load_location_from_gpkg(
+                gpkg_path=region_gpkg,
+                admin_level='region'
+            )
+            pipeline_results['location'] = stats
+            print(f"Location loading stats: Inserted: {stats['inserted']}, Updated: {stats['updated']}")
+        
+        # Commit after successful step
+        db.commit()
+        print("✓ Step 1 committed successfully")
+        
+        # ==================== STEP 2: Load Environmental Data ====================
+        print("\n" + "="*50)
+        print("STEP 2: Loading environmental data from NetCDF")
+        print("="*50)
+        
+        data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+        env_stats = loader.load_environmental_from_netcdf(data_root)
+        pipeline_results['environmental'] = env_stats
+        print(f"Environmental loading stats: Processed {env_stats['processed_files']} files")
+        
+        # Commit after successful step
+        db.commit()
+        print("✓ Step 2 committed successfully")
+        
+    except Exception as e:
+        print(f"❌ Error in steps 1-2: {e}")
+        db.rollback()
+        logger.error(f"Rolling back transaction due to: {e}")
+        
+        # Check if we can continue with remaining steps
+        print("\n⚠️  Attempting to continue with remaining steps...")
+    
+    try:
+        # ==================== STEP 3: Load Vector Observation Data ====================
+        print("\n" + "="*50)
+        print("STEP 3: Loading vector observation data from GBIF / Vector Atlas")
+        print("="*50)
+        
+        # GBIF data
+        gbif_stats = loader.load_vector_from_csv(
+            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/africa",
+            pattern="*.csv",
+            column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+            sep='\t'
+        )
+        pipeline_results['vector_gbif'] = gbif_stats
+        print(f"GBIF vector loading stats: Loaded {gbif_stats['loaded_records']} records")
+        
+        # Vector Atlas data (commented out by default, uncomment if needed)
+        # va_stats = loader.load_vector_from_csv(
+        #     data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
+        #     pattern="*.csv",
+        #     column_mapping=VECTOR_ATLAS_SIMPLE_MAPPING,
+        #     sep='\t'
+        # )
+        # pipeline_results['vector_atlas'] = va_stats
+        # print(f"Vector Atlas loading stats: Loaded {va_stats['loaded_records']} records")
+        
+        # Commit after successful step
+        db.commit()
+        print("✓ Step 3 committed successfully")
+        
+    except Exception as e:
+        print(f"❌ Error in step 3: {e}")
+        db.rollback()
+        logger.error(f"Rolling back transaction due to: {e}")
+    
+    try:
+        # ==================== STEP 4: Load Disease Burden Data (single raster) ====================
+        print("\n" + "="*50)
+        print("STEP 4: Loading disease burden data from single raster")
+        print("="*50)
+        
+        raster_path = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map/2025_GBD2024_Global_Pf_Incidence_Count_2000/2025_GBD2024_Global_Pf_Incidence_Count_2024.tif"
+        
+        if Path(raster_path).exists():
+            burden_stats = loader.load_disease_burden_from_raster(
+                raster_path=raster_path,
+                year=2024,
+                disease='malaria',
+                source='GBD 2024'
+            )
+            pipeline_results['disease_burden_2024'] = burden_stats
+            print(f"Disease burden loading stats: Loaded {burden_stats['loaded']} locations")
+            
+            # Commit after successful step
+            db.commit()
+            print("✓ Step 4 committed successfully")
+        else:
+            print(f"Raster file not found: {raster_path}")
+            
+    except Exception as e:
+        print(f"❌ Error in step 4: {e}")
+        db.rollback()
+        logger.error(f"Rolling back transaction due to: {e}")
+    
+    try:
+        # ==================== STEP 5: Load Multiple MAP Rasters ====================
+        print("\n" + "="*50)
+        print("STEP 5: Loading multiple MAP raster time series")
+        print("="*50)
+        
+        # Base directory for MAP data
+        map_base_dir = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map"
+        
+        # Define specific years to load (adjust based on your available data)
+        target_years = list(range(2000,2025))
+        
+        # Option 1: Load from a specific subdirectory
+        map_incidence_dir = Path(map_base_dir) / "incidence"
+        if map_incidence_dir.exists():
+            map_results = load_map_rasters(
+                loader=loader,
+                map_data_dir=map_incidence_dir,
+                years=target_years,
+                disease='malaria',
+                source='Malaria Atlas Project'
+            )
+            pipeline_results['map_time_series'] = map_results
+            
+            # Count total loaded across years
+            total_loaded = sum(stats.get('loaded', 0) for stats in map_results.values() if isinstance(stats, dict))
+            print(f"\nMAP time series loading complete: {total_loaded} total location-year records")
+            
+            # Commit after successful step
+            db.commit()
+            print("✓ Step 5 committed successfully")
+        else:
+            print(f"MAP incidence directory not found: {map_incidence_dir}")
+            
+    except Exception as e:
+        print(f"❌ Error in step 5: {e}")
+        db.rollback()
+        logger.error(f"Rolling back transaction due to: {e}")
+    
+    # ==================== Summary ====================
+    print("\n" + "="*50)
+    print("LOADING COMPLETE - SUMMARY")
+    print("="*50)
+    
+    if 'location' in pipeline_results:
+        stats = pipeline_results['location']
+        print(f"✓ Location data: {stats['inserted'] + stats['updated']} features processed")
+    
+    if 'environmental' in pipeline_results:
+        print(f"✓ Environmental data: {pipeline_results['environmental']['processed_files']} NetCDF files")
+    
+    if 'vector_gbif' in pipeline_results:
+        print(f"✓ GBIF vector observations: {pipeline_results['vector_gbif']['loaded_records']} records")
+    
+    if 'vector_atlas' in pipeline_results:
+        print(f"✓ Vector Atlas observations: {pipeline_results['vector_atlas']['loaded_records']} records")
+    
+    if 'disease_burden_2024' in pipeline_results:
+        print(f"✓ Disease burden 2024: {pipeline_results['disease_burden_2024']['loaded']} locations")
+    
+    if 'map_time_series' in pipeline_results:
+        total_map = sum(stats.get('loaded', 0) for stats in pipeline_results['map_time_series'].values() 
+                       if isinstance(stats, dict))
+        years_loaded = len([y for y, s in pipeline_results['map_time_series'].items() 
+                           if isinstance(s, dict) and s.get('loaded', 0) > 0])
+        print(f"✓ MAP time series: {total_map} records across {years_loaded} years")
+    
+    return pipeline_results
+
+
+def main():
+    """Main entry point."""
+    # Ensure tables exist
+    create_tables_if_not_exist()
+    
+    # Run the pipeline
+    results = run_etl_pipeline()
+    
+    print("\n✨ ETL pipeline execution completed.")
+
+
+if __name__ == "__main__":
+    main()
+# prepare_data/__init__.py
+
+# prepare_data/gee_data_download_utils.py
+#-*-coding:utf8-*-
+
+
+import ee
+
+
+
+def add_coords(feature):
+    """Add lat and lon properties derived from the feature's geometry."""
+    geom = feature.geometry()
+    coords = geom.coordinates()
+    return feature.set({
+        'lat': coords.get(1),
+        'lon': coords.get(0)
+    })
+
+
+def download_health_facility_occurrence_data(county_name: str):
+    # 1. Setup Names
+    search_name_upper = county_name.upper()
+
+    # 2. Load your Tabular Asset (No coordinates)
+    my_list = ee.FeatureCollection("projects/gen-lang-client-0359288668/assets/kenya-health-facilities-2017_08_02") \
+                .filter(ee.Filter.eq('County', search_name_upper))
+
+    # 3. Load a Spatial Reference (OSM Health Facilities - which HAVE coordinates)
+    # We use a public dataset to "find" the points for your names
+    osm_reference = ee.FeatureCollection("projects/sat-io/open-datasets/HOT_OSM/ken_health_facilities_points")
+
+    # 4. Define a Join
+    # We match 'Name' from your list to 'name' in OSM
+    save_best_join = ee.Join.saveFirst(matchKey='spatial_match')
+    
+    # Define the link: Match your "Name" column to OSM's "name" column
+    # Note: OSM names are often lowercase, so we use a fuzzy match or just equals
+    filter_match = ee.Filter.equals(
+        leftField='Name', 
+        rightField='name'
+    )
+
+    # Execute Join
+    joined_col = save_best_join.apply(my_list, osm_reference, filter_match)
+
+    # 5. Extract Coordinates from the joined "spatial_match"
+    def extract_joined_coords(feature):
+        matched_feat = ee.Feature(feature.get('spatial_match'))
+        # If no match was found, this would stay null, so we handle that:
+        return feature.set({
+            'lon': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(0), 0),
+            'lat': ee.Algorithms.If(matched_feat, matched_feat.geometry().coordinates().get(1), 0)
+        })
+
+    # Map the extraction and filter out those we couldn't find (the 0s)
+    facilities_final = joined_col.map(extract_joined_coords).filter(ee.Filter.neq('lat', 0))
+
+    # 6. Select and Export
+    facilities_export = facilities_final.select(
+        ['Name', 'Facility type', 'Owner', 'County', 'lat', 'lon']
+    )
+
+    count = facilities_export.size().getInfo()
+    print(f"Matched {count} facilities with coordinates in {search_name_upper}.")
+
+    if count > 0:
+        task = ee.batch.Export.table.toDrive(
+            collection=facilities_export,
+            description=f'{county_name}_geocoded_facilities',
+            folder='GEE_exports',
+            fileFormat='CSV'
+        )
+        task.start()
+        print("Geocoding export started.")
+
+
+if __name__ == '__main__':
+    
+    ee.Authenticate()
+    ee.Initialize(project='gen-lang-client-0359288668')
+    download_health_facility_occurrence_data(county_name='SIAYA')
+    
+
+
+# scripts/__init__.py
+
+# scripts/backfill_countries.py
+#!/usr/bin/env python
+# scripts/backfill_countries.py
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from database.session import SessionLocal
+from etl.loaders import DatabaseLoader
+
+def main():
+    db = SessionLocal()
+    loader = DatabaseLoader(db)
+    
+    try:
+        print("Backfilling country information for all locations...")
+        updated = loader._populate_location_countries()
+        print(f"Done! Updated {updated} locations.")
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+
+    main()

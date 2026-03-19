@@ -21,6 +21,7 @@ import re
 from . import mappings
 from . import grib_utils
 from . import netcdf_utils
+from shapely import wkt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -823,7 +824,187 @@ class DatabaseLoader:
         
         logger.info(f"Disease burden loading complete. Loaded: {stats['loaded']}, Failed: {stats['failed']}")
         return stats
-    
+
+    def load_map_raster_to_disease_burden(self, 
+                                      raster_path: Union[str, Path],
+                                      year: int,
+                                      disease: str = 'malaria',
+                                      source: str = 'Malaria Atlas Project',
+                                      version: str = None,
+                                      band: int = 1,
+                                      stat: str = 'mean',
+                                      metric_type: str = 'incidence_rate') -> Dict[str, Any]:
+        """
+        Load Malaria Atlas Project raster data into disease_burden table.
+        
+        Args:
+            raster_path: Path to the raster file (GeoTIFF)
+            year: Year of the data
+            disease: Disease name (e.g., 'malaria')
+            source: Data source
+            version: Dataset version
+            band: Band number to extract
+            stat: Statistic to compute for polygons ('mean', 'median', 'min', 'max', 'sum')
+            metric_type: Type of metric ('incidence_rate', 'prevalence_rate', 'mortality_rate', 'cases_mean')
+        
+        Returns:
+            Dictionary with loading statistics
+        """
+        raster_path = Path(raster_path)
+        if not raster_path.exists():
+            raise FileNotFoundError(f"Raster file not found: {raster_path}")
+        
+        logger.info(f"Loading MAP disease burden from raster: {raster_path}")
+        logger.info(f"Year: {year}, Disease: {disease}, Metric: {metric_type}")
+        
+        # Load all locations with geometries
+        locations = self.session.query(models.Location).all()
+        if not locations:
+            logger.error("No locations found in database")
+            return {'loaded': 0, 'total_locations': 0, 'failed': 0, 'errors': ['No locations found']}
+        
+        stats = {
+            'total_locations': len(locations),
+            'loaded': 0,
+            'failed': 0,
+            'errors': [],
+            'raster_file': str(raster_path),
+            'year': year,
+            'disease': disease,
+            'metric_type': metric_type
+        }
+        
+        with rasterio.open(raster_path) as src:
+            raster_crs = src.crs
+            if raster_crs is None:
+                logger.warning("Raster has no CRS, assuming EPSG:4326")
+                raster_crs = 'EPSG:4326'
+            
+            nodata = src.nodata
+            
+            for loc in locations:
+                try:
+                    if not loc.geometry_wkt:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"Location {loc.location_code} has no geometry")
+                        continue
+                    
+                    geom = wkt.loads(loc.geometry_wkt)
+                    
+                    # Transform CRS if needed
+                    if raster_crs != 'EPSG:4326':
+                        gdf = gpd.GeoDataFrame([{'geometry': geom}], crs='EPSG:4326')
+                        gdf = gdf.to_crs(raster_crs)
+                        geom = gdf.geometry.iloc[0]
+                    
+                    # Extract values
+                    out_image, _ = mask(src, [geom], crop=True, all_touched=True)
+                    values = out_image[band-1]
+                    
+                    if nodata is not None:
+                        values = values[values != nodata]
+                    
+                    if len(values) > 0:
+                        if stat == 'mean':
+                            value = float(np.mean(values))
+                        elif stat == 'median':
+                            value = float(np.median(values))
+                        elif stat == 'min':
+                            value = float(np.min(values))
+                        elif stat == 'max':
+                            value = float(np.max(values))
+                        elif stat == 'sum':
+                            value = float(np.sum(values))
+                        else:
+                            value = float(np.mean(values))
+                    else:
+                        stats['failed'] += 1
+                        stats['errors'].append(f"{loc.location_code}: No data in polygon")
+                        continue
+                    
+                    # Check if record already exists
+                    existing = self.session.query(models.DiseaseBurden).filter_by(
+                        location_code=loc.location_code,
+                        year=year,
+                        disease=disease
+                    ).first()
+                    
+                    burden_data = {
+                        'location_code': loc.location_code,
+                        'year': year,
+                        'disease': disease,
+                        metric_type: value,
+                        'source': source,
+                        'version': version,
+                        'raster_file': raster_path.name,
+                        'extraction_method': stat
+                    }
+                    
+                    if existing:
+                        # Update existing record
+                        for key, val in burden_data.items():
+                            setattr(existing, key, val)
+                        logger.debug(f"Updated disease burden for {loc.location_code}")
+                    else:
+                        # Create new record
+                        new_burden = models.DiseaseBurden(**burden_data)
+                        self.session.add(new_burden)
+                        logger.debug(f"Added disease burden for {loc.location_code}")
+                    
+                    stats['loaded'] += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error processing location {loc.location_code}: {e}")
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{loc.location_code}: {str(e)}")
+            
+            self.session.commit()
+        
+        logger.info(f"Disease burden loading complete. Loaded: {stats['loaded']}, Failed: {stats['failed']}")
+        return stats
+
+    def load_multiple_map_rasters(self, 
+                             raster_files: List[Union[str, Path]],
+                             years: List[int],
+                             disease: str = 'malaria',
+                             source: str = 'Malaria Atlas Project',
+                             metric_mapping: Dict[int, str] = None) -> List[Dict[str, Any]]:
+        """
+        Load multiple MAP raster files (e.g., different years or different metrics).
+        
+        Args:
+            raster_files: List of raster file paths
+            years: List of years corresponding to each raster file
+            disease: Disease name
+            source: Data source
+            metric_mapping: Mapping from index to metric type
+                        e.g., {0: 'incidence_rate', 1: 'prevalence_rate'}
+        
+        Returns:
+            List of statistics for each raster
+        """
+        if metric_mapping is None:
+            # Default: assume all are incidence rates
+            metric_mapping = {i: 'incidence_rate' for i in range(len(raster_files))}
+        
+        results = []
+        
+        for i, (raster_file, year) in enumerate(zip(raster_files, years)):
+            metric_type = metric_mapping.get(i, 'incidence_rate')
+            
+            logger.info(f"Processing raster {i+1}/{len(raster_files)} for year {year}, metric {metric_type}")
+            
+            stats = self.load_map_raster_to_disease_burden(
+                raster_path=raster_file,
+                year=year,
+                disease=disease,
+                source=source,
+                metric_type=metric_type
+            )
+            results.append(stats)
+        
+        return results
+        
     # ==================== GENERIC METHODS ====================
     
     def load_from_dataframe(self, df: pd.DataFrame, model_class):

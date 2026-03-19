@@ -12,8 +12,13 @@ print("\nBatch processing multiple GRIB files")
 grib_files = [
     # BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
     # BASE_DIR + "/climatic_timeseries_data/2025_data.grib",
-    BASE_DIR + "/climatic_timeseries_data/2015_data.grib",
-    BASE_DIR + "/climatic_timeseries_data/2020_data.grib",
+    # BASE_DIR + "/climatic_timeseries_data/2015_data.grib",
+    # BASE_DIR + "/climatic_timeseries_data/2020_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2016_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2017_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2018_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2019_data.grib",
+    BASE_DIR + "/climatic_timeseries_data/2020_data.grib"
 ]
 
 batch_results = batch_clip_era5(
