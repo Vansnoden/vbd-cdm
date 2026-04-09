@@ -23,23 +23,22 @@ class DimTime(Base):
     is_holiday = Column(String(3), default='no')  # 'yes' or 'no'
 
 
-class Location(Base):
+class DimLocation(Base):
     """Geographic locations hierarchy"""
-    __tablename__ = "location"
+    __tablename__ = "dim_location"
     
     id = Column(Integer, primary_key=True, index=True)
     location_code = Column(String(50), unique=True, nullable=False)
     name = Column(String(200), nullable=False)
     admin_level = Column(String(50))  # country, state, district, village
-    parent_location_code = Column(String(50), ForeignKey("location.location_code"))
-    # For spatial: use Geometry column for PostGIS, Text for SQLite
-    geometry_wkt = Column(Text)  # WKT representation
+    parent_location_code = Column(String(50), ForeignKey("dim_location.location_code"))
+    geometry_wkt = Column(Text)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
     country_name = Column(String)
     country_code = Column(String)
-    # Self-referential relationship
-    parent = relationship("Location", remote_side=[location_code], backref="children")
+    parent = relationship("DimLocation",
+                          remote_side=[location_code], backref="children")
 
     def set_country_from_coords(self):
         """
@@ -55,9 +54,9 @@ class Location(Base):
             self.country_code = country_code
 
 
-class HostCase(Base):
+class FactHostCase(Base):
     """Human or animal disease cases"""
-    __tablename__ = "host_case"
+    __tablename__ = "fact_host_case"
     
     id = Column(Integer, primary_key=True, index=True)
     case_identifier = Column(String(100), unique=True)  # External ID
@@ -79,14 +78,14 @@ class HostCase(Base):
     outcome = Column(String(50))  # 'recovered', 'died', 'unknown'
     
     # Relationships
-    location = relationship("Location")
+    location = relationship("DimLocation")
     onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
     reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
 
 
-class DiseaseBurden(Base):
+class FactDiseaseBurden(Base):
     """Disease burden data from sources like Malaria Atlas Project"""
-    __tablename__ = "disease_burden"
+    __tablename__ = "fact_disease_burden"
     
     id = Column(Integer, primary_key=True, index=True)
     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
@@ -112,19 +111,19 @@ class DiseaseBurden(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     
     # Relationships
-    location = relationship("Location")
+    location = relationship("DimLocation")
     
     __table_args__ = (
         UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease'),
     )
 
 
-class VectorObservation(Base):
+class FactVectorObservation(Base):
     """Vector surveillance data"""
-    __tablename__ = "vector_observation"
+    __tablename__ = "fact_vector_observation"
     
     id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
+    location_code = Column(String(50), ForeignKey("dim_location.location_code"))
     date_id = Column(String(10), ForeignKey("dim_time.date_id"))
     
     # Vector details
@@ -144,16 +143,16 @@ class VectorObservation(Base):
     infection_rate = Column(Float)  # Proportion positive
     
     # Relationships
-    location = relationship("Location")
+    location = relationship("DimLocation")
     date = relationship("DimTime")
 
 
-class EnvironmentalFactor(Base):
+class FactEnvironmentalFactor(Base):
     """Climate and environmental data"""
-    __tablename__ = "environmental_factor"
+    __tablename__ = "fact_environmental_factor"
     
     id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
+    location_code = Column(String(50), ForeignKey("dim_location.location_code"))
     date_id = Column(String(10), ForeignKey("dim_time.date_id"))
     
     # Climate variables
@@ -175,37 +174,37 @@ class EnvironmentalFactor(Base):
     __table_args__ = (UniqueConstraint('location_code', 'date_id', name='uq_env_location_date'),)
     
     # Relationships
-    location = relationship("Location")
+    location = relationship("DimLocation")
     date = relationship("DimTime")
 
 
-class HealthFacility(Base):
-    __tablename__ = "health_facility"
+class FactHealthFacility(Base):
+    __tablename__ = "fact_health_facility"
     id = Column(Integer, primary_key=True)
     facility_code = Column(String(50), unique=True)
     name = Column(String(200))
-    location_code = Column(String(50), ForeignKey("location.location_code"))
+    location_code = Column(String(50), ForeignKey("dim_location.location_code"))
     lat = Column(Float)
     lon = Column(Float)
     type = Column(String(50))  # hospital, clinic, dispensary
     catchment_population = Column(Integer)
 
 
-class Intervention(Base):
-    __tablename__ = "intervention"
+class FactIntervention(Base):
+    __tablename__ = "fact_intervention"
     id = Column(Integer, primary_key=True)
     intervention_type = Column(String(50))  # 'IRS', 'ITN', 'larviciding'
     date_start = Column(Date)
     date_end = Column(Date)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
+    location_code = Column(String(50), ForeignKey("dim_location.location_code"))
     coverage = Column(Float)  # percentage or number
     target_disease = Column(String(50))  # 'malaria', 'dengue', 'both'
 
 
-class ResistanceTest(Base):
-    __tablename__ = "resistance_test"
+class FactResistanceTest(Base):
+    __tablename__ = "fact_resistance_test"
     id = Column(Integer, primary_key=True)
-    vector_observation_id = Column(Integer, ForeignKey("vector_observation.id"))
+    vector_observation_id = Column(Integer, ForeignKey("fact_vector_observation.id"))
     test_type = Column(String(50))  # 'WHO tube', 'CDC bottle'
     insecticide = Column(String(100))
     concentration = Column(Float)
@@ -214,8 +213,8 @@ class ResistanceTest(Base):
     resistance_status = Column(String(50))  # 'susceptible', 'confirmed', 'possible'
 
 
-class SocioEconomic(Base):
-    __tablename__ = "socioeconomic"
+class FactSocioEconomic(Base):
+    __tablename__ = "fact_socioeconomic"
     id = Column(Integer, primary_key=True)
     location_code = Column(String(50), ForeignKey("location.location_code"))
     year = Column(Integer)
