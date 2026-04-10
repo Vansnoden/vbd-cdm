@@ -2,302 +2,167 @@
 # main.py
 
 import sys
+import argparse
+import logging
 from pathlib import Path
 
-# Ensure the project root is in sys.path
+import yaml
+
+# Ensure project root is in path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from database.session import engine, Base, SessionLocal
 from etl.loaders import DatabaseLoader
-from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING, VECTOR_ATLAS_MAPPING, VECTOR_ATLAS_SIMPLE_MAPPING
-import logging
-import os
+from etl.mappings import GBIF_VECTOR_OBSERVATION_MAPPING
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def create_tables_if_not_exist():
-    """Create all tables defined in Base.metadata."""
+def load_config(config_path: str) -> dict:
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def reset_database():
+    confirm = input("⚠️  This will DELETE ALL DATA. Type 'yes' to continue: ")
+    if confirm.lower() != "yes":
+        print("Aborted.")
+        sys.exit(0)
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    print("Tables checked/created.")
+    print("✅ Database reset and tables recreated.")
 
 
-def load_map_rasters(loader, map_data_dir, years=None, disease='malaria', source='Malaria Atlas Project'):
-    """
-    Helper function to load multiple MAP raster files.
-    
-    Args:
-        loader: DatabaseLoader instance
-        map_data_dir: Base directory containing MAP raster files
-        years: List of years to load (if None, attempts to load all years found)
-        disease: Disease name
-        source: Data source name
-    
-    Returns:
-        Dictionary with loading statistics for each year
-    """
-    map_data_dir = Path(map_data_dir)
-    
-    # Common MAP file naming patterns - adjust these to match your files
-    patterns = [
-        "*_Incidence_*.tif",
-        "*_Pf_Incidence_*.tif",
-        "*_incidence_*.tif",
-        "*_Incidence_Count_*.tif"
-    ]
-    
-    if not map_data_dir.exists():
-        print(f"MAP data directory not found: {map_data_dir}")
-        return {}
-    
-    # Find all raster files
-    raster_files = []
-    for pattern in patterns:
-        raster_files.extend(list(map_data_dir.rglob(pattern)))
-    
-    if not raster_files:
-        print(f"No MAP raster files found in {map_data_dir}")
-        return {}
-    
-    print(f"Found {len(raster_files)} MAP raster files")
-    
-    # Group files by year (attempt to extract year from filename)
-    files_by_year = {}
-    for raster_file in raster_files:
-        # Try to extract year from filename (look for 4-digit number)
-        import re
-        year_matches = re.findall(r'((?:19|20)\d{2})', raster_file.name)
-        if year_matches:
-            year = int(year_matches[len(year_matches) - 1])
-            if years is None or year in years:
-                files_by_year[year] = raster_file
-        else:
-            print(f"Could not extract year from filename: {raster_file.name}")
-    
-    if not files_by_year:
-        print("No files with identifiable years found")
-        return {}
-    
-    # Load each year's raster
-    results = {}
-    for year, raster_file in sorted(files_by_year.items()):
-        print(f"\nLoading MAP data for year {year} from {raster_file.name}")
-        
-        try:
-            stats = loader.load_map_raster_to_disease_burden(
-                raster_path=raster_file,
-                year=year,
-                disease=disease,
-                source=source,
-                version=f"MAP_{year}",
-                metric_type='incidence_rate',
-                stat='mean'
-            )
-            results[year] = stats
-            print(f"  ✓ Loaded {stats['loaded']} locations for {year}")
-            
-        except Exception as e:
-            print(f"  ❌ Failed to load {year}: {e}")
-            results[year] = {'error': str(e)}
-    
-    return results
+def run_step(step: str, loader: DatabaseLoader, config: dict, study_area: str) -> bool:
+    """Execute a single ETL step. Returns True on success, False on failure."""
+    logger.info(f"Starting step: {step}")
 
-
-def run_etl_pipeline():
-    """Run the complete ETL pipeline with proper error handling."""
-    
-    # Initialize database session
-    db = SessionLocal()
-    loader = DatabaseLoader(db)
-    
-    pipeline_results = {}
-    
     try:
-        # ==================== STEP 1: Load Location Data ====================
-        print("\n" + "="*50)
-        print("STEP 1: Loading location data")
-        print("="*50)
-        
-        region_gpkg = Path(__file__).parent / "study_areas" / "ghana" / "greater_accra.gpkg"
-        if region_gpkg.exists():
+        if step == "vocabulary":
+            vocab_path = Path(config["data_paths"]["vocabulary"])
+            if not vocab_path.exists():
+                logger.error(f"Vocabulary file not found: {vocab_path}")
+                return False
+            stats = loader.load_dimensions_from_vocabulary(vocab_path)
+            logger.info(f"Vocabulary loaded: {stats['inserted']} inserted, {stats['updated']} updated")
+            if stats["errors"]:
+                logger.warning(f"Errors: {stats['errors'][:3]}")
+            return True
+
+        elif step == "location":
+            gpkg_path = Path(config["data_paths"]["study_areas"][study_area])
+            if not gpkg_path.exists():
+                logger.error(f"Study area GeoPackage not found: {gpkg_path}")
+                return False
             stats = loader.load_location_from_gpkg(
-                gpkg_path=region_gpkg,
-                admin_level='region'
+                gpkg_path=gpkg_path,
+                admin_level="region",
+                auto_populate_country=True
             )
-            pipeline_results['location'] = stats
-            print(f"Location loading stats: Inserted: {stats['inserted']}, Updated: {stats['updated']}")
-        
-        # Commit after successful step
-        db.commit()
-        print("✓ Step 1 committed successfully")
-        
-        # ==================== STEP 2: Load Environmental Data ====================
-        print("\n" + "="*50)
-        print("STEP 2: Loading environmental data from NetCDF")
-        print("="*50)
-        
-        data_root = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
-        env_stats = loader.load_environmental_from_netcdf(data_root)
-        pipeline_results['environmental'] = env_stats
-        print(f"Environmental loading stats: Processed {env_stats['processed_files']} files")
-        
-        # Commit after successful step
-        db.commit()
-        print("✓ Step 2 committed successfully")
-        
-    except Exception as e:
-        print(f"❌ Error in steps 1-2: {e}")
-        db.rollback()
-        logger.error(f"Rolling back transaction due to: {e}")
-        
-        # Check if we can continue with remaining steps
-        print("\n⚠️  Attempting to continue with remaining steps...")
-    
-    try:
-        # ==================== STEP 3: Load Vector Observation Data ====================
-        print("\n" + "="*50)
-        print("STEP 3: Loading vector observation data from GBIF / Vector Atlas")
-        print("="*50)
-        
-        # GBIF data
-        gbif_stats = loader.load_vector_from_csv(
-            data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/africa",
-            pattern="*.csv",
-            column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
-            sep='\t'
-        )
-        pipeline_results['vector_gbif'] = gbif_stats
-        print(f"GBIF vector loading stats: Loaded {gbif_stats['loaded_records']} records")
-        
-        # Vector Atlas data (commented out by default, uncomment if needed)
-        # va_stats = loader.load_vector_from_csv(
-        #     data_dir="/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae",
-        #     pattern="*.csv",
-        #     column_mapping=VECTOR_ATLAS_SIMPLE_MAPPING,
-        #     sep='\t'
-        # )
-        # pipeline_results['vector_atlas'] = va_stats
-        # print(f"Vector Atlas loading stats: Loaded {va_stats['loaded_records']} records")
-        
-        # Commit after successful step
-        db.commit()
-        print("✓ Step 3 committed successfully")
-        
-    except Exception as e:
-        print(f"❌ Error in step 3: {e}")
-        db.rollback()
-        logger.error(f"Rolling back transaction due to: {e}")
-    
-    try:
-        # ==================== STEP 4: Load Disease Burden Data (single raster) ====================
-        print("\n" + "="*50)
-        print("STEP 4: Loading disease burden data from single raster")
-        print("="*50)
-        
-        raster_path = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map/2025_GBD2024_Global_Pf_Incidence_Count_2000/2025_GBD2024_Global_Pf_Incidence_Count_2024.tif"
-        
-        if Path(raster_path).exists():
-            burden_stats = loader.load_disease_burden_from_raster(
-                raster_path=raster_path,
-                year=2024,
-                disease='malaria',
-                source='GBD 2024'
+            logger.info(f"Location: {stats['inserted']} inserted, {stats['updated']} updated")
+            return True
+
+        elif step == "environmental":
+            env_config = config["data_paths"]["environmental"]
+            data_root = Path(env_config["root"])
+            source_name = env_config["source_name"]
+            if not data_root.exists():
+                logger.error(f"Environmental data root not found: {data_root}")
+                return False
+            stats = loader.load_environmental_from_netcdf(data_root, source_name=source_name)
+            logger.info(f"Environmental: {stats['processed_files']} files processed")
+            if stats["errors"]:
+                logger.warning(f"First 3 errors: {stats['errors'][:3]}")
+            return True
+
+        elif step == "vectors":
+            gbif_config = config["data_paths"]["gbif"]
+            gbif_dir = Path(gbif_config["dir"])
+            if not gbif_dir.exists():
+                logger.warning(f"GBIF directory not found: {gbif_dir}")
+                return True  # not fatal
+            stats = loader.load_vector_from_csv(
+                data_dir=gbif_dir,
+                pattern=gbif_config["pattern"],
+                column_mapping=GBIF_VECTOR_OBSERVATION_MAPPING,
+                source_name=gbif_config["source_name"],
+                sep=gbif_config.get("sep", ",")
             )
-            pipeline_results['disease_burden_2024'] = burden_stats
-            print(f"Disease burden loading stats: Loaded {burden_stats['loaded']} locations")
-            
-            # Commit after successful step
-            db.commit()
-            print("✓ Step 4 committed successfully")
+            logger.info(f"GBIF vectors: {stats['loaded_records']} records loaded")
+            if stats["errors"]:
+                logger.warning(f"First 3 errors: {stats['errors'][:3]}")
+            return True
+
         else:
-            print(f"Raster file not found: {raster_path}")
-            
+            logger.error(f"Unknown step: {step}")
+            return False
+
     except Exception as e:
-        print(f"❌ Error in step 4: {e}")
-        db.rollback()
-        logger.error(f"Rolling back transaction due to: {e}")
-    
-    try:
-        # ==================== STEP 5: Load Multiple MAP Rasters ====================
-        print("\n" + "="*50)
-        print("STEP 5: Loading multiple MAP raster time series")
-        print("="*50)
-        
-        # Base directory for MAP data
-        map_base_dir = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map"
-        
-        # Define specific years to load (adjust based on your available data)
-        target_years = list(range(2000,2025))
-        
-        # Option 1: Load from a specific subdirectory
-        map_incidence_dir = Path(map_base_dir) / "incidence"
-        if map_incidence_dir.exists():
-            map_results = load_map_rasters(
-                loader=loader,
-                map_data_dir=map_incidence_dir,
-                years=target_years,
-                disease='malaria',
-                source='Malaria Atlas Project'
-            )
-            pipeline_results['map_time_series'] = map_results
-            
-            # Count total loaded across years
-            total_loaded = sum(stats.get('loaded', 0) for stats in map_results.values() if isinstance(stats, dict))
-            print(f"\nMAP time series loading complete: {total_loaded} total location-year records")
-            
-            # Commit after successful step
-            db.commit()
-            print("✓ Step 5 committed successfully")
-        else:
-            print(f"MAP incidence directory not found: {map_incidence_dir}")
-            
-    except Exception as e:
-        print(f"❌ Error in step 5: {e}")
-        db.rollback()
-        logger.error(f"Rolling back transaction due to: {e}")
-    
-    # ==================== Summary ====================
-    print("\n" + "="*50)
-    print("LOADING COMPLETE - SUMMARY")
-    print("="*50)
-    
-    if 'location' in pipeline_results:
-        stats = pipeline_results['location']
-        print(f"✓ Location data: {stats['inserted'] + stats['updated']} features processed")
-    
-    if 'environmental' in pipeline_results:
-        print(f"✓ Environmental data: {pipeline_results['environmental']['processed_files']} NetCDF files")
-    
-    if 'vector_gbif' in pipeline_results:
-        print(f"✓ GBIF vector observations: {pipeline_results['vector_gbif']['loaded_records']} records")
-    
-    if 'vector_atlas' in pipeline_results:
-        print(f"✓ Vector Atlas observations: {pipeline_results['vector_atlas']['loaded_records']} records")
-    
-    if 'disease_burden_2024' in pipeline_results:
-        print(f"✓ Disease burden 2024: {pipeline_results['disease_burden_2024']['loaded']} locations")
-    
-    if 'map_time_series' in pipeline_results:
-        total_map = sum(stats.get('loaded', 0) for stats in pipeline_results['map_time_series'].values() 
-                       if isinstance(stats, dict))
-        years_loaded = len([y for y, s in pipeline_results['map_time_series'].items() 
-                           if isinstance(s, dict) and s.get('loaded', 0) > 0])
-        print(f"✓ MAP time series: {total_map} records across {years_loaded} years")
-    
-    return pipeline_results
+        logger.error(f"Exception in step '{step}': {e}")
+        return False
+
+
+def backfill_countries(loader: DatabaseLoader):
+    logger.info("Backfilling country information...")
+    updated = loader._populate_location_countries()
+    logger.info(f"Updated {updated} locations with country info.")
 
 
 def main():
-    """Main entry point."""
-    # Ensure tables exist
-    create_tables_if_not_exist()
-    
-    # Run the pipeline
-    results = run_etl_pipeline()
-    
-    print("\n✨ ETL pipeline execution completed.")
+    parser = argparse.ArgumentParser(description="CDM ETL Pipeline")
+    parser.add_argument("--config", default="config.yaml", help="Path to YAML configuration")
+    parser.add_argument("--steps", help="Comma-separated list of steps (vocabulary,location,environmental,vectors)")
+    parser.add_argument("--study-area", help="Study area name (must match config)")
+    parser.add_argument("--reset-db", action="store_true", help="Drop and recreate all tables")
+    parser.add_argument("--backfill-countries", action="store_true", help="Only backfill country names and exit")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    study_area = args.study_area or config.get("default_study_area", "greater_accra")
+
+    if args.reset_db:
+        reset_database()
+
+    if args.backfill_countries:
+        db = SessionLocal()
+        loader = DatabaseLoader(db)
+        backfill_countries(loader)
+        db.close()
+        return
+
+    steps = args.steps.split(",") if args.steps else config.get("default_steps", ["vocabulary", "location", "environmental", "vectors"])
+
+    db = SessionLocal()
+    loader = DatabaseLoader(db)
+    results = {}
+
+    for step in steps:
+        # Ensure a clean transaction state before each step
+        db.rollback()
+
+        success = run_step(step, loader, config, study_area)
+        if success:
+            db.commit()
+            results[step] = "SUCCESS"
+        else:
+            db.rollback()
+            results[step] = "FAILED"
+            logger.warning(f"Step '{step}' failed. Continuing to next step.")
+
+    # Optional backfill after location step
+    if "location" in steps and results.get("location") == "SUCCESS":
+        backfill_countries(loader)
+        db.commit()
+
+    print("\n" + "=" * 50)
+    print("ETL PIPELINE SUMMARY")
+    print("=" * 50)
+    for step, status in results.items():
+        print(f"{step:20} : {status}")
+
+    db.close()
 
 
 if __name__ == "__main__":

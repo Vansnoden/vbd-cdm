@@ -380,10 +380,13 @@ def ensure_dates_exist(start_date, end_date):
                     week=date.isocalendar()[1],
                     day_of_year=date.timetuple().tm_yday,
                     season='dry' if date.month in [11,12,1,2,3] else 'wet',  # customize for your region
-                    is_holiday='no'
+                    is_holiday=False   # was 'no' – now correct boolean
                 )
                 session.add(dt)
         session.commit()
+    except Exception as e:
+        session.rollback()
+        raise e
     finally:
         session.close()
 

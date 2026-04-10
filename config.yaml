@@ -1,0 +1,42 @@
+# config.yaml
+# Paths to data sources
+data_paths:
+  vocabulary: "data/vocabulary.csv"
+  study_areas:
+    greater_accra: "study_areas/ghana/greater_accra.gpkg"
+    siaya: "study_areas/kenya/siaya_county/siaya_county.gpkg"
+    mombasa: "study_areas/kenya/mombasa_county/mombasa_county.gpkg"
+  environmental:
+    root: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
+    source_name: "ERA5-Land"
+  gbif:
+    dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/africa"
+    pattern: "*.csv"
+    sep: "\t"
+    source_name: "GBIF"
+  vector_atlas:
+    dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae"
+    pattern: "*.csv"
+    sep: "\t"
+    source_name: "VectorAtlas"
+#  who_cases:
+#    dir: "/path/to/who/cases"
+#    pattern: "*.csv"
+#    source_name: "WHO"
+  map_raster:
+    base_dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map"
+    years: [2020, 2021, 2022, 2023, 2024]
+    disease: "malaria"
+    source: "Malaria Atlas Project"
+
+# Default study area (used if not overridden by --study-area)
+default_study_area: "greater_accra"
+
+# Default steps (if --steps not provided)
+default_steps:
+  - vocabulary
+  - location
+  - environmental
+  - vectors
+  # - cases
+  # - burden

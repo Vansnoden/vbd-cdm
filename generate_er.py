@@ -14,7 +14,7 @@ from database import models  # noqa: F401
 from eralchemy import render_er
 
 # Output file name
-output_file = "er_diagram_horizontal.png"
+output_file = "er_diagram.png"
 
 # Convert engine to database URL string
 db_url = str(engine.url)
