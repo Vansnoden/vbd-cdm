@@ -30,7 +30,7 @@ data_paths:
     source: "Malaria Atlas Project"
 
 # Default study area (used if not overridden by --study-area)
-default_study_area: "greater_accra"
+default_study_area: "siaya"
 
 # Default steps (if --steps not provided)
 default_steps:
