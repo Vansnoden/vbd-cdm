@@ -2,7 +2,6 @@ core:
   vocabulary: "data/vocabulary.csv"
 
 data_sources:
-
   source_1:
     source_name: 'source 1' # the name of the data source
     type: 'file' # or folder
@@ -10,54 +9,26 @@ data_sources:
     extension_options: # these changes depending on the data source see ./docs/data_types.md
       sep: "\t"
     matching: 'matchings/<source_1>.matching.csv'
-  
-  source_1:
-    source_name: 'source 1' # the name of the data source
+  source_2:
+    source_name: 'source 2' # the name of the data source
     type: 'file' # or folder
     extension: 'csv' # one of 'cog,csv,dta,geojson,gpkg,grib,json,nc,nc4,sas7bdat,sav,shp,tif,tsv,xlsx,xml' accounting for all file in folder also
     extension_options: # these changes depending on the data source see ./docs/data_types.md
-      sep: "\t"
-    matching: 'matchings/<source_1>.matching.csv'
+      var: "..."
+    matching: 'matchings/<source_2>.matching.csv'
 
-
-
-data_paths:
-  vocabulary: "data/vocabulary.csv"
-  study_areas:
-    greater_accra: "study_areas/ghana/greater_accra.gpkg"
-    siaya: "study_areas/kenya/siaya_county/siaya_county.gpkg"
-    mombasa: "study_areas/kenya/mombasa_county/mombasa_county.gpkg"
-  environmental:
-    root: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results"
-    source_name: "ERA5-Land"
-  gbif:
-    dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/africa"
-    pattern: "*.csv"
-    sep: "\t"
-    source_name: "GBIF"
-  vector_atlas:
-    dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/va/filteredDataGambiae"
-    pattern: "*.csv"
-    sep: "\t"
-    source_name: "VectorAtlas"
-#  who_cases:
-#    dir: "/path/to/who/cases"
-#    pattern: "*.csv"
-#    source_name: "WHO"
-  map_raster:
-    base_dir: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map"
-    years: [2020, 2021, 2022, 2023, 2024]
-    disease: "malaria"
-    source: "Malaria Atlas Project"
-
-# Default study area (used if not overridden by --study-area)
-default_study_area: "siaya"
-
-# Default steps (if --steps not provided)
-default_steps:
-  - vocabulary
-  - location
-  - environmental
-  - vectors
-  # - cases
-  # - burden
+process:
+  steps:
+    - ingest_data
+    - generate_summary
+  analyze: # optional list of standardize analysis pipelines and applied filters
+    filter: > # enable multiline string
+      "table_name.field <operator> value 
+      AND table_name.field <operator> value 
+      OR table_name.field <operator> value"
+    standard_pipelines:
+      - standard_pipeline_1
+      - standard_pipeline_2
+      - standard_pipeline_3
+      - standard_pipeline_4
+      - standard_pipeline_5

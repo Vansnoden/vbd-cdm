@@ -8,6 +8,18 @@ import gc
 
 # fp: file path, op: output path
 
+
+def ensure_file_exists():
+    def decorator(func):
+        @wraps(func)
+        def wrapper(fp, *args, **kwargs):
+            if not os.path.exists(fp):
+                raise FileNotFoundError(f"File not found: {fp}")
+            return func(fp, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
 def validate_extension(*valid_extensions):
     def decorator(func):
         @wraps(func)
@@ -263,3 +275,10 @@ def xml_to_df(fp: str) -> pd.DataFrame:
 def xml_to_csv(fp: str, csv_path: str, chunksize: int = 50000) -> bool:
     df = xml_to_df(fp)
     return optimized_df_to_csv(df, csv_path, chunksize)
+
+
+@ensure_file_exists()
+def load_yaml_config(fp: str) -> dict:
+    import yaml
+    with open(fp, "r") as f:
+        return yaml.safe_load(f)
