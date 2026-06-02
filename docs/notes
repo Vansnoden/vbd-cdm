@@ -1,0 +1,6 @@
+Raster processing:
+
+Xarray, Rasterio, pandas.
+
+pip install rioxarray xarray pandas rasterio
+

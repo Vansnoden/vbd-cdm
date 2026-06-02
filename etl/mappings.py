@@ -1,8 +1,5 @@
 #!-*- coding: utf8 -*-
 
-
-#!-*- coding: utf8 -*-
-
 # Mapping from NetCDF variable name to database column and conversion
 NC_VARIABLE_MAP = {
     't2m': {
