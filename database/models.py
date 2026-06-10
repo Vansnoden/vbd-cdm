@@ -1,10 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-SQLAlchemy models for the Vector-Borne Disease Common Data Model (CDM)
-Includes all dimensions, fact tables, and the environmental fact table.
-All dimension tables now include `description` and `source_standard` fields
-to align with the vocabulary-driven approach.
-"""
 
 import datetime
 from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Index, Text

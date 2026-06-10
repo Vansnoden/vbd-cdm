@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-Pydantic schemas for the Vector-Borne Disease Common Data Model (CDM)
-Used for validation and serialization in ETL pipelines.
-Updated to include description, source_standard fields in dimensions,
-and the new environmental fact table.
-"""
-
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import date, datetime
