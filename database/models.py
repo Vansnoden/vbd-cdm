@@ -347,9 +347,9 @@ class FactDiseaseBurden(Base):
     )
 
 
-class FactEnvironmental(Base):
+class FactEnvironment(Base):
     """Environmental data (temperature, rainfall, etc.) stored in long format"""
-    __tablename__ = "fact_environmental"
+    __tablename__ = "fact_environment"
 
     fact_env_id = Column(Integer, primary_key=True, autoincrement=True)
     location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)

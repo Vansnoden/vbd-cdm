@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: b97726bf2e06
+Revision ID: c5509ac53578
 Revises: 
-Create Date: 2026-04-10 12:56:14.189858
+Create Date: 2026-06-10 20:25:21.108809
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'b97726bf2e06'
+revision: str = 'c5509ac53578'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -154,7 +154,7 @@ def upgrade() -> None:
     op.create_index('idx_fact_case_onset', 'fact_disease_case', ['date_id_onset'], unique=False)
     op.create_index('idx_fact_case_reported', 'fact_disease_case', ['date_id_reported'], unique=False)
     op.create_index('idx_fact_case_source', 'fact_disease_case', ['source_code'], unique=False)
-    op.create_table('fact_environmental',
+    op.create_table('fact_environment',
     sa.Column('fact_env_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_code', sa.String(length=50), nullable=False),
     sa.Column('date_id', sa.String(length=10), nullable=False),
@@ -167,10 +167,10 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('fact_env_id'),
     sa.UniqueConstraint('location_code', 'date_id', 'variable', name='uq_env_loc_date_var')
     )
-    op.create_index('idx_fact_env_date', 'fact_environmental', ['date_id'], unique=False)
-    op.create_index('idx_fact_env_location', 'fact_environmental', ['location_code'], unique=False)
-    op.create_index('idx_fact_env_source', 'fact_environmental', ['source_code'], unique=False)
-    op.create_index('idx_fact_env_variable', 'fact_environmental', ['variable'], unique=False)
+    op.create_index('idx_fact_env_date', 'fact_environment', ['date_id'], unique=False)
+    op.create_index('idx_fact_env_location', 'fact_environment', ['location_code'], unique=False)
+    op.create_index('idx_fact_env_source', 'fact_environment', ['source_code'], unique=False)
+    op.create_index('idx_fact_env_variable', 'fact_environment', ['variable'], unique=False)
     op.create_table('fact_health_facility',
     sa.Column('facility_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('facility_code', sa.String(length=50), nullable=False),
@@ -314,11 +314,11 @@ def downgrade() -> None:
     op.drop_index('idx_fact_facility_source', table_name='fact_health_facility')
     op.drop_index('idx_fact_facility_location', table_name='fact_health_facility')
     op.drop_table('fact_health_facility')
-    op.drop_index('idx_fact_env_variable', table_name='fact_environmental')
-    op.drop_index('idx_fact_env_source', table_name='fact_environmental')
-    op.drop_index('idx_fact_env_location', table_name='fact_environmental')
-    op.drop_index('idx_fact_env_date', table_name='fact_environmental')
-    op.drop_table('fact_environmental')
+    op.drop_index('idx_fact_env_variable', table_name='fact_environment')
+    op.drop_index('idx_fact_env_source', table_name='fact_environment')
+    op.drop_index('idx_fact_env_location', table_name='fact_environment')
+    op.drop_index('idx_fact_env_date', table_name='fact_environment')
+    op.drop_table('fact_environment')
     op.drop_index('idx_fact_case_source', table_name='fact_disease_case')
     op.drop_index('idx_fact_case_reported', table_name='fact_disease_case')
     op.drop_index('idx_fact_case_onset', table_name='fact_disease_case')

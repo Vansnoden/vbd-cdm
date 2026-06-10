@@ -22,7 +22,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from database.session import Base
-from database.models import DimLocation, DimTime, FactEnvironmental, FactDiseaseCase, FactVectorObservation, \
+from database.models import DimLocation, DimTime, FactEnvironment, FactDiseaseCase, FactVectorObservation, \
     FactDiseaseBurden, FactHealthFacility, FactIntervention, FactInsecticideResistance, FactSocioeconomicCondition, \
     DimDisease, DimVector, DimInsecticide, DimIdentificationMethod, DimResistanceTestType, DimSocioeconomicIndicator, DimSource
 target_metadata = Base.metadata

@@ -2,33 +2,36 @@ core:
   vocabulary: "data/vocabulary.csv"
 
 data_sources:
-  source_1:
-    source_name: 'source 1' # the name of the data source
-    type: 'file' # or folder
-    extension: 'csv' # one of 'cog,csv,dta,geojson,gpkg,grib,json,nc,nc4,sas7bdat,sav,shp,tif,tsv,xlsx,xml' accounting for all file in folder also
-    extension_options: # these changes depending on the data source see ./docs/data_types.md
+  vector_occurrence:
+    source_name: "Vector Occurrence"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/gbif_an_gambiae_africa/0044774-260226173443078.csv"
+    extension_options:
       sep: "\t"
-    matching: 'matchings/<source_1>.matching.csv'
-  source_2:
-    source_name: 'source 2' # the name of the data source
-    type: 'file' # or folder
-    extension: 'csv' # one of 'cog,csv,dta,geojson,gpkg,grib,json,nc,nc4,sas7bdat,sav,shp,tif,tsv,xlsx,xml' accounting for all file in folder also
-    extension_options: # these changes depending on the data source see ./docs/data_types.md
-      var: "..."
-    matching: 'matchings/<source_2>.matching.csv'
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/occurrence.mapping.csv"
+    extract_mode: "single"   # for tabular data
+
+  # climate_timeseries:
+  #   source_name: "ERA5 Climate"
+  #   type: "folder"
+  #   extension: "grib"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2019_data/"
+  #   matching: "mappings/climate.mapping.csv"
+  #   extract_mode: "timeseries"
+  #   variables: ["t2m", "tp"]
+  #   # time_idx: 0   # ignored in timeseries mode
 
 process:
   steps:
     - ingest_data
     - generate_summary
-  analyze: # optional list of standardize analysis pipelines and applied filters
-    filter: > # enable multiline string
-      "table_name.field <operator> value 
-      AND table_name.field <operator> value 
-      OR table_name.field <operator> value"
+  analyze:
+    filter: "dim_location.country_code = 'KE'"
     standard_pipelines:
-      - standard_pipeline_1
-      - standard_pipeline_2
-      - standard_pipeline_3
-      - standard_pipeline_4
-      - standard_pipeline_5
+      - seasonal_patterns
+      - incidence_forecast

@@ -184,72 +184,6 @@ def clip_era5_by_shapefile(grib_file_path, shapefile_path, filter_params=None,
     return output_files    
 
 
-def clip_era5_to_kenya_counties(grib_file_path, county_names, shapefile_path=None, 
-                               county_column='COUNTY', output_dir='./clipped_data'):
-    """
-    Convenience function specifically for Kenya counties.
-    
-    Parameters:
-    -----------
-    grib_file_path : str
-        Path to the input GRIB file
-    county_names : list or str
-        Name(s) of Kenyan county/counties to clip to
-    shapefile_path : str, optional
-        Path to Kenya counties shapefile. If None, tries default locations
-    county_column : str
-        Column name in shapefile containing county names
-    output_dir : str
-        Directory to save clipped NetCDF files
-    
-    Returns:
-    --------
-    list
-        Paths to saved clipped files
-    """
-    
-    # Convert county_names to list if string
-    if isinstance(county_names, str):
-        county_names = [county_names]
-    
-    # Try to find Kenya shapefile if not provided
-    if shapefile_path is None:
-        possible_paths = [
-            "kenya_counties.shp",
-            "/path/to/kenya/counties.shp",  # Add your common paths here
-            "data/shapefiles/kenya/admin2.shp"
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                shapefile_path = path
-                print(f"Using shapefile: {shapefile_path}")
-                break
-        
-        if shapefile_path is None:
-            raise FileNotFoundError(
-                "Kenya shapefile not found. Please provide shapefile_path parameter or "
-                "download from: https://data.humdata.org/dataset/ken-administrative-boundaries"
-            )
-    
-    # Build filter parameters
-    if len(county_names) == 1:
-        filter_params = {'column': county_column, 'value': county_names[0]}
-    else:
-        filter_params = [
-            {'column': county_column, 'value': county_name}
-            for county_name in county_names
-        ]
-    
-    # Use the general function
-    return clip_era5_by_shapefile(
-        grib_file_path=grib_file_path,
-        shapefile_path=shapefile_path,
-        filter_params=filter_params,
-        output_dir=output_dir
-    )
-
-
 def clip_era5_to_region(grib_file_path, geometry, region_name, output_dir='./clipped_data'):
     """
     Clip ERA5 data to a custom geometry (GeoDataFrame, GeoSeries, or Shapely geometry).
@@ -389,31 +323,3 @@ def ensure_dates_exist(start_date, end_date):
         raise e
     finally:
         session.close()
-
-
-# Example usage
-if __name__ == "__main__":
-    import pandas as pd
-
-    BASE_DIR = "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets"
-    shapefile = "/mnt/monadworld/library/shapefiles/kenya/kenyan-counties/County.shp"
-    
-    print("\nBatch processing multiple GRIB files")
-    grib_files = [
-        BASE_DIR + "/climatic_timeseries_data/2024_data.grib",
-        BASE_DIR + "/climatic_timeseries_data/2025_data.grib"
-    ]
-    
-    batch_results = batch_clip_era5(
-        grib_files=grib_files,
-        shapefile_path=shapefile,
-        filter_params=[
-            {'column': 'COUNTY', 'value': 'Mombasa'},
-            {'column': 'COUNTY', 'value': 'Siaya'}
-        ],
-        output_base_dir=BASE_DIR + '/clipped/batch_results'
-    )
-    
-    # Print batch results summary
-    for input_file, output_files in batch_results.items():
-        print(f"{os.path.basename(input_file)}: {len(output_files)} output files")
