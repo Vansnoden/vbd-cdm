@@ -6,4 +6,6 @@ venv/
 .idea/
 __pycache__/
 .pytest_cache
+python_bundle.txt
+*_bundle.txt
 
