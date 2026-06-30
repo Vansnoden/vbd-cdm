@@ -174,14 +174,14 @@ class DBLoader:
             self._simple_insert(df, table_name)
             return
 
-        columns = ', '.join(df.columns)
-        placeholders = ', '.join(['?' for _ in df.columns])
+        columns = ', '.join([f'"{col}"' for col in df.columns])
+        placeholders = ', '.join([f':{col}' for col in df.columns])
         sql = f"INSERT OR REPLACE INTO {table_name} ({columns}) VALUES ({placeholders})"
 
         with SessionLocal() as session:
             for i in range(0, len(df), self.batch_size):
                 batch = df.iloc[i:i+self.batch_size]
-                values = batch.to_numpy().tolist()
+                values = batch.to_dict('records')
                 session.execute(text(sql), values)
                 session.commit()
                 logger.debug(f"Upserted batch {i//self.batch_size + 1} into {table_name}")

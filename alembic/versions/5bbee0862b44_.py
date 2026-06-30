@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: c5509ac53578
+Revision ID: 5bbee0862b44
 Revises: 
-Create Date: 2026-06-10 20:25:21.108809
+Create Date: 2026-06-30 08:00:07.362858
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'c5509ac53578'
+revision: str = '5bbee0862b44'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -48,17 +48,15 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('insecticide_code')
     )
     op.create_table('dim_location',
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('name', sa.String(length=200), nullable=False),
-    sa.Column('admin_level', sa.String(length=50), nullable=True),
-    sa.Column('parent_location_code', sa.String(length=50), nullable=True),
-    sa.Column('geometry_wkt', sa.Text(), nullable=True),
+    sa.Column('location_code', sa.String(), nullable=True),
     sa.Column('centroid_lat', sa.Float(), nullable=True),
     sa.Column('centroid_lon', sa.Float(), nullable=True),
-    sa.Column('country_name', sa.String(length=100), nullable=True),
     sa.Column('country_code', sa.String(length=10), nullable=True),
-    sa.ForeignKeyConstraint(['parent_location_code'], ['dim_location.location_code'], ),
-    sa.PrimaryKeyConstraint('location_code')
+    sa.Column('country_name', sa.String(length=100), nullable=True),
+    sa.Column('admin_level', sa.String(length=50), nullable=True),
+    sa.PrimaryKeyConstraint('location_id')
     )
     op.create_table('dim_resistance_test_type',
     sa.Column('test_type_code', sa.String(length=20), nullable=False),
@@ -109,7 +107,7 @@ def upgrade() -> None:
     )
     op.create_table('fact_disease_burden',
     sa.Column('burden_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('year', sa.Integer(), nullable=False),
     sa.Column('disease_code', sa.String(length=20), nullable=False),
     sa.Column('source_code', sa.String(length=20), nullable=False),
@@ -118,18 +116,18 @@ def upgrade() -> None:
     sa.Column('mortality_rate', sa.Float(), nullable=True),
     sa.Column('cases_mean', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['disease_code'], ['dim_disease.disease_code'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('burden_id'),
-    sa.UniqueConstraint('location_code', 'year', 'disease_code', name='uq_burden_loc_year_disease')
+    sa.UniqueConstraint('location_id', 'year', 'disease_code', name='uq_burden_loc_year_disease')
     )
     op.create_index('idx_fact_burden_disease', 'fact_disease_burden', ['disease_code'], unique=False)
-    op.create_index('idx_fact_burden_location', 'fact_disease_burden', ['location_code'], unique=False)
+    op.create_index('idx_fact_burden_location', 'fact_disease_burden', ['location_id'], unique=False)
     op.create_index('idx_fact_burden_source', 'fact_disease_burden', ['source_code'], unique=False)
     op.create_index('idx_fact_burden_year', 'fact_disease_burden', ['year'], unique=False)
     op.create_table('fact_disease_case',
     sa.Column('case_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('date_id_onset', sa.String(length=10), nullable=False),
     sa.Column('date_id_reported', sa.String(length=10), nullable=False),
     sa.Column('disease_code', sa.String(length=20), nullable=False),
@@ -145,52 +143,52 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['date_id_reported'], ['dim_time.date_id'], ),
     sa.ForeignKeyConstraint(['disease_code'], ['dim_disease.disease_code'], ),
     sa.ForeignKeyConstraint(['identification_method_code'], ['dim_identification_method.method_code'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('case_id')
     )
     op.create_index('idx_fact_case_disease', 'fact_disease_case', ['disease_code'], unique=False)
-    op.create_index('idx_fact_case_location', 'fact_disease_case', ['location_code'], unique=False)
+    op.create_index('idx_fact_case_location', 'fact_disease_case', ['location_id'], unique=False)
     op.create_index('idx_fact_case_onset', 'fact_disease_case', ['date_id_onset'], unique=False)
     op.create_index('idx_fact_case_reported', 'fact_disease_case', ['date_id_reported'], unique=False)
     op.create_index('idx_fact_case_source', 'fact_disease_case', ['source_code'], unique=False)
     op.create_table('fact_environment',
     sa.Column('fact_env_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('date_id', sa.String(length=10), nullable=False),
     sa.Column('variable', sa.String(length=50), nullable=False),
     sa.Column('value', sa.Float(), nullable=False),
     sa.Column('source_code', sa.String(length=20), nullable=False),
     sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('fact_env_id'),
-    sa.UniqueConstraint('location_code', 'date_id', 'variable', name='uq_env_loc_date_var')
+    sa.UniqueConstraint('location_id', 'date_id', 'variable', name='uq_env_loc_date_var')
     )
     op.create_index('idx_fact_env_date', 'fact_environment', ['date_id'], unique=False)
-    op.create_index('idx_fact_env_location', 'fact_environment', ['location_code'], unique=False)
+    op.create_index('idx_fact_env_location', 'fact_environment', ['location_id'], unique=False)
     op.create_index('idx_fact_env_source', 'fact_environment', ['source_code'], unique=False)
     op.create_index('idx_fact_env_variable', 'fact_environment', ['variable'], unique=False)
     op.create_table('fact_health_facility',
     sa.Column('facility_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('facility_code', sa.String(length=50), nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('source_code', sa.String(length=20), nullable=False),
     sa.Column('name', sa.String(length=200), nullable=True),
     sa.Column('lat', sa.Float(), nullable=True),
     sa.Column('lon', sa.Float(), nullable=True),
     sa.Column('type', sa.String(length=50), nullable=True),
     sa.Column('catchment_population', sa.Integer(), nullable=True),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('facility_id'),
     sa.UniqueConstraint('facility_code')
     )
-    op.create_index('idx_fact_facility_location', 'fact_health_facility', ['location_code'], unique=False)
+    op.create_index('idx_fact_facility_location', 'fact_health_facility', ['location_id'], unique=False)
     op.create_index('idx_fact_facility_source', 'fact_health_facility', ['source_code'], unique=False)
     op.create_table('fact_intervention',
     sa.Column('intervention_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('date_start', sa.Date(), nullable=False),
     sa.Column('date_end', sa.Date(), nullable=True),
     sa.Column('target_disease_code', sa.String(length=20), nullable=False),
@@ -199,35 +197,35 @@ def upgrade() -> None:
     sa.Column('coverage', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['date_end'], ['dim_time.date_id'], ),
     sa.ForeignKeyConstraint(['date_start'], ['dim_time.date_id'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['target_disease_code'], ['dim_disease.disease_code'], ),
     sa.PrimaryKeyConstraint('intervention_id')
     )
     op.create_index('idx_fact_intervention_disease', 'fact_intervention', ['target_disease_code'], unique=False)
-    op.create_index('idx_fact_intervention_location', 'fact_intervention', ['location_code'], unique=False)
+    op.create_index('idx_fact_intervention_location', 'fact_intervention', ['location_id'], unique=False)
     op.create_index('idx_fact_intervention_source', 'fact_intervention', ['source_code'], unique=False)
     op.create_index('idx_fact_intervention_start', 'fact_intervention', ['date_start'], unique=False)
     op.create_table('fact_socioeconomic_condition',
     sa.Column('socio_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('year', sa.Integer(), nullable=False),
     sa.Column('indicator_code', sa.String(length=50), nullable=False),
     sa.Column('source_code', sa.String(length=20), nullable=False),
     sa.Column('indicator_value', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['indicator_code'], ['dim_socioeconomic_indicator.indicator_code'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('socio_id'),
-    sa.UniqueConstraint('location_code', 'year', 'indicator_code', name='uq_socio_loc_year_indicator')
+    sa.UniqueConstraint('location_id', 'year', 'indicator_code', name='uq_socio_loc_year_indicator')
     )
     op.create_index('idx_fact_socio_indicator', 'fact_socioeconomic_condition', ['indicator_code'], unique=False)
-    op.create_index('idx_fact_socio_location', 'fact_socioeconomic_condition', ['location_code'], unique=False)
+    op.create_index('idx_fact_socio_location', 'fact_socioeconomic_condition', ['location_id'], unique=False)
     op.create_index('idx_fact_socio_source', 'fact_socioeconomic_condition', ['source_code'], unique=False)
     op.create_index('idx_fact_socio_year', 'fact_socioeconomic_condition', ['year'], unique=False)
     op.create_table('fact_vector_observation',
     sa.Column('observation_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('location_code', sa.String(length=50), nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('date_id', sa.String(length=10), nullable=False),
     sa.Column('vector_code', sa.String(length=20), nullable=False),
     sa.Column('source_code', sa.String(length=20), nullable=False),
@@ -240,13 +238,13 @@ def upgrade() -> None:
     sa.Column('infection_status', sa.String(length=20), nullable=True),
     sa.Column('infection_rate', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
-    sa.ForeignKeyConstraint(['location_code'], ['dim_location.location_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['vector_code'], ['dim_vector.vector_code'], ),
     sa.PrimaryKeyConstraint('observation_id')
     )
     op.create_index('idx_fact_vector_date', 'fact_vector_observation', ['date_id'], unique=False)
-    op.create_index('idx_fact_vector_location', 'fact_vector_observation', ['location_code'], unique=False)
+    op.create_index('idx_fact_vector_location', 'fact_vector_observation', ['location_id'], unique=False)
     op.create_index('idx_fact_vector_source', 'fact_vector_observation', ['source_code'], unique=False)
     op.create_index('idx_fact_vector_vector', 'fact_vector_observation', ['vector_code'], unique=False)
     op.create_table('fact_bionomics',

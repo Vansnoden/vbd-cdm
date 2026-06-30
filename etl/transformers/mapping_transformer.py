@@ -7,7 +7,7 @@ import pandas as pd
 import json
 from typing import Dict, List, Any, Optional, Union
 from collections import defaultdict
-import logging
+import logging 
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ class MappingTransformer:
             rows.append(record)
 
         return pd.DataFrame(rows)
+
 
     def transform(self, source_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import datetime
+import uuid
 from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Index, Text
 from sqlalchemy.orm import relationship
 from database.session import Base
@@ -26,18 +27,14 @@ class DimLocation(Base):
     """Location hierarchy (country, region, district, site)"""
     __tablename__ = "dim_location"
 
-    location_code = Column(String(50), primary_key=True)
+    location_id = Column(Integer,  primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
-    admin_level = Column(String(50))
-    parent_location_code = Column(String(50), ForeignKey("dim_location.location_code"))
-    geometry_wkt = Column(Text)  # WKT representation
+    location_code = Column(String)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
-    country_name = Column(String(100))
     country_code = Column(String(10))
-
-    # Self-referential relationship
-    parent = relationship("DimLocation", remote_side=[location_code], backref="children")
+    country_name = Column(String(100))
+    admin_level = Column(String(50))
 
 
 class DimDisease(Base):
@@ -129,7 +126,7 @@ class FactVectorObservation(Base):
     __tablename__ = "fact_vector_observation"
 
     observation_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
@@ -150,7 +147,7 @@ class FactVectorObservation(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        Index("idx_fact_vector_location", "location_code"),
+        Index("idx_fact_vector_location", "location_id"),
         Index("idx_fact_vector_date", "date_id"),
         Index("idx_fact_vector_vector", "vector_code"),
         Index("idx_fact_vector_source", "source_code"),
@@ -161,7 +158,7 @@ class FactDiseaseCase(Base):
     __tablename__ = "fact_disease_case"
 
     case_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
@@ -184,7 +181,7 @@ class FactDiseaseCase(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        Index("idx_fact_case_location", "location_code"),
+        Index("idx_fact_case_location", "location_id"),
         Index("idx_fact_case_onset", "date_id_onset"),
         Index("idx_fact_case_reported", "date_id_reported"),
         Index("idx_fact_case_disease", "disease_code"),
@@ -246,7 +243,7 @@ class FactIntervention(Base):
     __tablename__ = "fact_intervention"
 
     intervention_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_start = Column(Date, ForeignKey("dim_time.date_id"), nullable=False)
     date_end = Column(Date, ForeignKey("dim_time.date_id"))
     target_disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
@@ -263,7 +260,7 @@ class FactIntervention(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        Index("idx_fact_intervention_location", "location_code"),
+        Index("idx_fact_intervention_location", "location_id"),
         Index("idx_fact_intervention_start", "date_start"),
         Index("idx_fact_intervention_disease", "target_disease_code"),
         Index("idx_fact_intervention_source", "source_code"),
@@ -274,7 +271,7 @@ class FactSocioeconomicCondition(Base):
     __tablename__ = "fact_socioeconomic_condition"
 
     socio_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     year = Column(Integer, nullable=False)
     indicator_code = Column(String(50), ForeignKey("dim_socioeconomic_indicator.indicator_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
@@ -287,8 +284,8 @@ class FactSocioeconomicCondition(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        UniqueConstraint("location_code", "year", "indicator_code", name="uq_socio_loc_year_indicator"),
-        Index("idx_fact_socio_location", "location_code"),
+        UniqueConstraint("location_id", "year", "indicator_code", name="uq_socio_loc_year_indicator"),
+        Index("idx_fact_socio_location", "location_id"),
         Index("idx_fact_socio_year", "year"),
         Index("idx_fact_socio_indicator", "indicator_code"),
         Index("idx_fact_socio_source", "source_code"),
@@ -300,7 +297,7 @@ class FactHealthFacility(Base):
 
     facility_id = Column(Integer, primary_key=True, autoincrement=True)
     facility_code = Column(String(50), unique=True, nullable=False)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
 
     name = Column(String(200))
@@ -314,7 +311,7 @@ class FactHealthFacility(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        Index("idx_fact_facility_location", "location_code"),
+        Index("idx_fact_facility_location", "location_id"),
         Index("idx_fact_facility_source", "source_code"),
     )
 
@@ -323,7 +320,7 @@ class FactDiseaseBurden(Base):
     __tablename__ = "fact_disease_burden"
 
     burden_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     year = Column(Integer, nullable=False)
     disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
@@ -339,8 +336,8 @@ class FactDiseaseBurden(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        UniqueConstraint("location_code", "year", "disease_code", name="uq_burden_loc_year_disease"),
-        Index("idx_fact_burden_location", "location_code"),
+        UniqueConstraint("location_id", "year", "disease_code", name="uq_burden_loc_year_disease"),
+        Index("idx_fact_burden_location", "location_id"),
         Index("idx_fact_burden_year", "year"),
         Index("idx_fact_burden_disease", "disease_code"),
         Index("idx_fact_burden_source", "source_code"),
@@ -352,7 +349,7 @@ class FactEnvironment(Base):
     __tablename__ = "fact_environment"
 
     fact_env_id = Column(Integer, primary_key=True, autoincrement=True)
-    location_code = Column(String(50), ForeignKey("dim_location.location_code"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     variable = Column(String(50), nullable=False)   # e.g., 'temperature_mean', 'rainfall_total'
     value = Column(Float, nullable=False)
@@ -364,8 +361,8 @@ class FactEnvironment(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        UniqueConstraint("location_code", "date_id", "variable", name="uq_env_loc_date_var"),
-        Index("idx_fact_env_location", "location_code"),
+        UniqueConstraint("location_id", "date_id", "variable", name="uq_env_loc_date_var"),
+        Index("idx_fact_env_location", "location_id"),
         Index("idx_fact_env_date", "date_id"),
         Index("idx_fact_env_variable", "variable"),
         Index("idx_fact_env_source", "source_code"),

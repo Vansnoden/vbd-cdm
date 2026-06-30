@@ -34,15 +34,14 @@ class DimTimeCreate(BaseModel):
 
 class DimLocationCreate(BaseModel):
     """Schema for creating location records."""
-    location_code: str = Field(..., description="Unique identifier for the location")
+    location_id: int
+    location_code: str
     name: str
-    admin_level: Optional[str] = None
-    parent_location_code: Optional[str] = None
-    geometry_wkt: Optional[str] = None
-    centroid_lat: Optional[float] = None
-    centroid_lon: Optional[float] = None
     country_name: Optional[str] = None
     country_code: Optional[str] = None
+    admin_level: Optional[str] = None
+    centroid_lat: Optional[float] = None
+    centroid_lon: Optional[float] = None
 
     @field_validator('centroid_lat')
     def validate_lat(cls, v):
@@ -130,7 +129,7 @@ class DimSourceCreate(BaseModel):
 
 class FactVectorObservationCreate(BaseModel):
     """Schema for vector observation records."""
-    location_code: str
+    location_id: int
     date_id: str
     vector_code: str
     source_code: str
@@ -160,7 +159,7 @@ class FactVectorObservationCreate(BaseModel):
 
 class FactDiseaseCaseCreate(BaseModel):
     """Schema for disease case records."""
-    location_code: str
+    location_id: int
     date_id_onset: str
     date_id_reported: str
     disease_code: str
@@ -225,7 +224,7 @@ class FactBionomicsCreate(BaseModel):
 
 class FactInterventionCreate(BaseModel):
     """Schema for intervention records."""
-    location_code: str
+    location_id: int
     date_start: date
     date_end: Optional[date] = None
     target_disease_code: str
@@ -242,7 +241,7 @@ class FactInterventionCreate(BaseModel):
 
 class FactSocioeconomicConditionCreate(BaseModel):
     """Schema for socioeconomic condition records."""
-    location_code: str
+    location_id: int
     year: int
     indicator_code: str
     source_code: str
@@ -258,7 +257,7 @@ class FactSocioeconomicConditionCreate(BaseModel):
 class FactHealthFacilityCreate(BaseModel):
     """Schema for health facility records."""
     facility_code: str
-    location_code: str
+    location_id: int
     source_code: str
     name: Optional[str] = None
     lat: Optional[float] = None
@@ -281,7 +280,7 @@ class FactHealthFacilityCreate(BaseModel):
 
 class FactDiseaseBurdenCreate(BaseModel):
     """Schema for disease burden estimates."""
-    location_code: str
+    location_id: int
     year: int
     disease_code: str
     source_code: str
@@ -293,7 +292,7 @@ class FactDiseaseBurdenCreate(BaseModel):
 
 class FactEnvironmentalCreate(BaseModel):
     """Schema for environmental data (long format)."""
-    location_code: str
+    location_id: int
     date_id: str
     variable: str = Field(..., description="e.g., 'temperature_mean', 'rainfall_total'")
     value: float
