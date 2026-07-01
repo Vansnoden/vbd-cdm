@@ -238,6 +238,11 @@ def timeseries_to_df_chunked(
             for var in variables:
                 df = ds_chunk[var].to_dataframe().reset_index()
                 df['variable'] = var
+                df = df.rename(columns={var: 'value'})
+                # Keep only dimension columns + variable + value
+                dims = list(ds_chunk.dims.keys())
+                keep_cols = [col for col in df.columns if col in dims] + ['variable', 'value']
+                df = df[keep_cols]
                 chunk_dfs.append(df)
             
             chunk_df = pd.concat(chunk_dfs, ignore_index=True)
@@ -293,31 +298,30 @@ def timeseries_to_df(
     try:
         if variables is None:
             variables = list(ds.data_vars.keys())
-        
         # Estimate size
         time_dim = _get_time_dim(ds)
         n_time = ds.dims[time_dim] if time_dim else 1
         sample_var = ds[variables[0]]
         n_pixels = sample_var.size // n_time if n_time > 1 else sample_var.size
         estimated_rows = n_time * n_pixels * len(variables)
-        
         if warn_large and estimated_rows > max_expected_rows:
             warnings.warn(
                 f"Estimated rows: {estimated_rows:,} (> {max_expected_rows:,}). "
                 "This may cause memory issues. Use timeseries_to_df_chunked() instead.",
                 UserWarning
             )
-        
         dfs = []
         for var in variables:
             df = ds[var].to_dataframe().reset_index()
             df['variable'] = var
+            df = df.rename(columns={var: 'value'})
+            dims = list(ds.dims.keys())
+            keep_cols = [col for col in df.columns if col in dims] + ['variable', 'value']
+            df = df[keep_cols]
             dfs.append(df)
-        
         result = pd.concat(dfs, ignore_index=True)
     finally:
         ds.close()
-    
     return result
 
 

@@ -101,6 +101,9 @@ def extract_data(file_path: str, source_config: Dict[str, Any]) -> pd.DataFrame:
     df = extractor.extract(file_path, **reader_args)
     if df.empty:
         logger.warning(f"No data extracted from {file_path}")
+    logger.info(f"Extracted columns: {list(df.columns)}")
+    logger.info(f"First row: {df.iloc[0].to_dict()}")
+    logger.info(f"Number of nulls in 'value': {df['value'].isna().sum() if 'value' in df.columns else 'column missing'}")
     return df
 
 
@@ -241,19 +244,28 @@ def transform_facts(df: pd.DataFrame, mapping_path: str) -> Dict[str, pd.DataFra
 
 
 def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
-    """Load fact tables into database. Returns total rows loaded."""
     total_rows = 0
     for table_name in get_fact_tables():
         if table_name not in fact_dfs:
             continue
         fact_df = fact_dfs[table_name]
         logger.info(f"  Processing fact {table_name} with {len(fact_df)} rows...")
+        # Drop rows with null value for fact_environment
+        if table_name == 'fact_environment':
+            if 'value' in fact_df.columns:
+                before = len(fact_df)
+                fact_df = fact_df.dropna(subset=['value'])
+                logger.info(f"    Dropped {before - len(fact_df)} rows with null value")
+            if 'location_id' in fact_df.columns:
+                before = len(fact_df)
+                fact_df = fact_df.dropna(subset=['location_id'])
+                logger.info(f"    Dropped {before - len(fact_df)} rows with null location_id")
         if not fact_df.empty:
             rows = loader.load_table(table_name, fact_df)
             total_rows += rows
             logger.info(f"  Loaded {rows} rows into {table_name}")
         else:
-            logger.warning(f"  No valid rows to load for {table_name}")
+            logger.warning(f"No valid rows to load for {table_name}")
     return total_rows
 
 

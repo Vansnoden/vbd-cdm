@@ -3,6 +3,8 @@ MappingTransformer - Interprets CSV mapping files to transform source DataFrames
 into CDM table-specific DataFrames.
 """
 
+from datetime import datetime
+
 import pandas as pd
 import json
 from typing import Dict, List, Any, Optional, Union
@@ -73,18 +75,30 @@ class MappingTransformer:
             # Simple mapping (dict lookup)
             mapping = params or {}
             return mapping.get(str(value), value)
-
+    
     def _apply_date_parse_transform(
-        self, 
-        value: Any, 
-        params: Optional[Union[str, dict]] ) -> Any:
+        self,
+        value: Any,
+        params: Optional[Union[str, dict]]) -> Any:
+        """
+        Parse date value and return as 'YYYY-MM-DD' string.
+        Handles Timestamp, datetime, and strings (with/without time).
+        """
         fmt = params.get('format', '%Y-%m-%d') if params else '%Y-%m-%d'
         try:
-            return pd.to_datetime(value, format=fmt).date()
-        except Exception:
-            logger.warning(f"Date parse failed for '{value}' with format '{fmt}'")
+            # Already datetime-like → format directly
+            if isinstance(value, (pd.Timestamp, datetime)):
+                return value.strftime('%Y-%m-%d')
+            # Try exact format first, fallback to flexible parser
+            try:
+                dt = pd.to_datetime(value, format=fmt)
+            except (ValueError, TypeError):
+                dt = pd.to_datetime(value)   # infers time, etc.
+            return dt.strftime('%Y-%m-%d')
+        except Exception as e:
+            logger.warning(f"Date parse failed for '{value}' with format '{fmt}': {e}")
             return None
-        
+                
     def _apply_cast_transform(
         self, 
         value: Any, 
@@ -166,12 +180,16 @@ class MappingTransformer:
         """
         # Normalise params: if a string is given for cast, treat as {'type': params}
         if isinstance(params, str):
-            if transform == 'cast':
+            if params.strip() == '':
+                params = {}
+            elif transform == 'cast':
                 params = {'type': params}
             else:
                 params = {}
+        elif params is None:
+            params = {}
         # For transforms that don't require a raw value, skip the None check.
-        if transform not in ('format_date',):
+        if transform not in ('format_date', 'map', 'concat'):
             if pd.isna(value) or value is None:
                 return None
         if transform == 'none':
@@ -310,11 +328,19 @@ class MappingTransformer:
         transform = mapping['transform']
         params = None
         if pd.notna(mapping.get('transform_params')):
-            params = json.loads(mapping['transform_params'])
-        # Special handling for concat (needs multiple columns from the row)
+            params_str = mapping['transform_params']
+            # Skip if the string is empty or only whitespace
+            if params_str and params_str.strip():
+                try:
+                    params = json.loads(params_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON in transform_params: '{params_str}' - {e}")
+                    params = {}
+            else:
+                params = {}
         if transform == 'concat':
-            cols = params.get('columns', [])
-            sep = params.get('separator', ' ')
+            cols = params.get('columns', []) if params else []
+            sep = params.get('separator', ' ') if params else ' '
             parts = []
             for col in cols:
                 if col in source_row.index and pd.notna(source_row[col]):
