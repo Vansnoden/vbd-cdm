@@ -29,7 +29,7 @@ class DimLocation(Base):
 
     location_id = Column(Integer,  primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
-    location_code = Column(String)
+    location_code = Column(String, unique=True)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
     country_code = Column(String(10))

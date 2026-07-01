@@ -3,9 +3,12 @@ import gc
 import pandas as pd
 import numpy as np
 from functools import wraps
-from typing import Optional, List, Dict, Any, Union
+from typing import Generator, Optional, List, Dict, Any, Union
 import warnings
 import logging
+from rasterio.windows import Window
+
+import rasterio
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,59 @@ def cog_to_csv(fp: str, csv_path: str, chunksize: int = 50000) -> bool:
     """Convert COG/TIFF directly to CSV."""
     df = cog_to_df(fp)
     return optimized_df_to_csv(df, csv_path, chunksize)
+
+
+@validate_extension('tif', 'tiff')
+def tif_to_df_chunked(fp: str, window_size: int = 512, nodata_threshold: float = -9999.0) -> Generator[pd.DataFrame, None, None]:
+    """
+    Generator that yields DataFrames for each block of a GeoTIFF.
+    Filters out NoData values (<= nodata_threshold).
+    Yields DataFrames with columns: 'x', 'y', 'value' (single band).
+    """
+    import rasterio
+    from rasterio.windows import Window
+    import numpy as np
+    import pandas as pd
+
+    with rasterio.open(fp) as src:
+        band = 1  # assume single band; adjust if multi-band
+        height, width = src.height, src.width
+        nodata = src.nodata if src.nodata is not None else nodata_threshold
+
+        for row_off in range(0, height, window_size):
+            for col_off in range(0, width, window_size):
+                win = Window(col_off, row_off,
+                             min(window_size, width - col_off),
+                             min(window_size, height - row_off))
+                data = src.read(band, window=win)  # 2D array (rows, cols)
+                if data.size == 0:
+                    continue
+
+                rows, cols = data.shape
+
+                # Get pixel center coordinates for the entire window
+                # Create meshgrid of column and row indices
+                col_indices = np.arange(cols)
+                row_indices = np.arange(rows)
+                xs, ys = src.transform * np.meshgrid(col_indices, row_indices)
+                # xs and ys are 2D arrays of shape (rows, cols)
+
+                # Flatten all arrays
+                flat_xs = xs.flatten()
+                flat_ys = ys.flatten()
+                flat_vals = data.flatten()
+
+                # Filter out NoData values (values <= threshold)
+                mask = flat_vals > nodata_threshold
+                if not np.any(mask):
+                    continue
+
+                df = pd.DataFrame({
+                    'x': flat_xs[mask],
+                    'y': flat_ys[mask],
+                    'value': flat_vals[mask]
+                })
+                yield df
 
 
 @validate_extension('tif', 'tiff')

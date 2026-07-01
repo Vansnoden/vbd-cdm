@@ -13,7 +13,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from utilities.data_transform_library import (
     cog_to_df, tif_to_df,
-    nc_to_df, grib_to_df, timeseries_to_df, timeseries_to_csv,
+    nc_to_df, grib_to_df, tif_to_df_chunked, timeseries_to_df, timeseries_to_csv,
     dta_to_df, sas7bdat_to_df, sav_to_df,
     geojson_to_df, gpkg_to_df, shp_to_df,
     json_to_df, tsv_to_df, xlsx_to_df, xml_to_df,
@@ -65,9 +65,13 @@ class FileExtractor:
 
         # Dispatch based on extension
         if ext in ('cog', 'tif', 'tiff'):
-            # Raster - always single (time‑independent)
-            df = cog_to_df(file_path) if ext == 'cog' else tif_to_df(file_path)
-
+            if self.extract_mode == 'chunked':
+                # Return a generator
+                window_size = reader_kwargs.pop('window_size', 512)
+                return tif_to_df_chunked(file_path, window_size=window_size)
+            else:
+                df = cog_to_df(file_path) if ext == 'cog' else tif_to_df(file_path)
+                
         elif ext in ('nc', 'nc4', 'grib', 'grib2'):
             if self.extract_mode == 'single':
                 # Use single‑variable, single‑time reader

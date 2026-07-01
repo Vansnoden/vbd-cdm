@@ -273,6 +273,7 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
     """
     Run the complete ETL pipeline for a single data source.
     """
+    import re
     source_name = source_config.get('source_name', 'unknown')
     logger.info(f"===== Processing source: {source_name} =====")
     try:
@@ -285,28 +286,69 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
         mapping_path = get_mapping_path(source_config)
         # step 2.5: init time dimension
         init_dim_time(start_date="1900-01-01", end_date="2026-12-31")
+        
         # Step 3: Create loader
         loader = DBLoader(batch_size=10000, upsert=True, use_copy=True)
+        
         # Step 4: Process each file
         total_dim_rows_loaded = 0
         total_fact_rows_loaded = 0
+        extract_mode = source_config.get('extract_mode', 'single')
+        reader_args = source_config.get('extension_options', {})
+        
         for file_path in file_paths:
             logger.info(f"Processing file: {file_path}")
+            # Extract year from filename (if present)
+            year_match = re.search(r'(\d{4})', os.path.basename(file_path))
+            year = int(year_match.group(1)) if year_match else None
+            
             # Step 4a: Extract data
-            df = extract_data(file_path, source_config)
-            if df.empty:
-                continue
-            # Step 4b: Transform and load dimensions
-            dim_dfs = transform_dimensions(df, mapping_path)
-            if dim_dfs:
-                total_dim_rows_loaded += load_dimensions(dim_dfs, loader)
-            # Step 4c: Transform and load facts
-            if total_dim_rows_loaded:
+            extractor = FileExtractor(extract_mode=extract_mode, large_df_threshold=10_000_000)
+            result = extractor.extract(file_path, **reader_args)
+
+            if extract_mode == 'chunked':
+                chunk_iter = result
+                dims_loaded = False   # flag to skip dims after first chunk
+                chunk_count = 0
+                for chunk_df in chunk_iter:
+                    chunk_count += 1
+                    if chunk_count % 10 == 0:
+                        logger.info(f"Processed {chunk_count} chunks so far...")
+                    if chunk_df.empty:
+                        continue
+                    if year is not None:
+                        chunk_df['year'] = year
+                    # Load dimensions only once (from the first chunk)
+                    if not dims_loaded:
+                        dim_dfs = transform_dimensions(chunk_df, mapping_path)
+                        if dim_dfs:
+                            total_dim_rows_loaded += load_dimensions(dim_dfs, loader)
+                        dims_loaded = True
+                    else:
+                        # Skip dimensions – they already exist
+                        pass
+                    # Always process facts (they are unique per chunk)
+                    fact_dfs = transform_facts(chunk_df, mapping_path)
+                    if fact_dfs:
+                        total_fact_rows_loaded += load_facts(fact_dfs, loader)
+            else:
+                # Normal single DataFrame
+                df = result
+                if df.empty:
+                    continue
+                if year is not None:
+                    df['year'] = year
+                # Transform and load dimensions
+                dim_dfs = transform_dimensions(df, mapping_path)
+                if dim_dfs:
+                    total_dim_rows_loaded += load_dimensions(dim_dfs, loader)
+                # Transform and load facts
                 fact_dfs = transform_facts(df, mapping_path)
                 if fact_dfs:
                     total_fact_rows_loaded += load_facts(fact_dfs, loader)
-        logger.info(f"Source '{source_name}' completed. Total dim rows loaded: {total_dim_rows_loaded}. \
-                     Total facts rows loaded: {total_fact_rows_loaded}")
+        
+        logger.info(f"Source '{source_name}' completed. Total dim rows loaded: {total_dim_rows_loaded}. "
+                     f"Total facts rows loaded: {total_fact_rows_loaded}")
         return True
     except Exception as e:
         logger.error(f"Failed to process source '{source_name}': {e}", exc_info=True)

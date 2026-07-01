@@ -16,15 +16,25 @@ data_sources:
   #   matching: "mappings/occurrence.mapping.csv"
   #   extract_mode: "single"   # for tabular data
 
-  climate_timeseries:
-    source_name: "ERA5 Climate"
-    type: "folder"
-    extension: "nc"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2019_data/"
-    matching: "mappings/climate.mapping.csv"
-    extract_mode: "timeseries"
-    variables: ["t2m", "tp"]
-    # time_idx: 0   # ignored in timeseries mode
+  # climate_timeseries:
+  #   source_name: "ERA5 Climate"
+  #   type: "folder"
+  #   extension: "nc"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2019_data/"
+  #   matching: "mappings/climate.mapping.csv"
+  #   extract_mode: "timeseries"
+  #   variables: ["t2m", "tp"]
+  #   # time_idx: 0   # ignored in timeseries mode
+
+  raster_malaria_incidence_rate:
+    source_name: "MAP Disease Inciden"
+    type: "file"                       # or "folder" if multiple TIFFs
+    extension: "tif"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/map/clippedlayers/Global_Pf_Parasite_Rate_KEN_2000.tiff"     # absolute path to the TIFF
+    matching: "mappings/map.mapping.csv"
+    extract_mode: "chunked"
+    extension_options:
+      window_size: 1024
 
 process:
   steps:
