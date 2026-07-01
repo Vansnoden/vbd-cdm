@@ -99,3 +99,45 @@ def add_country_to_dataframe(df, lat_col='centroid_lat', lon_col='centroid_lon')
     df['country_name'] = countries
     df['country_code'] = codes
     return df
+
+
+def enrich_location_dataframe(
+    df: pd.DataFrame,
+    lat_col: str = 'centroid_lat',
+    lon_col: str = 'centroid_lon',
+    country_code_col: str = 'country_code',
+    country_name_col: str = 'country_name'
+) -> pd.DataFrame:
+    """
+    Fill missing country_code and country_name from centroid_lat/centroid_lon.
+    Only rows with missing country_code are processed.
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+    missing_mask = df[country_code_col].isna() | (df[country_code_col] == '')
+
+    if not missing_mask.any():
+        return df
+
+    # Build list of (lat, lon) for rows that need enrichment and have valid coords
+    pairs = []
+    for idx in df.index[missing_mask]:
+        lat = df.loc[idx, lat_col]
+        lon = df.loc[idx, lon_col]
+        if pd.notna(lat) and pd.notna(lon):
+            pairs.append((lat, lon))
+        else:
+            pairs.append((None, None))
+
+    # Use bulk geocoding (cached + fallback to nearest lookup)
+    results = bulk_get_countries(pairs)   # returns list of (country_name, country_code)
+
+    # Assign results back, skipping None values
+    for idx, (name, code) in zip(df.index[missing_mask], results):
+        if code is not None:
+            df.loc[idx, country_code_col] = code
+            df.loc[idx, country_name_col] = name
+
+    return df

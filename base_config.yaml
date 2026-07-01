@@ -2,29 +2,30 @@ core:
   vocabulary: "data/vocabulary.csv"
 
 data_sources:
-  # vector_occurrence:
-  #   source_name: "Vector Occurrence"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/gbif_an_gambiae_africa/0044774-260226173443078.csv"
-  #   extension_options:
-  #     sep: "\t"
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/occurrence.mapping.csv"
-  #   extract_mode: "single"   # for tabular data
 
-  # climate_timeseries:
-  #   source_name: "ERA5 Climate"
-  #   type: "folder"
-  #   extension: "nc"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2019_data/"
-  #   matching: "mappings/climate.mapping.csv"
-  #   extract_mode: "timeseries"
-  #   variables: ["t2m", "tp"]
-  #   # time_idx: 0   # ignored in timeseries mode
+  vector_occurrence:
+    source_name: "Vector Occurrence"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/gbif/gbif_an_gambiae_africa/0044774-260226173443078.csv"
+    extension_options:
+      sep: "\t"
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/occurrence.mapping.csv"
+    extract_mode: "single"   # for tabular data
+
+  climate_timeseries:
+    source_name: "ERA5 Climate"
+    type: "folder"
+    extension: "nc"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/clipped/batch_results/2019_data/"
+    matching: "mappings/climate.mapping.csv"
+    extract_mode: "timeseries"
+    variables: ["t2m", "tp"]
+    # time_idx: 0   # ignored in timeseries mode
 
   raster_malaria_incidence_rate:
     source_name: "MAP Disease Inciden"

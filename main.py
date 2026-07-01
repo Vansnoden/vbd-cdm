@@ -15,6 +15,8 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 from dotenv import load_dotenv
 
+from database.geoutils import enrich_location_dataframe
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -207,12 +209,15 @@ def load_dimensions(dim_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
             continue
         dim_df = dim_dfs[table_name]
         logger.info(f"  Loading dimension {table_name} with {len(dim_df)} rows...")
-        # Clean dimension data
-        if table_name == 'dim_location' and 'location_id' in dim_df.columns:
-            before = len(dim_df)
-            dim_df = dim_df.dropna(subset=['location_id'])
-            if len(dim_df) < before:
-                logger.warning(f"  Removed {before - len(dim_df)} rows with NULL location_id")
+        if table_name == 'dim_location':
+            # Fill country_code from lat/lon for rows that miss it
+            dim_df = enrich_location_dataframe(dim_df)
+            # Optionally drop rows without location_id (if required)
+            if 'location_id' in dim_df.columns:
+                before = len(dim_df)
+                dim_df = dim_df.dropna(subset=['location_id'])
+                if len(dim_df) < before:
+                    logger.warning(f"  Removed {before - len(dim_df)} rows with NULL location_id")
         rows = loader.load_table(table_name, dim_df)
         total_rows += rows
         logger.info(f"  Loaded {rows} rows into {table_name}")
