@@ -110,32 +110,46 @@ def enrich_location_dataframe(
 ) -> pd.DataFrame:
     """
     Fill missing country_code and country_name from centroid_lat/centroid_lon.
-    Only rows with missing country_code are processed.
+    Adds the columns if they are missing.
     """
     if df.empty:
         return df
 
     df = df.copy()
-    missing_mask = df[country_code_col].isna() | (df[country_code_col] == '')
+
+    # Ensure both columns exist
+    if country_code_col not in df.columns:
+        df[country_code_col] = None
+    if country_name_col not in df.columns:
+        df[country_name_col] = None
+
+    # Identify rows that need enrichment: null or empty string
+    missing_mask = (
+        df[country_code_col].isna() | 
+        (df[country_code_col] == '')
+    )
 
     if not missing_mask.any():
         return df
 
-    # Build list of (lat, lon) for rows that need enrichment and have valid coords
-    pairs = []
+    # Build list of (lat, lon) for rows needing enrichment and having valid coords
+    coords_list = []
+    indices = []
     for idx in df.index[missing_mask]:
         lat = df.loc[idx, lat_col]
         lon = df.loc[idx, lon_col]
         if pd.notna(lat) and pd.notna(lon):
-            pairs.append((lat, lon))
-        else:
-            pairs.append((None, None))
+            coords_list.append((lat, lon))
+            indices.append(idx)
 
-    # Use bulk geocoding (cached + fallback to nearest lookup)
-    results = bulk_get_countries(pairs)   # returns list of (country_name, country_code)
+    if not coords_list:
+        return df
 
-    # Assign results back, skipping None values
-    for idx, (name, code) in zip(df.index[missing_mask], results):
+    # Bulk geocode (cached + fallback to local lookup)
+    results = bulk_get_countries(coords_list)   # list of (country_name, country_code)
+
+    # Assign results back
+    for idx, (name, code) in zip(indices, results):
         if code is not None:
             df.loc[idx, country_code_col] = code
             df.loc[idx, country_name_col] = name
