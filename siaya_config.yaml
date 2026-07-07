@@ -1,0 +1,115 @@
+# Updated base_config.yaml for Siaya County case study
+core:
+  vocabulary: "data/vocabulary.csv"
+  study_region: "Siaya County, Kenya"
+  study_period: "2019-2024"
+
+data_sources:
+  
+  # 1. VECTOR OCCURRENCE DATA
+  vector_occurrence:
+    source_name: "GBIF Anopheles Occurrence"
+    type: "file"
+    extension: "csv"
+    path: "/data/gbif/anopheles_kenya_2019_2024.csv"
+    extension_options:
+      sep: "\t"
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/occurrence.mapping.csv"
+    extract_mode: "single"
+    
+  # 2. VECTOR BIONOMICS
+  vector_bionomics:
+    source_name: "Vector Atlas Bionomics"
+    type: "file"
+    extension: "csv"
+    path: "/data/vector_atlas/bionomics_siaya_2019_2024.csv"
+    matching: "mappings/bionomics.mapping.csv"
+    extract_mode: "single"
+
+  # 3. INSECTICIDE RESISTANCE
+  insecticide_resistance:
+    source_name: "IRMapper Resistance Data"
+    type: "file"
+    extension: "csv"
+    path: "/data/irmapper/resistance_kenya_2019_2024.csv"
+    matching: "mappings/resistance.mapping.csv"
+    extract_mode: "single"
+
+  # 4. CLIMATE DATA (DAILY)
+  climate_timeseries:
+    source_name: "ERA5-Land Climate"
+    type: "folder"
+    extension: "nc"
+    path: "/data/era5/siaya_clipped_2019_2024/"
+    matching: "mappings/climate.mapping.csv"
+    extract_mode: "timeseries"
+    variables: 
+      - "t2m"        # 2m temperature (K)
+      - "tp"         # Total precipitation (m)
+      # - "d2m"        # 2m dewpoint temperature (K)
+      # - "ssr"        # Surface solar radiation (J/m²)
+      # - "sp"         # Surface pressure (Pa)
+
+  # 5. MALARIA INCIDENCE
+  malaria_incidence:
+    source_name: "Malaria Atlas Project - Kenya"
+    type: "folder"
+    extension: "tif"
+    path: "/data/map/kenya_incidence_2019_2024/"
+    matching: "mappings/map.mapping.csv"
+    extract_mode: "chunked"
+    extension_options:
+      window_size: 1024
+
+  # 6. HEALTH FACILITY DATA
+  health_facilities:
+    source_name: "Kenya Health Facilities"
+    type: "file"
+    extension: "shp"
+    path: "/data/kenya/health_facilities_siaya.shp"
+    matching: "mappings/facility.mapping.csv"
+    extract_mode: "single"
+
+  # 7. SOCIOECONOMIC DATA
+  socioeconomic:
+    source_name: "World Bank Kenya Indicators"
+    type: "file"
+    extension: "csv"
+    path: "/data/worldbank/kenya_indicators_2019_2024.csv"
+    matching: "mappings/socioeconomic.mapping.csv"
+    extract_mode: "single"
+
+  # 8. INTERVENTION DATA (LLIN Distribution)
+  interventions:
+    source_name: "Kenya MOH LLIN Distribution"
+    type: "file"
+    extension: "csv"
+    path: "/data/kenya/moh/llin_distribution_siaya.csv"
+    matching: "mappings/intervention.mapping.csv"
+    extract_mode: "single"
+
+process:
+  steps:
+    - ingest_data
+    - generate_summary
+  analyze:
+    filter: "dim_location.country_code = 'KE' AND dim_location.name = 'Siaya'"
+    standard_pipelines:
+      - seasonal_patterns
+      - climate_vector_correlation
+      - resistance_trends
+      - intervention_impact
+      - early_warning_indicators
+    custom_pipelines:
+      - name: "lag_analysis"
+        params:
+          max_lag_months: 6
+          variables: ["t2m", "tp"]
+      - name: "integrated_risk_model"
+        params:
+          features: ["temperature", "rainfall", "resistance", "coverage"]
+          target: "incidence_rate"
