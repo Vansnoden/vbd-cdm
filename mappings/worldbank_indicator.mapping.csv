@@ -70,7 +70,7 @@ Indicator Code,dim_socioeconomic_indicator,indicator_code,none,,True,,,
 ,dim_source,version,none,,False,2025,2025,
 
 Year,fact_socioeconomic_condition,year,cast,"{""type"": ""int""}",True,,,
-Value,fact_socioeconomic_condition,indicator_value,cast,"{""type"": ""float""}",True,0.0,0.0,
+Value,fact_socioeconomic_condition,indicator_value,cast,"{""type"": ""float""}",True,0.0,,
 ,fact_socioeconomic_condition,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""Country Name"", ""Country Code""], ""separator"": ""/""}",False,,,
 ,fact_socioeconomic_condition,indicator_code,map,"{""ref"": ""dim_socioeconomic_indicator.indicator_code"", ""columns"": [""Indicator Code""], ""separator"": """"}",False,,,
 ,fact_socioeconomic_condition,source_code,none,,False,WB/WDI,WB/WDI,

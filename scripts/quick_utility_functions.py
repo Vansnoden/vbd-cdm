@@ -20,8 +20,8 @@ def convert_worldbank_data(df):
             "Country Code": v["Country Code"],
             "Indicator Name": v["Indicator Name"],
             "Indicator Code": v["Indicator Code"],
-            "Year": None,
-            "Value": None
+            "Year": 0,
+            "Value": 0
         }
         for year in years:
             new_data_row = {
@@ -30,11 +30,12 @@ def convert_worldbank_data(df):
                 "Indicator Name": rec["Indicator Name"],
                 "Indicator Code": rec["Indicator Code"],
                 "Year": year,
-                "Value": v[str(year)]
+                "Value": v[str(year)] if v[str(year)] else 0.0
             }
             new_data.append(new_data_row)
-    print(new_data[:10])
     res = pd.DataFrame.from_dict(new_data, orient='columns')
+    res = res.fillna(0, inplace=True)
+    print(res[:10])
     return res
 
 
