@@ -105,19 +105,19 @@ data_sources:
   #   matching: "mappings/irmapper_6.mapping.csv"
   #   extract_mode: "single"
 
-  irmapper_ir_7:
-    source_name: "IRMapper Resistance Data 7"
-    type: "file"
-    extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/7_Vgsc-allele-freq_species.csv"
-    extension_options:
-      sep: ","
-      quotechar: '"'
-      encoding: "utf-8"
-      on_bad_lines: "warn"
-      engine: "python"
-    matching: "mappings/irmapper_7.mapping.csv"
-    extract_mode: "single"
+  # irmapper_ir_7:
+  #   source_name: "IRMapper Resistance Data 7"
+  #   type: "file"
+  #   extension: "csv"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/7_Vgsc-allele-freq_species.csv"
+  #   extension_options:
+  #     sep: ","
+  #     quotechar: '"'
+  #     encoding: "utf-8"
+  #     on_bad_lines: "warn"
+  #     engine: "python"
+  #   matching: "mappings/irmapper_7.mapping.csv"
+  #   extract_mode: "single"
 
   # 4. CLIMATE DATA (DAILY)
   # climate_timeseries:
@@ -161,19 +161,19 @@ data_sources:
   #   extract_mode: "single"
 
   # 7. SOCIOECONOMIC DATA
-  # socioeconomic:
-  #   source_name: "World Bank Kenya Indicators"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_API_KEN_DS2_en_csv_v2_10008.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/worldbank_indicator.mapping.csv"
-  #   extract_mode: "single"
+  socioeconomic:
+    source_name: "World Bank Kenya Indicators"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/worldbank_indicator.mapping.csv"
+    extract_mode: "chunked"
 
   # 8. INTERVENTION DATA (ITN USE Distribution)
   # interventions:
