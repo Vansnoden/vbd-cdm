@@ -1,0 +1,35 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+site,dim_location,name,map,"{'ref': 'dim_location.name'}",TRUE,,,str
+latitude_1,dim_location,centroid_lat,none,,TRUE,,,float
+longitude_1,dim_location,centroid_lon,none,,TRUE,,,float
+country,dim_location,country_code,map,"{'ref': 'dim_location.country_code'}",FALSE,,,str
+species,dim_vector,species_name,map,"{'ref': 'dim_vector.species_name'}",TRUE,,,str
+species_id_1,dim_vector,vector_code,map,"{'ref': 'dim_vector.vector_code'}",FALSE,,,str
+source_id,dim_source,source_code,map,"{'ref': 'dim_source.source_code'}",FALSE,,,str
+citation_doi,dim_source,source_url,cast,"{'type': 'str'}",FALSE,,,str
+author,dim_source,source_name,concat,"{'columns': ['author', 'publication_year'], 'separator': ' '}",FALSE,,,str
+month_start,dim_time,month,cast,"{'type': 'int'}",FALSE,,,int
+year_start,dim_time,year,cast,"{'type': 'int'}",FALSE,,,int
+NA,fact_vector_observation,location_id,map,"{'ref': 'dim_location.location_id'}",TRUE,,,int
+NA,fact_vector_observation,vector_code,map,"{'ref': 'dim_vector.vector_code'}",TRUE,,,str
+NA,fact_vector_observation,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,,,str
+NA,fact_vector_observation,date_id,format_date,"{'columns': ['year_start', 'month_start', 'day_start']}",FALSE,2020-01-01,,str
+NA,fact_vector_observation,life_stage,static,,FALSE,adult,adult,str
+parity_n,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,int
+parity_total,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,int
+parity_percent,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+daily_survival_rate_percent,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+fecundity_mean_batch_size,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+gonotrophic_cycle_days,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+hbr_sampling_indoor,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+indoor_hbr,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+hbr_sampling_outdoor,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+outdoor_hbr,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+combined_hbr,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+hbr_unit,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,str
+abr,fact_bionomics,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",FALSE,,,float
+feeding_preference,fact_bionomics,feeding_preference,cast,"{'type': 'str'}",FALSE,,,str
+resting_behavior,fact_bionomics,resting_behavior,cast,"{'type': 'str'}",FALSE,,,str
+NA,fact_bionomics,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,,,str
+NA,fact_bionomics,biting_rate,cast,"{'type': 'float'}",FALSE,,,float
+NA,fact_bionomics,biting_location,cast,"{'type': 'str'}",FALSE,combined,combined,str

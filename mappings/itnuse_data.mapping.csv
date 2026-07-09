@@ -1,0 +1,41 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+NA,dim_location,location_id,auto_increment,,TRUE,,,int
+COUNTY,dim_location,name,map,"{'ref': 'dim_location.name'}",TRUE,,,str
+NA,dim_location,location_code,concat,"{'columns': ['COUNTY', 'country'], 'separator': '_'}",FALSE,Siaya_KE,,str
+NA,dim_location,country_name,static,,FALSE,Kenya,Kenya,str
+NA,dim_location,country_code,static,,FALSE,KE,KE,str
+NA,dim_location,admin_level,static,,FALSE,county,county,str
+NA,dim_location,centroid_lat,static,,FALSE,0.06,0.06,float
+NA,dim_location,centroid_lon,static,,FALSE,34.28,34.28,float
+NA,dim_time,date_id,format_date,"{'columns': ['YEAR', 'month', 'day']}",TRUE,2022-01-01,,str
+YEAR,dim_time,year,cast,"{'type': 'int'}",TRUE,,,int
+NA,dim_time,month,static,,FALSE,1,1,int
+NA,dim_time,date,format_date,"{'columns': ['YEAR', 'month', 'day']}",FALSE,2022-01-01,,str
+NA,dim_time,week,none,,FALSE,,,int
+NA,dim_time,day_of_year,none,,FALSE,,,int
+NA,dim_time,season,map,"{'1': 'dry', '2': 'dry', '3': 'dry', '4': 'wet', '5': 'wet', '6': 'wet', '7': 'wet', '8': 'wet', '9': 'wet', '10': 'wet', '11': 'dry', '12': 'dry'}",FALSE,wet,,str
+NA,dim_time,is_holiday,static,,FALSE,False,False,bool
+SOURCE,dim_source,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,itnuse_org,itnuse_org,str
+SOURCE,dim_source,source_name,cast,"{'type': 'str'}",FALSE,ITN Use Data,ITN Use Data,str
+NA,dim_source,source_description,static,,FALSE,ITN access ownership and use data from itnuse.org,ITN use data,str
+NA,dim_source,source_standard,static,,FALSE,ITN Use,ITN Use,str
+NA,dim_source,source_url,static,,FALSE,https://itnuse.org,https://itnuse.org,str
+NA,dim_source,version,cast,"{'type': 'str'}",FALSE,2024,2024,str
+NA,dim_disease,disease_code,static,,FALSE,malaria,malaria,str
+NA,dim_disease,disease_name,static,,FALSE,Malaria,Malaria,str
+NA,dim_disease,pathogen,static,,FALSE,Plasmodium falciparum,Plasmodium falciparum,str
+NA,dim_disease,source_standard,static,,FALSE,WHO,WHO,str
+NA,dim_disease,icd_code,static,,FALSE,B54,B54,str
+VARiABLE,fact_intervention,intervention_type,map,"{
+  'ITN Access': 'itn_access',
+  'ITN Ownership': 'itn_ownership',
+  'ITN Use': 'itn_use',
+  'ITN Use Access Ratio': 'itn_use_access_ratio'
+}",TRUE,itn_use,itn_use,str
+VALUE,fact_intervention,coverage,cast,"{'type': 'float'}",TRUE,,,float
+NA,fact_intervention,intervention_id,auto_increment,,TRUE,,,int
+NA,fact_intervention,location_id,map,"{'ref': 'dim_location.location_id'}",TRUE,,,int
+NA,fact_intervention,date_start,map,"{'ref': 'dim_time.date_id'}",TRUE,,,str
+NA,fact_intervention,date_end,map,"{'ref': 'dim_time.date_id'}",FALSE,,,str
+NA,fact_intervention,target_disease_code,map,"{'ref': 'dim_disease.disease_code'}",TRUE,malaria,malaria,str
+NA,fact_intervention,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,itnuse_org,itnuse_org,str

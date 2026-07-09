@@ -11,6 +11,56 @@
     --rename-t2m \
     --verbose
 
+./clip_timeseries_data \
+    --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2020_data.grib \
+    --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
+    --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2020.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
+./clip_timeseries_data \
+    --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2021_data.grib \
+    --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
+    --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2021.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
+./clip_timeseries_data \
+    --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2022_data.grib \
+    --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
+    --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2022.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
+./clip_timeseries_data \
+    --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2023_data.grib \
+    --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
+    --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2023.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
+./clip_timeseries_data \
+    --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2024_data.grib \
+    --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
+    --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2024.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
 ```
 
 

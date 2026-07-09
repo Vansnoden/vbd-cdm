@@ -1,0 +1,29 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+NA,dim_location,location_id,auto_increment,,TRUE,,,int
+county,dim_location,name,map,"{'ref': 'dim_location.name'}",TRUE,,,str
+NA,dim_location,location_code,concat,"{'columns': ['county', 'sub_county', 'ward'], 'separator': '_'}",FALSE,,,str
+NA,dim_location,country_name,static,,FALSE,Kenya,Kenya,str
+NA,dim_location,country_code,static,,FALSE,KE,KE,str
+NA,dim_location,admin_level,static,,FALSE,county,county,str
+NA,dim_location,centroid_lat,static,,FALSE,0.0,0.0,float
+NA,dim_location,centroid_lon,static,,FALSE,0.0,0.0,float
+NA,dim_source,source_code,static,,FALSE,KMOH,KMOH,str
+NA,dim_source,source_name,static,,FALSE,Kenya Ministry of Health,Kenya Ministry of Health,str
+NA,dim_source,source_description,static,,FALSE,Kenya health facilities registry,Kenya Ministry of Health,str
+NA,dim_source,source_standard,static,,FALSE,Ministry of Health Kenya,Ministry of Health Kenya,str
+NA,dim_source,source_url,static,,FALSE,https://www.health.go.ke,https://www.health.go.ke,str
+NA,dim_source,version,static,,FALSE,2024,2024,str
+name_title,fact_health_facility,name,cast,"{'type': 'str'}",TRUE,,,str
+facility_type,fact_health_facility,type,cast,"{'type': 'str'}",FALSE,health_facility,health_facility,str
+keph_level,fact_health_facility,type,concat,"{'columns': ['facility_type', 'keph_level'], 'separator': ' - '}",FALSE,,,str
+latitude,fact_health_facility,lat,cast,"{'type': 'float'}",TRUE,,,float
+longitude,fact_health_facility,lon,cast,"{'type': 'float'}",TRUE,,,float
+county,fact_health_facility,location_id,map,"{'ref': 'dim_location.location_id'}",TRUE,,,int
+sub_county,fact_health_facility,location_id,map,"{'ref': 'dim_location.location_id'}",FALSE,,,str
+ward,fact_health_facility,location_id,map,"{'ref': 'dim_location.location_id'}",FALSE,,,str
+NA,fact_health_facility,facility_id,auto_increment,,TRUE,,,int
+NA,fact_health_facility,facility_code,concat,"{'columns': ['county', 'name_title'], 'separator': '_'}",FALSE,,,str
+NA,fact_health_facility,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,KMOH,KMOH,str
+NA,fact_health_facility,catchment_population,static,,FALSE,0,0,int
+date_established,fact_health_facility,date_established,date_parse,"{'format': '%Y-%m-%d'}",FALSE,,,str
+url,fact_health_facility,source_url,cast,"{'type': 'str'}",FALSE,,,str

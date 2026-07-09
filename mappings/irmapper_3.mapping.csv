@@ -1,0 +1,70 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+NA,dim_location,location_id,auto_increment,,TRUE,,,int
+Country,dim_location,country_name,map,"{'ref': 'dim_location.country_name'}",FALSE,,,str
+Site_name,dim_location,name,cast,"{'type': 'str'}",TRUE,,,str
+Latitude,dim_location,centroid_lat,cast,"{'type': 'float'}",FALSE,,,float
+Longitude,dim_location,centroid_lon,cast,"{'type': 'float'}",FALSE,,,float
+Admin_level,dim_location,admin_level,cast,"{'type': 'str'}",FALSE,,,str
+Site_type,dim_location,admin_level,map,"{'point': 'admin0', 'polygon': 'admin1'}",FALSE,,,str
+NA,dim_location,location_code,concat,"{'columns': ['Country', 'Site_name', 'Admin_level'], 'separator': '_'}",FALSE,,,str
+NA,dim_location,country_code,map,"{'ref': 'dim_location.country_code'}",FALSE,,,str
+Complex_Subgroup,dim_vector,species_name,map,"{'ref': 'dim_vector.species_name'}",TRUE,Anopheles gambiae s.l.,,str
+NA,dim_vector,vector_code,concat,"{'columns': ['Complex_Subgroup', 'Complex_Subgroup'], 'separator': '_'}",FALSE,anopheles_gambiae_sl,,str
+NA,dim_vector,genus,static,,FALSE,Anopheles,Anopheles,str
+NA,dim_vector,family,static,,FALSE,Culicidae,Culicidae,str
+NA,dim_vector,subspecies,static,,FALSE,unknown,unknown,str
+NA,dim_vector,description,concat,"{'columns': ['Complex_Subgroup', 'Test_protocol', 'Insecticide_tested'], 'separator': ' - '}",FALSE,,,str
+NA,dim_vector,source_standard,static,,FALSE,IRMapper,IRMapper,str
+Insecticide_tested,dim_insecticide,insecticide_name,map,"{'ref': 'dim_insecticide.insecticide_name'}",TRUE,,,str
+Insecticide_class,dim_insecticide,chemical_class,cast,"{'type': 'str'}",FALSE,,,str
+NA,dim_insecticide,insecticide_code,concat,"{'columns': ['Insecticide_tested', 'Insecticide_class'], 'separator': '_'}",FALSE,permethrin_pyrethroid,,str
+NA,dim_insecticide,description,concat,"{'columns': ['Insecticide_tested', 'Insecticide_class', 'Concentration_�g'], 'separator': ' - '}",FALSE,,,str
+NA,dim_insecticide,source_standard,static,,FALSE,IRMapper,IRMapper,str
+Test_protocol,dim_resistance_test_type,test_type_name,map,"{'ref': 'dim_resistance_test_type.test_type_name'}",TRUE,CDC,CDC,str
+Exposure_period_min,dim_resistance_test_type,exposure_time_unit,cast,"{'type': 'int'}",FALSE,30,30,int
+NA,dim_resistance_test_type,test_type_code,concat,"{'columns': ['Test_protocol', 'Exposure_period_min', 'Concentration_�g'], 'separator': '_'}",FALSE,CDC_30_12.5,,str
+NA,dim_resistance_test_type,description,concat,"{'columns': ['Test_protocol', 'Concentration_�g', '�g_bottle'], 'separator': ' '}",FALSE,,,str
+NA,dim_resistance_test_type,source_standard,static,,FALSE,IRMapper,IRMapper,str
+NA,dim_source,source_code,concat,"{'columns': ['Source_1_type', 'Publication_year'], 'separator': '_'}",FALSE,IRMapper_CDC_2020,,str
+NA,dim_source,source_name,cast,"{'type': 'str'}",FALSE,IRMapper,IRMapper,str
+Source_1_citation,dim_source,source_description,cast,"{'type': 'str'}",FALSE,,,str
+Source_1_type,dim_source,source_standard,cast,"{'type': 'str'}",FALSE,IRMapper,IRMapper,str
+Publication_year,dim_source,version,cast,"{'type': 'str'}",FALSE,2020,2020,str
+NA,dim_source,source_url,static,,FALSE,https://www.irmapper.com,https://www.irmapper.com,str
+Start_year,dim_time,year,cast,"{'type': 'int'}",FALSE,2020,2020,int
+Start_month,dim_time,month,cast,"{'type': 'int'}",FALSE,1,1,int
+NA,dim_time,date_id,format_date,"{'columns': ['Start_year', 'Start_month', 'day_start']}",FALSE,2020-01-01,,str
+NA,dim_time,date,format_date,"{'columns': ['Start_year', 'Start_month', 'day_start']}",FALSE,2020-01-01,,str
+NA,dim_time,week,none,,FALSE,,,int
+NA,dim_time,day_of_year,none,,FALSE,,,int
+NA,dim_time,season,map,"{'1': 'dry', '2': 'dry', '3': 'dry', '4': 'wet', '5': 'wet', '6': 'wet', '7': 'wet', '8': 'wet', '9': 'wet', '10': 'wet', '11': 'dry', '12': 'dry'}",FALSE,wet,,str
+NA,dim_time,is_holiday,static,,FALSE,False,False,bool
+NA,fact_vector_observation,observation_id,auto_increment,,TRUE,,,int
+NA,fact_vector_observation,location_id,map,"{'ref': 'dim_location.location_id'}",TRUE,,,int
+NA,fact_vector_observation,vector_code,map,"{'ref': 'dim_vector.vector_code'}",TRUE,,,str
+NA,fact_vector_observation,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,,,str
+NA,fact_vector_observation,date_id,format_date,"{'columns': ['Start_year', 'Start_month', 'day_start']}",FALSE,2020-01-01,,str
+NA,fact_vector_observation,life_stage,static,,FALSE,adult,adult,str
+NA,fact_vector_observation,sex,static,,FALSE,unknown,unknown,str
+Capture_method_1,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,unknown,,str
+Capture_method_2,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,unknown,,str
+Capture_method_3,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,unknown,,str
+Capture_method_4,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,unknown,,str
+No._mosquitoes_tested,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
+NA,fact_vector_observation,tested_for_pathogen,static,,FALSE,resistance_cdc,resistance_cdc,str
+NA,fact_insecticide_resistance,resistance_id,auto_increment,,TRUE,,,int
+NA,fact_insecticide_resistance,vector_observation_id,map,"{'ref': 'fact_vector_observation.observation_id'}",TRUE,,,int
+NA,fact_insecticide_resistance,insecticide_code,map,"{'ref': 'dim_insecticide.insecticide_code'}",TRUE,,,str
+NA,fact_insecticide_resistance,test_type_code,map,"{'ref': 'dim_resistance_test_type.test_type_code'}",TRUE,,,str
+NA,fact_insecticide_resistance,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,,,str
+Concentration_�g,fact_insecticide_resistance,concentration,cast,"{'type': 'float'}",FALSE,,,float
+Exposure_period_min,fact_insecticide_resistance,exposure_time,cast,"{'type': 'int'}",FALSE,30,30,int
+No._mosquitoes_tested,fact_insecticide_resistance,concentration,cast,"{'type': 'int'}",FALSE,,,int
+No._mosquitoes_dead,fact_insecticide_resistance,mortality,cast,"{'type': 'int'}",FALSE,,,int
+Percent_mortality,fact_insecticide_resistance,mortality,cast,"{'type': 'float'}",FALSE,,,float
+NA,fact_insecticide_resistance,resistance_status,map,"{'0-90': 'resistant', '90-97': 'possible_resistance', '98-100': 'susceptible'}",FALSE,susceptible,,str
+Generation,fact_insecticide_resistance,generation,cast,"{'type': 'str'}",FALSE,F0,F0,str
+Bioassay_ID,fact_insecticide_resistance,matched_set_id,cast,"{'type': 'int'}",FALSE,,,int
+NA,fact_insecticide_resistance,cdc_bioassay,static,,FALSE,TRUE,TRUE,bool
+NA,fact_insecticide_resistance,complex_subgroup,static,,FALSE,TRUE,TRUE,bool
+NA,fact_insecticide_resistance,bottle_bioassay,static,,FALSE,TRUE,TRUE,bool
