@@ -196,7 +196,7 @@ process:
     - generate_summary
     - analyze
   analyze:
-    filter: "dim_location.country_code = 'KE'"
+    # filter: "dim_location.country_code = 'KE'"
     standard_pipelines:
       - seasonal_patterns
       - climate_vector_correlation

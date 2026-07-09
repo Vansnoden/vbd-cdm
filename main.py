@@ -470,7 +470,7 @@ def _extract_location_info(filter_str: Optional[str], study_region: str) -> tupl
     """Extract location name and country code from filter or study_region."""
     import re
     
-    location, country = 'Siaya', 'KE'
+    location, country = None, None
     
     if filter_str:
         # Parse from filter: "dim_location.country_code = 'KE' AND dim_location.name LIKE '%Siaya%'"

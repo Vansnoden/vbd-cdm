@@ -199,8 +199,10 @@ class BaseAnalysis:
             FactDiseaseCase.sex,
             FactDiseaseCase.outcome,
             FactDiseaseCase.case_id
+        ).select_from(
+            FactDiseaseCase
         ).join(
-            FactDiseaseCase, DimTime.date_id == FactDiseaseCase.date_id_reported
+            DimTime, FactDiseaseCase.date_id_reported == DimTime.date_id
         ).filter(
             FactDiseaseCase.location_id.in_(self.location_ids),
             DimTime.year.between(self.config.start_year, self.config.end_year)
@@ -232,8 +234,10 @@ class BaseAnalysis:
             FactVectorObservation.density_per_trap,
             FactVectorObservation.infection_status,
             FactVectorObservation.infection_rate
+        ).select_from(
+            FactVectorObservation
         ).join(
-            FactVectorObservation, DimTime.date_id == FactVectorObservation.date_id
+            DimTime, FactVectorObservation.date_id == DimTime.date_id
         ).join(
             DimVector, FactVectorObservation.vector_code == DimVector.vector_code
         ).filter(
@@ -299,16 +303,23 @@ class BaseAnalysis:
             DimTime.month,
             DimVector.species_name,
             DimInsecticide.insecticide_name,
+            DimInsecticide.chemical_class,
             DimResistanceTestType.test_type_name,
+            FactInsecticideResistance.resistance_id,
+            FactInsecticideResistance.vector_observation_id,
+            FactInsecticideResistance.insecticide_code,
+            FactInsecticideResistance.test_type_code,
             FactInsecticideResistance.concentration,
             FactInsecticideResistance.exposure_time,
             FactInsecticideResistance.mortality,
             FactInsecticideResistance.resistance_status
-        ).join(
-            FactInsecticideResistance, DimTime.date_id == FactVectorObservation.date_id
+        ).select_from(
+            FactInsecticideResistance
         ).join(
             FactVectorObservation, 
             FactInsecticideResistance.vector_observation_id == FactVectorObservation.observation_id
+        ).join(
+            DimTime, FactVectorObservation.date_id == DimTime.date_id
         ).join(
             DimVector, FactVectorObservation.vector_code == DimVector.vector_code
         ).join(
