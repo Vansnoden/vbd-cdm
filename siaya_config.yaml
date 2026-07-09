@@ -6,7 +6,7 @@ core:
 
 data_sources:
   
-  # 1. VECTOR ATLAS DATA (occurrence, bionomics, resistance)
+  # # 1. VECTOR ATLAS DATA (occurrence, bionomics, resistance)
   # vectoratlas:
   #   source_name: "Vector Atlas Occurrence"
   #   type: "file"
@@ -119,7 +119,7 @@ data_sources:
   #   matching: "mappings/irmapper_7.mapping.csv"
   #   extract_mode: "single"
 
-  # 4. CLIMATE DATA (DAILY)
+  # # 4. CLIMATE DATA (DAILY)
   # climate_timeseries:
   #   source_name: "ERA5-Land Climate"
   #   type: "folder"
@@ -134,7 +134,7 @@ data_sources:
   #     # - "ssr"        # Surface solar radiation (J/m²)
   #     # - "sp"         # Surface pressure (Pa)
 
-  # 5. MALARIA INCIDENCE
+  # # 5. MALARIA INCIDENCE
   # malaria_incidence:
   #   source_name: "Malaria Atlas Project - Kenya"
   #   type: "folder"
@@ -145,7 +145,7 @@ data_sources:
   #   extension_options:
   #     window_size: 1024
 
-  # 6. HEALTH FACILITY DATA
+  # # 6. HEALTH FACILITY DATA
   # health_facilities:
   #   source_name: "Kenya Health Facilities"
   #   type: "file"
@@ -160,7 +160,7 @@ data_sources:
   #   matching: "mappings/health_facility_location.mapping.csv"
   #   extract_mode: "single"
 
-  # 7. SOCIOECONOMIC DATA
+  # # 7. SOCIOECONOMIC DATA
   # socioeconomic:
   #   source_name: "World Bank Kenya Indicators"
   #   type: "file"
@@ -175,39 +175,40 @@ data_sources:
   #   matching: "mappings/worldbank_indicator.mapping.csv"
   #   extract_mode: "single"
 
-  # 8. INTERVENTION DATA (ITN USE Distribution)
-  interventions:
-    source_name: "ITN Use"
-    type: "file"
-    extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/itn_usage_data.csv"
-    extension_options:
-      sep: ","
-      quotechar: '"'
-      encoding: "utf-8"
-      on_bad_lines: "warn"
-      engine: "python"
-    matching: "mappings/itnuse_data.mapping.csv"
-    extract_mode: "single"
+  # # 8. INTERVENTION DATA (ITN USE Distribution)
+  # interventions:
+  #   source_name: "ITN Use"
+  #   type: "file"
+  #   extension: "csv"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/itn_usage_data.csv"
+  #   extension_options:
+  #     sep: ","
+  #     quotechar: '"'
+  #     encoding: "utf-8"
+  #     on_bad_lines: "warn"
+  #     engine: "python"
+  #   matching: "mappings/itnuse_data.mapping.csv"
+  #   extract_mode: "single"
 
 process:
   steps:
     - ingest_data
-    # - generate_summary
-  # analyze:
-  #   filter: "dim_location.country_code = 'KE' AND dim_location.name = 'Siaya'"
-  #   standard_pipelines:
-  #     - seasonal_patterns
-  #     - climate_vector_correlation
-  #     - resistance_trends
-  #     - intervention_impact
-  #     - early_warning_indicators
-  #   custom_pipelines:
-  #     - name: "lag_analysis"
-  #       params:
-  #         max_lag_months: 6
-  #         variables: ["t2m", "tp"]
-  #     - name: "integrated_risk_model"
-  #       params:
-  #         features: ["temperature", "rainfall", "resistance", "coverage"]
-  #         target: "incidence_rate"
+    - generate_summary
+    - analyze
+  analyze:
+    filter: "dim_location.country_code = 'KE'"
+    standard_pipelines:
+      - seasonal_patterns
+      - climate_vector_correlation
+      - resistance_trends
+      - intervention_impact
+      - early_warning_indicators
+    custom_pipelines:
+      - name: "lag_analysis"
+        params:
+          max_lag_months: 6
+          variables: ["t2m", "tp"]
+      - name: "integrated_risk_model"
+        params:
+          features: ["temperature", "rainfall", "resistance", "coverage"]
+          target: "incidence_rate"

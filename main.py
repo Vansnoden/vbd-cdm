@@ -385,6 +385,144 @@ def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = Non
         logger.info(f"Executing analysis pipeline: {pipeline}")
 
 
+# main.py - Updated run_analysis_pipelines function
+
+def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = None):
+    """
+    Run the standardized analysis pipelines.
+    
+    Args:
+        pipelines: List of pipeline names to run
+        filter_str: Optional filter string (e.g., "dim_location.country_code = 'KE'")
+    """
+    from analysis.pipeline import run_analysis
+    
+    logger.info(f"Running analysis pipelines: {pipelines}")
+    if filter_str:
+        logger.info(f"With filter: {filter_str}")
+    
+    # Get config and parse parameters
+    config = load_yaml_config(str(PROJECT_ROOT / "siaya_config.yaml"))
+    params = _parse_analysis_params(config, filter_str)
+    
+    # Pipeline to analysis flag mapping
+    pipeline_flags = {
+        'seasonal_patterns': {'run_seasonal': True},
+        'climate_vector_correlation': {'run_climate_correlation': True},
+        'lag_analysis': {'run_lag_analysis': True},
+        'early_warning_indicators': {'run_lag_analysis': True},
+        'intervention_impact': {'run_intervention_impact': True},
+        'resistance_trends': {'run_resistance_trends': True},
+        'integrated_risk_model': {'run_risk_modeling': True},
+        'spatial_analysis': {'run_spatial_analysis': True}
+    }
+    
+    for pipeline in pipelines:
+        logger.info(f"Executing analysis pipeline: {pipeline}")
+        try:
+            flags = pipeline_flags.get(pipeline, {})
+            # Merge with any custom params from config
+            custom = _get_custom_params(config, pipeline)
+            flags.update(custom)
+            
+            run_analysis(
+                study_name=f"{params['location']}_{pipeline}",
+                location=params['location'],
+                country=params['country'],
+                start_year=params['start_year'],
+                end_year=params['end_year'],
+                output_dir=f"analysis/outputs/{pipeline}",
+                **flags
+            )
+            logger.info(f"Completed: {pipeline}")
+        except Exception as e:
+            logger.error(f"Failed: {pipeline} - {e}")
+
+
+def _parse_analysis_params(config: dict, filter_str: Optional[str]) -> dict:
+    """Extract analysis parameters from config and filter string."""
+    import re
+    
+    # Default values from config
+    core = config.get('core', {})
+    study_region = core.get('study_region', 'Siaya, Kenya')
+    study_period = core.get('study_period', '2019-2024')
+    
+    # Parse period
+    start_year, end_year = 2019, 2024
+    if study_period:
+        parts = study_period.split('-')
+        if len(parts) == 2:
+            start_year, end_year = int(parts[0]), int(parts[1])
+    
+    # Parse location and country from filter or study_region
+    location, country = _extract_location_info(filter_str, study_region)
+    
+    return {
+        'location': location,
+        'country': country,
+        'start_year': start_year,
+        'end_year': end_year
+    }
+
+
+def _extract_location_info(filter_str: Optional[str], study_region: str) -> tuple:
+    """Extract location name and country code from filter or study_region."""
+    import re
+    
+    location, country = 'Siaya', 'KE'
+    
+    if filter_str:
+        # Parse from filter: "dim_location.country_code = 'KE' AND dim_location.name LIKE '%Siaya%'"
+        country_match = re.search(r"country_code\s*=\s*'([^']+)'", filter_str)
+        if country_match:
+            country = country_match.group(1)
+        
+        name_match = re.search(r"name\s+LIKE\s+'%([^%]+)%'", filter_str)
+        if name_match:
+            location = name_match.group(1)
+        else:
+            name_match2 = re.search(r"name\s*=\s*'([^']+)'", filter_str)
+            if name_match2:
+                location = name_match2.group(1)
+    
+    # If not found in filter, try study_region
+    if not location or location == 'Siaya':
+        parts = study_region.split(',')
+        if parts:
+            location = parts[0].strip().replace(' County', '').strip()
+            if len(parts) > 1:
+                country_name = parts[1].strip()
+                country_map = {'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 
+                              'South Africa': 'ZA', 'Tanzania': 'TZ', 'Uganda': 'UG'}
+                country = country_map.get(country_name, country)
+    
+    return location, country
+
+
+def _get_custom_params(config: dict, pipeline: str) -> dict:
+    """Get custom parameters for a specific pipeline from config."""
+    process_cfg = config.get('process', {})
+    analyze_cfg = process_cfg.get('analyze', {})
+    custom_pipelines = analyze_cfg.get('custom_pipelines', [])
+    
+    for cp in custom_pipelines:
+        if cp.get('name') == pipeline:
+            params = cp.get('params', {})
+            # Map custom params to analysis flags
+            result = {}
+            if 'max_lag_months' in params:
+                result['max_lag_months'] = params['max_lag_months']
+            if 'variables' in params:
+                result['environmental_variables'] = params['variables']
+            if 'features' in params:
+                result['features'] = params['features']
+            if 'target' in params:
+                result['target'] = params['target']
+            return result
+    return {}
+
+
 def main():
     parser = argparse.ArgumentParser(description="CDM Integration Framework Orchestrator")
     parser.add_argument("--config", default="siaya_config.yaml", help="Path to YAML configuration file")

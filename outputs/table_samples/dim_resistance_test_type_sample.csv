@@ -1,1 +1,25 @@
 test_type_code,test_type_name,exposure_time_unit,description,source_standard
+WHO,WHO,60,,
+WHO Bioassay (version unknown),WHO,60,WHO Bioassay (version unknown),IRMapper
+WHO Bioassay 1981,WHO,60,WHO Bioassay 1981,IRMapper
+WHO Bioassay 1998,WHO,60,WHO Bioassay 1998,IRMapper
+WHO Bioassay 2013,WHO,60,WHO Bioassay 2013,IRMapper
+CDC Bottle Bioassay/NR/50,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 50,IRMapper
+CDC Bottle Bioassay/30/50,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 50,IRMapper
+CDC Bottle Bioassay/45/100,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 100,IRMapper
+CDC Bottle Bioassay/30/21.5,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 21.5,IRMapper
+CDC Bottle Bioassay/30/12.5,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 12.5,IRMapper
+CDC Bottle Bioassay/30/20,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 20,IRMapper
+CDC Bottle Bioassay/NR/100,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 100,IRMapper
+CDC Bottle Bioassay/NR/20,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 20,IRMapper
+CDC Bottle Bioassay/NR/21.5,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 21.5,IRMapper
+CDC Bottle Bioassay/NR/12.5,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay 12.5,IRMapper
+CDC Bottle Bioassay/NR/NR,CDC Bottle Bioassay/NR/50,30,CDC Bottle Bioassay NR,IRMapper
+WHO Bioassay 1998/NR/PBO,WHO,60,WHO Bioassay 1998 PBO 0.75,IRMapper
+WHO Bioassay 1998/NR/none,WHO,60,WHO Bioassay 1998 none,IRMapper
+WHO Bioassay (version unknown)/NR,WHO,60,WHO Bioassay (version unknown),IRMapper
+CDC Bottle Bioassay/NR,WHO,60,CDC Bottle Bioassay,IRMapper
+WHO Bioassay 1981/NR,WHO,60,WHO Bioassay 1981,IRMapper
+WHO Bioassay 1981/120,WHO,60,WHO Bioassay 1981,IRMapper
+CDC Bottle Bioassay/120,WHO,60,CDC Bottle Bioassay,IRMapper
+WHO/60/1x,WHO,60,,IRMapper

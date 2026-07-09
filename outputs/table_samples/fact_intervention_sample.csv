@@ -1,1 +1,5 @@
 intervention_id,location_id,date_start,date_end,target_disease_code,source_code,intervention_type,coverage
+1,692843,2022-01-01,2022-12-01,MAL,ITN Use Data,itn_use,72.0
+2,692843,2022-01-01,2022-12-01,MAL,ITN Use Data,itn_use,87.0
+3,692843,2022-01-01,2022-12-01,MAL,ITN Use Data,itn_use,68.0
+4,692843,2022-01-01,2022-12-01,MAL,ITN Use Data,itn_use,0.94
