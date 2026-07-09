@@ -7,33 +7,33 @@ core:
 data_sources:
   
   # 1. VECTOR ATLAS DATA (occurrence, bionomics, resistance)
-  vectoratlas:
-    source_name: "Vector Atlas Occurrence"
-    type: "file"
-    extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
-    extension_options:
-      sep: ","
-      quotechar: '"'
-      encoding: "utf-8"
-      on_bad_lines: "warn"
-      engine: "python"
-    matching: "mappings/vectoratlas.mapping.csv"
-    extract_mode: "single"
-
-  # irmapper_ir_1:
-  #   source_name: "IRMapper Resistance Data 1"
+  # vectoratlas:
+  #   source_name: "Vector Atlas Occurrence"
   #   type: "file"
   #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
   #   extension_options:
   #     sep: ","
   #     quotechar: '"'
   #     encoding: "utf-8"
   #     on_bad_lines: "warn"
   #     engine: "python"
-  #   matching: "mappings/irmapper_1.mapping.csv"
+  #   matching: "mappings/vectoratlas.mapping.csv"
   #   extract_mode: "single"
+
+  irmapper_ir_1:
+    source_name: "IRMapper Resistance Data 1"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_1.mapping.csv"
+    extract_mode: "single"
   
   # irmapper_ir_2:
   #   source_name: "IRMapper Resistance Data 2"
