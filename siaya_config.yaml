@@ -6,8 +6,8 @@ core:
 
 data_sources:
   
-  # 1. VECTOR OCCURRENCE DATA
-  vector_occurrence:
+  # 1. VECTOR ATLAS DATA (occurrence, bionomics, resistance)
+  vectoratlas:
     source_name: "Vector Atlas Occurrence"
     type: "file"
     extension: "csv"
@@ -18,38 +18,8 @@ data_sources:
       encoding: "utf-8"
       on_bad_lines: "warn"
       engine: "python"
-    matching: "mappings/vectoratlas_occurrence.mapping.csv"
+    matching: "mappings/vectoratlas.mapping.csv"
     extract_mode: "single"
-    
-  # 2. VECTOR BIONOMICS
-  # vector_bionomics:
-  #   source_name: "Vector Atlas Bionomics"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/vectoratlas_bionomics.mapping.csv"
-  #   extract_mode: "single"
-
-  # 3. INSECTICIDE RESISTANCE
-  # vectoratlas_ir:
-  #   source_name: "Vector atlas Resistance Data"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/vectoratlas_resistance.mapping.csv"
-  #   extract_mode: "single"
 
   # irmapper_ir_1:
   #   source_name: "IRMapper Resistance Data 1"
