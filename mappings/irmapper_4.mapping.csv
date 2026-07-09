@@ -22,7 +22,7 @@ Longitude,dim_location,centroid_lon,cast,"{""type"": ""float""}",False,,,
 ,dim_insecticide,description,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class"", ""Concentration (%)""], ""separator"": "" - ""}",False,,,
 ,dim_insecticide,source_standard,none,,False,IRMapper,IRMapper,
 
-"Test protocol",dim_resistance_test_type,test_type_name,map,"{""ref"": ""dim_resistance_test_type.test_type_name""}",False,WHO,WHO,
+"Test protocol",dim_resistance_test_type,test_type_name,none,,False,WHO,WHO,
 "Exposure period (min)",dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",False,60,60,
 ,dim_resistance_test_type,test_type_code,concat,"{""columns"": [""Test protocol"", ""Exposure period (min)"", ""Synergist tested""], ""separator"": ""/""}",False,WHO/60/PBO,,
 ,dim_resistance_test_type,description,concat,"{""columns"": [""Test protocol"", ""Synergist tested"", ""Synergist concentration""], ""separator"": "" ""}",False,,,

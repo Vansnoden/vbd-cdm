@@ -63,33 +63,33 @@ data_sources:
   #   matching: "mappings/irmapper_3.mapping.csv"
   #   extract_mode: "single"
 
-  irmapper_ir_4:
-    source_name: "IRMapper Resistance Data 4"
-    type: "file"
-    extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
-    extension_options:
-      sep: ","
-      quotechar: '"'
-      encoding: "utf-8"
-      on_bad_lines: "warn"
-      engine: "python"
-    matching: "mappings/irmapper_4.mapping.csv"
-    extract_mode: "single"
-
-  # irmapper_ir_5:
-  #   source_name: "IRMapper Resistance Data 5"
+  # irmapper_ir_4:
+  #   source_name: "IRMapper Resistance Data 4"
   #   type: "file"
   #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
   #   extension_options:
   #     sep: ","
   #     quotechar: '"'
   #     encoding: "utf-8"
   #     on_bad_lines: "warn"
   #     engine: "python"
-  #   matching: "mappings/irmapper_5.mapping.csv"
+  #   matching: "mappings/irmapper_4.mapping.csv"
   #   extract_mode: "single"
+
+  irmapper_ir_5:
+    source_name: "IRMapper Resistance Data 5"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_5.mapping.csv"
+    extract_mode: "single"
 
   # irmapper_ir_6:
   #   source_name: "IRMapper Resistance Data 6"
