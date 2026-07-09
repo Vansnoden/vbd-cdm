@@ -21,19 +21,19 @@ data_sources:
   #   matching: "mappings/vectoratlas.mapping.csv"
   #   extract_mode: "single"
 
-  irmapper_ir_1:
-    source_name: "IRMapper Resistance Data 1"
-    type: "file"
-    extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
-    extension_options:
-      sep: ","
-      quotechar: '"'
-      encoding: "utf-8"
-      on_bad_lines: "warn"
-      engine: "python"
-    matching: "mappings/irmapper_1.mapping.csv"
-    extract_mode: "single"
+  # irmapper_ir_1:
+  #   source_name: "IRMapper Resistance Data 1"
+  #   type: "file"
+  #   extension: "csv"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
+  #   extension_options:
+  #     sep: ","
+  #     quotechar: '"'
+  #     encoding: "utf-8"
+  #     on_bad_lines: "warn"
+  #     engine: "python"
+  #   matching: "mappings/irmapper_1.mapping.csv"
+  #   extract_mode: "single"
   
   # irmapper_ir_2:
   #   source_name: "IRMapper Resistance Data 2"
@@ -49,19 +49,19 @@ data_sources:
   #   matching: "mappings/irmapper_2.mapping.csv"
   #   extract_mode: "single"
 
-  # irmapper_ir_3:
-  #   source_name: "IRMapper Resistance Data 3"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_3.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_3:
+    source_name: "IRMapper Resistance Data 3"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_3.mapping.csv"
+    extract_mode: "single"
 
   # irmapper_ir_4:
   #   source_name: "IRMapper Resistance Data 4"

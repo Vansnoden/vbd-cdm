@@ -1,67 +1,61 @@
 source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
-Country,dim_location,country_name,map,"{""ref"": ""dim_location.country_name""}",FALSE,,,str
-Site_name,dim_location,name,cast,"{""type"": ""str""}",FALSE,,,str
-Latitude,dim_location,centroid_lat,cast,"{""type"": ""float""}",FALSE,,,float
-Longitude,dim_location,centroid_lon,cast,"{""type"": ""float""}",FALSE,,,float
-Admin_level,dim_location,admin_level,cast,"{""type"": ""str""}",FALSE,,,str
-Site_type,dim_location,admin_level,map,"{""point"": ""admin0"", ""polygon"": ""admin1""}",FALSE,,,str
-,dim_location,location_code,concat,"{""columns"": [""Country"", ""Site_name"", ""Admin_level""], ""separator"": ""_""}",FALSE,,,str
-,dim_location,country_code,map,"{""ref"": ""dim_location.country_code""}",FALSE,,,str
-Species,dim_vector,species_name,map,"{""ref"": ""dim_vector.species_name""}",FALSE,Anopheles gambiae s.l.,,str
-,dim_vector,vector_code,concat,"{""columns"": [""Species"", ""Identification_method_1""], ""separator"": ""_""}",FALSE,anopheles_gambiae_sl,,str
-,dim_vector,genus,split,"{""delimiter"": "" "", ""index"": 0}",FALSE,Anopheles,,str
-,dim_vector,family,none,,FALSE,Culicidae,Culicidae,str
-,dim_vector,subspecies,none,,FALSE,unknown,unknown,str
-,dim_vector,description,concat,"{""columns"": [""Species"", ""Identification_method_1"", ""Identification_method_2""], ""separator"": "" - ""}",FALSE,,,str
-,dim_vector,source_standard,none,,FALSE,IRMapper,IRMapper,str
-Insecticide_tested,dim_insecticide,insecticide_name,map,"{""ref"": ""dim_insecticide.insecticide_name""}",FALSE,,,str
-Insecticide_class,dim_insecticide,chemical_class,cast,"{""type"": ""str""}",FALSE,,,str
-,dim_insecticide,insecticide_code,concat,"{""columns"": [""Insecticide_tested"", ""Insecticide_class""], ""separator"": ""_""}",FALSE,permethrin_pyrethroid,,str
-,dim_insecticide,description,concat,"{""columns"": [""Insecticide_tested"", ""Insecticide_class"", ""Concentration_%""], ""separator"": "" - ""}",FALSE,,,str
-,dim_insecticide,source_standard,none,,FALSE,IRMapper,IRMapper,str
-Test_protocol,dim_resistance_test_type,test_type_name,map,"{""ref"": ""dim_resistance_test_type.test_type_name""}",FALSE,WHO,WHO,str
-Exposure_time_min,dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",FALSE,60,60,int
-,dim_resistance_test_type,test_type_code,concat,"{""columns"": [""Test_protocol"", ""Exposure_time_min"", ""Concentration_%""], ""separator"": ""_""}",FALSE,WHO_60_0.75,,str
-,dim_resistance_test_type,description,concat,"{""columns"": [""Test_protocol"", ""Concentration_%"", ""percent_concentration""], ""separator"": "" ""}",FALSE,,,str
-,dim_resistance_test_type,source_standard,none,,FALSE,IRMapper,IRMapper,str
-,dim_source,source_code,concat,"{""columns"": [""Source_1_type"", ""Publication_year""], ""separator"": ""_""}",FALSE,IRMapper_WHO_SPECIES_2020,,str
-,dim_source,source_name,cast,"{""type"": ""str""}",FALSE,IRMapper,IRMapper,str
-Source_1_citation,dim_source,source_description,cast,"{""type"": ""str""}",FALSE,,,str
-Source_1_type,dim_source,source_standard,cast,"{""type"": ""str""}",FALSE,IRMapper,IRMapper,str
-Publication_year,dim_source,version,cast,"{""type"": ""str""}",FALSE,2020,2020,str
-,dim_source,source_url,none,,FALSE,https://www.irmapper.com,https://www.irmapper.com,str
-Start_year,dim_time,year,cast,"{""type"": ""int""}",FALSE,2020,2020,int
-Start_month,dim_time,month,cast,"{""type"": ""int""}",FALSE,1,1,int
-Start_day,dim_time,date_id,none,,FALSE,1,1,int
-,dim_time,date_id,format_date,"{""columns"": [""Start_year"", ""Start_month"", ""Start_day""]}",FALSE,2020-01-01,,str
-,dim_time,date,format_date,"{""columns"": [""Start_year"", ""Start_month"", ""Start_day""]}",FALSE,2020-01-01,,str
-,dim_time,week,none,,FALSE,,,int
-,dim_time,day_of_year,none,,FALSE,,,int
-,dim_time,season,map,"{""1"": ""dry"", ""2"": ""dry"", ""3"": ""dry"", ""4"": ""wet"", ""5"": ""wet"", ""6"": ""wet"", ""7"": ""wet"", ""8"": ""wet"", ""9"": ""wet"", ""10"": ""wet"", ""11"": ""dry"", ""12"": ""dry""}",FALSE,wet,,str
-,dim_time,is_holiday,none,,FALSE,False,False,bool
-,fact_vector_observation,location_id,map,"{""ref"": ""dim_location.location_id""}",FALSE,,,int
-,fact_vector_observation,vector_code,map,"{""ref"": ""dim_vector.vector_code""}",FALSE,,,str
-,fact_vector_observation,source_code,map,"{""ref"": ""dim_source.source_code""}",FALSE,,,str
-,fact_vector_observation,date_id,format_date,"{""columns"": [""Start_year"", ""Start_month"", ""Start_day""]}",FALSE,2020-01-01,,str
-,fact_vector_observation,life_stage,none,,FALSE,adult,adult,str
-,fact_vector_observation,sex,none,,FALSE,unknown,unknown,str
-Capture_method_1,fact_vector_observation,collection_method,cast,"{""type"": ""str""}",FALSE,unknown,,str
-Capture_method_2,fact_vector_observation,collection_method,cast,"{""type"": ""str""}",FALSE,unknown,,str
-Capture_method_3,fact_vector_observation,collection_method,cast,"{""type"": ""str""}",FALSE,unknown,,str
-Capture_method_4,fact_vector_observation,collection_method,cast,"{""type"": ""str""}",FALSE,unknown,,str
-No._mosquitoes_tested,fact_vector_observation,count,cast,"{""type"": ""int""}",FALSE,,,int
-,fact_vector_observation,tested_for_pathogen,none,,FALSE,resistance_who,resistance_who,str
-,fact_insecticide_resistance,vector_observation_id,map,"{""ref"": ""fact_vector_observation.observation_id""}",FALSE,,,int
-,fact_insecticide_resistance,insecticide_code,map,"{""ref"": ""dim_insecticide.insecticide_code""}",FALSE,,,str
-,fact_insecticide_resistance,test_type_code,map,"{""ref"": ""dim_resistance_test_type.test_type_code""}",FALSE,,,str
-,fact_insecticide_resistance,source_code,map,"{""ref"": ""dim_source.source_code""}",FALSE,,,str
-Concentration_%,fact_insecticide_resistance,concentration,cast,"{""type"": ""float""}",FALSE,,,float
-Exposure_time_min,fact_insecticide_resistance,exposure_time,cast,"{""type"": ""int""}",FALSE,60,60,int
-No._mosquitoes_tested,fact_insecticide_resistance,concentration,cast,"{""type"": ""int""}",FALSE,,,int
-No._mosquitoes_dead,fact_insecticide_resistance,mortality,cast,"{""type"": ""int""}",FALSE,,,int
-Percent_mortality,fact_insecticide_resistance,mortality,cast,"{""type"": ""float""}",FALSE,,,float
-,fact_insecticide_resistance,resistance_status,map,"{""0-90"": ""resistant"", ""90-97"": ""possible_resistance"", ""98-100"": ""susceptible""}",FALSE,susceptible,,str
-Generation,fact_insecticide_resistance,generation,cast,"{""type"": ""str""}",FALSE,F0,F0,str
-Bioassay_ID,fact_insecticide_resistance,matched_set_id,cast,"{""type"": ""int""}",FALSE,,,int
-,fact_insecticide_resistance,who_bioassay,none,,FALSE,FALSE,FALSE,bool
-,fact_insecticide_resistance,species_level,none,,FALSE,FALSE,FALSE,bool
+
+Country,dim_location,country_name,none,,False,,,
+"Site name",dim_location,name,concat,"{""columns"": [""Country"", ""Site name""], ""separtor"": ""/""}",True,,,
+Latitude,dim_location,centroid_lat,cast,"{""type"": ""float""}",False,,,
+Longitude,dim_location,centroid_lon,cast,"{""type"": ""float""}",False,,,
+"Admin level",dim_location,admin_level,cast,"{""type"": ""str""}",False,,,
+,dim_location,location_code,concat,"{""columns"": [""Country"", ""Site name"", ""Admin level""], ""separator"": ""/""}",False,,,
+Country,dim_location,country_code,none,,False,,,
+
+Species,dim_vector,species_name,none,,False,,,
+Species,dim_vector,vector_code,none,,False,,,
+,dim_vector,genus,split,"{""delimiter"": "" "", ""index"": 0}",False,Anopheles,,
+,dim_vector,family,none,,False,Culicidae,Culicidae,
+,dim_vector,subspecies,none,,False,unknown,unknown,
+,dim_vector,description,concat,"{""columns"": [""Species"", ""Identification method 1"", ""Identification method 2""], ""separator"": "" - ""}",False,,,
+,dim_vector,source_standard,none,,False,IRMapper,IRMapper,
+
+"Insecticide tested",dim_insecticide,insecticide_name,none,,False,,,
+"Insecticide class",dim_insecticide,chemical_class,cast,"{""type"": ""str""}",False,,,
+,dim_insecticide,insecticide_code,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class""], ""separator"": ""/""}",False,permethrin_pyrethroid,,
+,dim_insecticide,description,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class"", ""Concentration %""], ""separator"": "" - ""}",False,,,
+,dim_insecticide,source_standard,none,,False,IRMapper,IRMapper,
+
+"Test protocol",dim_resistance_test_type,test_type_name,map,"{""ref"": ""dim_resistance_test_type.test_type_name""}",False,WHO,WHO,
+"Exposure time min",dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",False,60,60,
+,dim_resistance_test_type,test_type_code,concat,"{""columns"": [""Test protocol"", ""Exposure time min"", ""Concentration %""], ""separator"": ""/""}",False,WHO_60_0.75,,
+,dim_resistance_test_type,description,concat,"{""columns"": [""Test protocol"", ""Concentration %"", ""percent_concentration""], ""separator"": ""/""}",False,,,
+,dim_resistance_test_type,source_standard,none,,False,IRMapper,IRMapper,
+
+,dim_source,source_code,concat,"{""columns"": [""Source 1 type"", ""Publication year""], ""separator"": ""/""}",False,IRMapper_WHO_SPECIES_2020,,
+,dim_source,source_name,cast,"{""type"": ""str""}",False,IRMapper,IRMapper,
+"Source 1 citation",dim_source,source_description,cast,"{""type"": ""str""}",False,,,
+"Source 1 type",dim_source,source_standard,cast,"{""type"": ""str""}",False,IRMapper,IRMapper,
+"Publication year",dim_source,version,cast,"{""type"": ""str""}",False,2020,2020,
+,dim_source,source_url,none,,False,https://www.irmapper.com,https://www.irmapper.com,
+
+,fact_vector_observation,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""Country"", ""Site name"", ""Admin level""], ""separator"": ""/""}",False,,,
+,fact_vector_observation,vector_code,map,"{""ref"": ""dim_vector.vector_code"", ""columns"": [""Species""], ""separator"": """"}",False,,,
+,fact_vector_observation,source_code,none,,False,IRMapper,,
+,fact_vector_observation,date_id,format_date,"{""columns"": [""Start year"", ""Start month"", ""Start day""]}",False,2020-01-01,,
+,fact_vector_observation,life_stage,none,,False,adult,adult,
+,fact_vector_observation,sex,none,,False,unknown,unknown,
+"Capture method 1",fact_vector_observation,collection_method,cast,"{""type"": ""str""}",False,unknown,,
+"No. mosquitoes tested",fact_vector_observation,count,cast,"{""type"": ""int""}",False,,,
+,fact_vector_observation,tested_for_pathogen,none,,False,resistance_who,resistance_who,
+
+,fact_insecticide_resistance,vector_observation_id,none,,False,False,,
+,fact_insecticide_resistance,insecticide_code,map,"{""ref"": ""dim_insecticide.insecticide_code"", ""columns"": [""Insecticide tested"", ""Insecticide class""], ""separator"": ""/""}",False,,,
+,fact_insecticide_resistance,test_type_code,map,"{""ref"": ""dim_resistance_test_type.test_type_code"", ""columns"": [""Test protocol"", ""Exposure time min"", ""Concentration %""], ""separator"": ""/""}",False,,,
+,fact_insecticide_resistance,source_code,none,,False,IRMapper,,
+"Concentration %",fact_insecticide_resistance,concentration,cast,"{""type"": ""float""}",False,,,
+"Exposure time min",fact_insecticide_resistance,exposure_time,cast,"{""type"": ""int""}",False,60,60,
+"No. mosquitoes tested",fact_insecticide_resistance,concentration,cast,"{""type"": ""int""}",False,,,
+"No. mosquitoes dead",fact_insecticide_resistance,mortality,cast,"{""type"": ""int""}",False,,,
+"Percent mortality",fact_insecticide_resistance,mortality,cast,"{""type"": ""float""}",False,,,
+,fact_insecticide_resistance,resistance_status,map,"{""0-90"": ""resistant"", ""90-97"": ""possible_resistance"", ""98-100"": ""susceptible""}",False,susceptible,,
+Generation,fact_insecticide_resistance,generation,cast,"{""type"": ""str""}",False,F0,F0,
+"Bioassay ID",fact_insecticide_resistance,matched_set_id,cast,"{""type"": ""int""}",False,,,
+,fact_insecticide_resistance,who_bioassay,none,,False,False,False,
+,fact_insecticide_resistance,species_level,none,,False,False,False,
