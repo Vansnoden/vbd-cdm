@@ -1,40 +1,21 @@
 source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
-country,dim_location,country_name,map,"{'ref': 'dim_location.country_name'}",TRUE,,,str
-admin_level_1,dim_location,admin_level,map,"{'ref': 'dim_location.admin_level'}",FALSE,country,,str
-site,dim_location,name,map,"{'ref': 'dim_location.name'}",TRUE,,,str
-latitude_1,dim_location,centroid_lat,none,,TRUE,,,float
-longitude_1,dim_location,centroid_lon,none,,TRUE,,,float
-country,dim_location,country_code,map,"{'ref': 'dim_location.country_code'}",FALSE,,,str
-species,dim_vector,species_name,map,"{'ref': 'dim_vector.species_name'}",TRUE,,,str
-species_id_1,dim_vector,vector_code,map,"{'ref': 'dim_vector.vector_code'}",FALSE,,,str
-species,dim_vector,genus,split,"{'delimiter': ' ', 'index': 0}",FALSE,,,str
-NA,dim_vector,family,none,,FALSE, Culicidae,,str
-species,dim_vector,subspecies,split,"{'delimiter': ' ', 'index': 1}",FALSE,,,str
-source_id,dim_source,source_code,map,"{'ref': 'dim_source.source_code'}",FALSE,1000082,,str
-citation_doi,dim_source,source_url,cast,"{'type': 'str'}",FALSE,,,str
-author,dim_source,source_name,concat,"{'columns': ['author', 'publication_year'], 'separator': ' '}",FALSE,,,str
-article_title,dim_source,source_description,cast,"{'type': 'str'}",FALSE,,,str
-journal_title,dim_source,source_standard,cast,"{'type': 'str'}",FALSE,,,str
-publication_year,dim_source,version,cast,"{'type': 'str'}",FALSE,,,int
-month_start,dim_time,month,cast,"{'type': 'int'}",FALSE,,,int
-year_start,dim_time,year,cast,"{'type': 'int'}",FALSE,,,int
-month_end,dim_time,month,cast,"{'type': 'int'}",FALSE,,,int
-year_end,dim_time,year,cast,"{'type': 'int'}",FALSE,,,int
-NA,fact_vector_observation,location_id,map,"{'ref': 'dim_location.location_id'}",TRUE,,,int
-NA,fact_vector_observation,vector_code,map,"{'ref': 'dim_vector.vector_code'}",TRUE,,,str
-NA,fact_vector_observation,source_code,map,"{'ref': 'dim_source.source_code'}",TRUE,,,str
-NA,fact_vector_observation,date_id,format_date,"{'columns': ['year_start', 'month_start', 'day_start']}",FALSE,2020-01-01,,str
-NA,fact_vector_observation,life_stage,static,,FALSE,adult,adult,str
-NA,fact_vector_observation,sex,static,,FALSE,unknown,unknown,str
-sampling_occurrence_1,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,,,str
-occurrence_n_1,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
-sampling_occurrence_2,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,,,str
-occurrence_n_2,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
-sampling_occurrence_3,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,,,str
-occurrence_n_3,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
-sampling_occurrence_4,fact_vector_observation,collection_method,cast,"{'type': 'str'}",FALSE,,,str
-occurrence_n_4,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
-occurrence_n_total,fact_vector_observation,count,cast,"{'type': 'int'}",FALSE,,,int
-binary_presence,fact_vector_observation,infection_status,map,"{'true': 'present', 'false': 'absent'}",FALSE,,,str
-NA,fact_vector_observation,tested_for_pathogen,static,,FALSE,malaria,malaria,str
-infection_rate,fact_vector_observation,infection_rate,cast,"{'type': 'float'}",FALSE,,,float
+country,dim_location,country_name,none,,True,,,
+admin_level_1,dim_location,admin_level,map,"{""ref"": ""dim_location.admin_level""}",False,country,,
+site,dim_location,name,concat,"{""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",True,,,
+latitude_1,dim_location,centroid_lat,none,,True,,,
+longitude_1,dim_location,centroid_lon,none,,True,,,
+species,dim_vector,species_name,none,,True,,,
+species,dim_vector,vector_code,none,,True,,,
+species,dim_vector,genus,split,"{""delimiter"": "" "", ""index"": 0}",False,,,
+,dim_vector,family,none,,False,Culicidae,,
+species,dim_vector,subspecies,split,"{""delimiter"": "" "", ""index"": 1}",False,,,
+,dim_source,source_code,none,,False,"VA","VA",
+,dim_source,source_name,none,,False,"","Vector Atlas",
+,dim_source,source_url,none,,False,,"https://vectoratlas.icipe.org",
+,dim_source,version,none,,False,,2026,
+,fact_vector_observation,location_id,map,"{""ref"": ""dim_location.name"", ""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",False,,,int
+,fact_vector_observation,vector_code,map,"{""ref"": ""dim_vector.vector_code"", ""columns"":[""species""], ""separator"": """"}",False,,,
+,fact_vector_observation,source_code,none,,False,VA,,
+,fact_vector_observation,date_id,format_date,"{""columns"": [""year_start"", ""month_start"", ""day_start""]}",False,2020-01-01,,
+sampling_occurrence_1,fact_vector_observation,collection_method,none,,False,,,
+occurrence_n_total,fact_vector_observation,count,cast,"{""type"": ""int""}",False,,,

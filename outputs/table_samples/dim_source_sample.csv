@@ -1,1 +1,5 @@
 source_code,source_name,source_description,source_standard,source_url,version
+GBIF,GBIF Dataset,,,,
+ERA5,ECMWF ERA5-Land,,,https://cds.climate.copernicus.eu,
+MAP,Malaria Atlas Project,,,https://malariaatlas.org/,
+VA,Mustapha,Secondary malaria vectors in western kenya include novel species with unexpectedly high densities and parasite infection rates,,10.1186/s13071-021-04748-9,2021

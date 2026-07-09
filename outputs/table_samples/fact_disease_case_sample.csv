@@ -1,1 +1,1 @@
-case_id,location_code,date_id_onset,date_id_reported,disease_code,identification_method_code,source_code,case_status,host_type,age_years,age_group,sex,outcome
+case_id,location_id,date_id_onset,date_id_reported,disease_code,identification_method_code,source_code,case_status,host_type,age_years,age_group,sex,outcome

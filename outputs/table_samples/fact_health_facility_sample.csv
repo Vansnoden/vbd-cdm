@@ -1,1 +1,1 @@
-facility_id,facility_code,location_code,source_code,name,lat,lon,type,catchment_population
+facility_id,facility_code,location_id,source_code,name,lat,lon,type,catchment_population

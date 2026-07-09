@@ -387,7 +387,7 @@ def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = Non
 
 def main():
     parser = argparse.ArgumentParser(description="CDM Integration Framework Orchestrator")
-    parser.add_argument("--config", default="base_config.yaml", help="Path to YAML configuration file")
+    parser.add_argument("--config", default="siaya_config.yaml", help="Path to YAML configuration file")
     parser.add_argument("--skip-ingest", action="store_true", help="Skip data ingestion")
     parser.add_argument("--skip-summary", action="store_true", help="Skip database summary generation")
     parser.add_argument("--skip-analysis", action="store_true", help="Skip analysis pipelines")
