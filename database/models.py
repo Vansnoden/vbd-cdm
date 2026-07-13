@@ -260,8 +260,8 @@ class FactIntervention(Base):
 
     intervention_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
-    date_start = Column(Date, ForeignKey("dim_time.date_id"), nullable=False)
-    date_end = Column(Date, ForeignKey("dim_time.date_id"))
+    date_start = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    date_end = Column(String(10), ForeignKey("dim_time.date_id"))
     target_disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
 

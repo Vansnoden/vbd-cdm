@@ -1,6 +1,4 @@
 vector_code,species_name,subspecies,description,source_standard,genus,family
-ANGAM,Anopheles gambiae,,,,,
-V,V,,,,arabiensis,Culicidae
 rivulorum,rivulorum,,,,rivulorum,Culicidae
 implexus,implexus,,,,implexus,Culicidae
 squamosus,squamosus,,,,squamosus,Culicidae
@@ -11,18 +9,8 @@ coustani complex,coustani complex,complex,,,coustani,Culicidae
 gambiae complex,gambiae complex,complex,,,gambiae,Culicidae
 pharoensis,pharoensis,,,,pharoensis,Culicidae
 arabiensis,arabiensis,,,,arabiensis,Culicidae
-Funestus Subgroup_Funestus Subgroup,Funestus Subgroup,unknown,Funestus Subgroup,IRMapper,Anopheles,Culicidae
-Gambiae Complex_Gambiae Complex,Gambiae Complex,unknown,Gambiae Complex,IRMapper,Anopheles,Culicidae
-Anopheles rivulorum/Morphology,Anopheles rivulorum,unknown,"Anopheles rivulorum - Morphology - PCR (Koekemoer, 2002)",IRMapper,Anopheles,Culicidae
-"Anopheles gambiae/PCR (Scott, 1993)",Anopheles gambiae,unknown,"Anopheles gambiae - PCR (Scott, 1993)",IRMapper,Anopheles,Culicidae
-"Anopheles arabiensis/PCR (Scott, 1993)",Anopheles arabiensis,unknown,"Anopheles arabiensis - PCR (Scott, 1993)",IRMapper,Anopheles,Culicidae
-Anopheles funestus/Morphology,Anopheles funestus,unknown,"Anopheles funestus - Morphology - PCR (Koekemoer, 2002)",IRMapper,Anopheles,Culicidae
-Anopheles gambiae/Morphology,Anopheles gambiae,unknown,"Anopheles gambiae - Morphology - PCR (Scott, 1993)",IRMapper,Anopheles,Culicidae
-Anopheles arabiensis/Morphology,Anopheles arabiensis,unknown,"Anopheles arabiensis - Morphology - PCR (Scott, 1993)",IRMapper,Anopheles,Culicidae
-"Anopheles funestus/PCR (Koekemoer, 2002)",Anopheles funestus,unknown,"Anopheles funestus - PCR (Koekemoer, 2002)",IRMapper,Anopheles,Culicidae
-Anopheles arabiensis/PCR,Anopheles arabiensis,unknown,Anopheles arabiensis - PCR,IRMapper,Anopheles,Culicidae
-Funestus Subgroup/Funestus Subgroup,Funestus Subgroup,unknown,Funestus Subgroup - CDC Bottle Bioassay - lambdacyhalothrin,IRMapper,Anopheles,Culicidae
-Gambiae Complex/Gambiae Complex,Gambiae Complex,unknown,Gambiae Complex - CDC Bottle Bioassay - pirimiphos-methyl,IRMapper,Anopheles,Culicidae
+Funestus Subgroup/Funestus Subgroup,Funestus Subgroup,,Funestus Subgroup - CDC Bottle Bioassay - lambdacyhalothrin,IRMapper,,
+Gambiae Complex/Gambiae Complex,Gambiae Complex,,Gambiae Complex - CDC Bottle Bioassay - pirimiphos-methyl,IRMapper,,
 Funestus Subgroup,Funestus Subgroup,,,,Anopheles,Culicidae
 Gambiae Complex,Gambiae Complex,,,,Anopheles,Culicidae
 Anopheles quadriannulatus,Anopheles quadriannulatus,unknown,"Anopheles quadriannulatus/PCR (Scott, 1993)",,Anopheles,Culicidae

@@ -1,101 +1,101 @@
-resistance_id,vector_observation_id,insecticide_code,test_type_code,source_code,concentration,exposure_time,mortality,resistance_status
-1,False,False,False,VA,,,,susceptible
-2,False,False,False,VA,,,,susceptible
-3,False,False,False,VA,,,,susceptible
-4,False,False,False,VA,,,,susceptible
-5,False,False,False,VA,,,,susceptible
-6,False,False,False,VA,,,,susceptible
-7,False,False,False,VA,,,,susceptible
-8,False,False,False,VA,,,,susceptible
-9,False,False,False,VA,,,,susceptible
-10,False,False,False,VA,,,,susceptible
-11,False,False,False,VA,,60.0,,susceptible
-12,False,False,False,VA,,60.0,,susceptible
-13,False,False,False,VA,,60.0,,susceptible
-14,False,False,False,VA,,60.0,,susceptible
-15,False,False,False,VA,,60.0,,susceptible
-16,False,False,False,VA,,60.0,,susceptible
-17,False,False,False,VA,,60.0,,susceptible
-18,False,False,False,VA,,60.0,,susceptible
-19,False,False,False,VA,,60.0,,susceptible
-20,False,False,False,VA,,60.0,,susceptible
-21,False,False,False,VA,,60.0,,susceptible
-22,False,False,False,VA,,60.0,,susceptible
-23,False,False,False,VA,,60.0,,susceptible
-24,False,False,False,VA,,60.0,,susceptible
-25,False,False,False,VA,,60.0,,susceptible
-26,False,False,False,VA,,60.0,,susceptible
-27,False,False,False,VA,,60.0,,susceptible
-28,False,False,False,VA,,60.0,,susceptible
-29,False,False,False,VA,,60.0,,susceptible
-30,False,False,False,VA,,60.0,,susceptible
-31,False,False,False,VA,,60.0,,susceptible
-32,False,False,False,VA,,60.0,42.0,susceptible
-33,False,False,False,VA,,60.0,78.0,susceptible
-34,False,False,False,VA,,60.0,100.0,susceptible
-35,False,False,False,VA,,60.0,51.0,susceptible
-36,False,False,False,VA,,60.0,83.0,susceptible
-37,False,False,False,VA,,60.0,100.0,susceptible
-38,False,False,False,VA,,,,susceptible
-39,False,False,False,VA,,,,susceptible
-40,False,False,False,VA,,,,susceptible
-41,False,False,False,VA,,,,susceptible
-42,False,False,False,VA,,,,susceptible
-43,False,False,False,VA,,,,susceptible
-44,False,False,False,VA,,,,susceptible
-45,False,False,False,VA,,,,susceptible
-46,False,False,False,VA,,,,susceptible
-47,False,False,False,VA,,,,susceptible
-48,False,False,False,VA,,,,susceptible
-49,False,False,False,VA,,,,susceptible
-50,False,False,False,VA,,,,susceptible
-51,False,False,False,VA,,,,susceptible
-52,False,False,False,VA,,,,susceptible
-53,False,False,False,VA,,,,susceptible
-54,False,False,False,VA,,,,susceptible
-55,False,False,False,VA,,,,susceptible
-56,False,False,False,VA,,,,susceptible
-57,False,False,False,VA,,,,susceptible
-58,False,False,False,VA,,,,susceptible
-59,False,False,False,VA,,,,susceptible
-60,False,False,False,VA,,,,susceptible
-61,False,False,False,VA,,,,susceptible
-62,False,False,False,VA,,,,susceptible
-63,False,False,False,VA,,,,susceptible
-64,False,False,False,VA,,,,susceptible
-65,False,False,False,VA,,,,susceptible
-66,False,False,False,VA,,,,susceptible
-67,False,False,False,VA,,,,susceptible
-68,False,False,False,VA,,,,susceptible
-69,False,False,False,VA,,,,susceptible
-70,False,False,False,VA,,,,susceptible
-71,False,False,False,VA,,,,susceptible
-72,False,False,False,VA,,,,susceptible
-73,False,False,False,VA,,,,susceptible
-74,False,False,False,VA,,,,susceptible
-75,False,False,False,VA,,,,susceptible
-76,False,False,False,VA,,,,susceptible
-77,False,False,False,VA,,,,susceptible
-78,False,False,False,VA,,,,susceptible
-79,False,False,False,VA,,,,susceptible
-80,False,False,False,VA,,,,susceptible
-81,False,False,False,VA,,,,susceptible
-82,False,False,False,VA,,,,susceptible
-83,False,False,False,VA,,,,susceptible
-84,False,False,False,VA,,,,susceptible
-85,False,False,False,VA,,,,susceptible
-86,False,False,False,VA,,,,susceptible
-87,False,False,False,VA,,,,susceptible
-88,False,False,False,VA,,,,susceptible
-89,False,False,False,VA,,,,susceptible
-90,False,False,False,VA,,,,susceptible
-91,False,False,False,VA,,,,susceptible
-92,False,False,False,VA,,,,susceptible
-93,False,False,False,VA,,,,susceptible
-94,False,False,False,VA,,,,susceptible
-95,False,False,False,VA,,,,susceptible
-96,False,False,False,VA,,,,susceptible
-97,False,False,False,VA,,,,susceptible
-98,False,False,False,VA,93.0,60.0,100.0,susceptible
-99,False,False,False,VA,65.0,60.0,100.0,susceptible
-100,False,False,False,VA,28.0,60.0,100.0,susceptible
+resistance_id,location_id,insecticide_code,test_type_code,source_code,concentration,exposure_time,n_insect_tested,n_insect_susceptible,n_insect_resistant,n_insect_dead,vgsc_n_insect_tested,vgsc995l_vgsc995l_n,vgsc995l_vgsc995f_n,vgsc995f_vgsc995f_n,vgsc995l_vgsc995s_n,vgsc995s_vgsc995s_n,vgsc995f_vgsc995s_n,vgsc_generation,mortality,resistance_status
+1,1,False,False,VA,,,,,,,,,,,,,,,,
+2,2,False,False,VA,,,,,,,,,,,,,,,,
+3,3,False,False,VA,,,,,,,,,,,,,,,,
+4,4,False,False,VA,,,,,,,,,,,,,,,,
+5,5,False,False,VA,,,,,,,,,,,,,,,,
+6,5,False,False,VA,,,,,,,,,,,,,,,,
+7,5,False,False,VA,,,,,,,,,,,,,,,,
+8,8,False,False,VA,,,,,,,,,,,,,,,,
+9,8,False,False,VA,,,,,,,,,,,,,,,,
+10,8,False,False,VA,,,,,,,,,,,,,,,,
+11,5,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+12,5,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+13,5,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+14,5,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+15,5,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+16,5,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+17,5,malathion,who bioassay 2016,VA,5.0,60.0,,,,,,,,,,,,,,
+18,5,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+19,5,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+20,5,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+21,5,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+22,5,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+23,5,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+24,5,malathion,who bioassay 2016,VA,5.0,60.0,,,,,,,,,,,,,,
+25,8,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+26,8,deltamethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+27,8,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+28,8,permethrin,who bioassay 2016,VA,0.75,60.0,,,,,,,,,,,,,,
+29,8,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+30,8,alphacypermethrin,who bioassay 2016,VA,0.05,60.0,,,,,,,,,,,,,,
+31,8,malathion,who bioassay 2016,VA,5.0,60.0,,,,,,,,,,,,,,
+32,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+33,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+34,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+35,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+36,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+37,5,deltamethrin,cdc bottle bioassay,VA,,60.0,,,,,,,,,,,,,,
+38,5,False,False,VA,,,,,,,,,,,,,,,,
+39,5,False,False,VA,,,,,,,,,,,,,,,,
+40,8,False,False,VA,,,,,,,,,,,,,,,,
+41,8,False,False,VA,,,,,,,,,,,,,,,,
+42,42,False,False,VA,,,,,,,,,,,,,,,,
+43,42,False,False,VA,,,,,,,,,,,,,,,,
+44,42,False,False,VA,,,,,,,,,,,,,,,,
+45,42,False,False,VA,,,,,,,,,,,,,,,,
+46,42,False,False,VA,,,,,,,,,,,,,,,,
+47,42,False,False,VA,,,,,,,,,,,,,,,,
+48,48,False,False,VA,,,,,,,,,,,,,,,,
+49,48,False,False,VA,,,,,,,,,,,,,,,,
+50,48,False,False,VA,,,,,,,,,,,,,,,,
+51,48,False,False,VA,,,,,,,,,,,,,,,,
+52,48,False,False,VA,,,,,,,,,,,,,,,,
+53,48,False,False,VA,,,,,,,,,,,,,,,,
+54,48,False,False,VA,,,,,,,,,,,,,,,,
+55,55,False,False,VA,,,,,,,,,,,,,,,,
+56,56,False,False,VA,,,,,,,,,,,,,,,,
+57,57,False,False,VA,,,,,,,,,,,,,,,,
+58,58,False,False,VA,,,,,,,,,,,,,,,,
+59,55,False,False,VA,,,,,,,,,,,,,,,,
+60,56,False,False,VA,,,,,,,,,,,,,,,,
+61,57,False,False,VA,,,,,,,,,,,,,,,,
+62,58,False,False,VA,,,,,,,,,,,,,,,,
+63,55,False,False,VA,,,,,,,,,,,,,,,,
+64,56,False,False,VA,,,,,,,,,,,,,,,,
+65,57,False,False,VA,,,,,,,,,,,,,,,,
+66,58,False,False,VA,,,,,,,,,,,,,,,,
+67,55,False,False,VA,,,,,,,,,,,,,,,,
+68,56,False,False,VA,,,,,,,,,,,,,,,,
+69,57,False,False,VA,,,,,,,,,,,,,,,,
+70,58,False,False,VA,,,,,,,,,,,,,,,,
+71,55,False,False,VA,,,,,,,,,,,,,,,,
+72,56,False,False,VA,,,,,,,,,,,,,,,,
+73,57,False,False,VA,,,,,,,,,,,,,,,,
+74,58,False,False,VA,,,,,,,,,,,,,,,,
+75,75,False,False,VA,,,,,,,,,,,,,,,,
+76,75,False,False,VA,,,,,,,,,,,,,,,,
+77,75,False,False,VA,,,,,,,,,,,,,,,,
+78,75,False,False,VA,,,,,,,,,,,,,,,,
+79,75,False,False,VA,,,,,,,,,,,,,,,,
+80,75,False,False,VA,,,,,,,,,,,,,,,,
+81,75,False,False,VA,,,,,,,,,,,,,,,,
+82,75,False,False,VA,,,,,,,,,,,,,,,,
+83,75,False,False,VA,,,,,,,,,,,,,,,,
+84,75,False,False,VA,,,,,,,,,,,,,,,,
+85,75,False,False,VA,,,,,,,,,,,,,,,,
+86,75,False,False,VA,,,,,,,,,,,,,,,,
+87,75,False,False,VA,,,,,,,,,,,,,,,,
+88,75,False,False,VA,,,,,,,,,,,,,,,,
+89,75,False,False,VA,,,,,,,,,,,,,,,,
+90,90,False,False,VA,,,,,,,,,,,,,,,,
+91,90,False,False,VA,,,,,,,,,,,,,,,,
+92,90,False,False,VA,,,,,,,,,,,,,,,,
+93,90,False,False,VA,,,,,,,,,,,,,,,,
+94,94,False,False,VA,,,,,,,,,,,,,,,,
+95,94,False,False,VA,,,,,,,,,,,,,,,,
+96,94,False,False,VA,,,,,,,,,,,,,,,,
+97,94,False,False,VA,,,,,,,,,,,,,,,,
+98,90,permethrin,who bioassay 2016,VA,0.75,60.0,93.0,,,,,,,,,,,,,
+99,90,permethrin,who bioassay 2016,VA,0.75,60.0,65.0,,,,,,,,,,,,,
+100,90,permethrin,who bioassay 2016,VA,0.75,60.0,28.0,,,,,,,,,,,,,

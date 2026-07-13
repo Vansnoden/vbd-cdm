@@ -24,19 +24,21 @@ species,dim_vector,subspecies,split,"{""delimiter"": "" "", ""index"": 1}",False
 sampling_occurrence_1,fact_vector_observation,collection_method,none,,False,,,
 occurrence_n_total,fact_vector_observation,count,cast,"{""type"": ""int""}",False,,,
 
+,fact_bionomics,location_id,map,"{""ref"": ""dim_location.name"", ""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",False,,,int
 ,fact_bionomics,source_code,none,,False,VA,,
 feeding_preference,fact_bionomics,feeding_preference,cast,"{""type"": ""str""}",False,,,
 resting_behavior,fact_bionomics,resting_behavior,cast,"{""type"": ""str""}",False,,,
 
-insecticide_tested,dim_insecticide,insecticide_name,cast,"{""type"": ""str""}",TRUE,"unknown",,
-insecticide_tested,dim_insecticide,insecticide_code,cast,"{""type"": ""str""}",TRUE,"unknown",,
+insecticide_tested,dim_insecticide,insecticide_name,cast,"{""type"": ""str""}",False,"unknown",,
+insecticide_tested,dim_insecticide,insecticide_code,cast,"{""type"": ""str""}",False,"unknown",,
 insecticide_class,dim_insecticide,chemical_class,cast,"{""type"": ""str""}",FALSE,,,
 irac_moa,dim_insecticide,irac_group,cast,"{""type"": ""str""}",FALSE,,,
 
-test_protocol,dim_resistance_test_type,test_type_name,none,,FALSE,WHO,WHO,
-test_protocol,dim_resistance_test_type,test_type_code,none,,FALSE,WHO,WHO,
+test_protocol,dim_resistance_test_type,test_type_name,none,,FALSE,WHO,,
+test_protocol,dim_resistance_test_type,test_type_code,none,,FALSE,WHO,,
 exposure_period_min,dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",FALSE,60,60,int
 
+,fact_insecticide_resistance,location_id,map,"{""ref"": ""dim_location.name"", ""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",False,,,int
 concentration_percent,fact_insecticide_resistance,concentration,cast,"{""type"": ""float""}",FALSE,,,
 exposure_period_min,fact_insecticide_resistance,exposure_time,cast,"{""type"": ""int""}",FALSE,,,
 mosquitoes_tested_n,fact_insecticide_resistance,n_insect_tested,cast,"{""type"": ""int""}",FALSE,,,

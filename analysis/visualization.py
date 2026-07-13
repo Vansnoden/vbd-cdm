@@ -203,6 +203,7 @@ class VisualizationGenerator:
         
         logger.info(f"Saved intervention impact to {output_path}")
     
+    
     def plot_resistance_trends(
         self,
         resistance_results: Dict,
@@ -222,7 +223,7 @@ class VisualizationGenerator:
         if annual_status.empty:
             return
         
-        # Pivot for stacked bar chart
+        # Check if we have pivot data
         pivot = resistance_results.get('pivot')
         
         if pivot is not None and not pivot.empty:
@@ -249,13 +250,13 @@ class VisualizationGenerator:
                 # Add trendline if in results
                 if 'overall_trend' in resistance_results:
                     trend = resistance_results['overall_trend']
-                    ax.axhline(
-                        y=resistant_trend.mean(),
-                        color='black',
-                        linestyle='--',
-                        alpha=0.5,
-                        label=f"Slope: {trend['slope']:.3f}"
-                    )
+                    # Calculate trendline values
+                    if len(years) > 1:
+                        slope = trend.get('slope', 0)
+                        intercept = trend.get('intercept', 0)
+                        trendline = slope * years + intercept
+                        ax.plot(years, trendline, '--', color='darkred', 
+                            label=f"Slope: {slope:.3f}")
                 
                 ax.set_xlabel('Year')
                 ax.set_ylabel('Resistance (%)')
@@ -269,6 +270,43 @@ class VisualizationGenerator:
             plt.close()
             
             logger.info(f"Saved resistance trends to {output_path}")
+        else:
+            # Try to create a simpler plot using annual_status directly
+            self._plot_simple_resistance_trends(annual_status, study_name, output_dir)
+
+
+    def _plot_simple_resistance_trends(self, annual_status, study_name, output_dir):
+        """Fallback: simpler resistance trend plot."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Group by year and status category to calculate percentages
+        status_pivot = annual_status.pivot_table(
+            index='year',
+            columns='status_category',
+            values='percentage',
+            aggfunc='mean'
+        ).fillna(0)
+        
+        if 'Resistant' in status_pivot.columns:
+            ax.plot(status_pivot.index, status_pivot['Resistant'], 
+                'o-', linewidth=2, color='red', label='Resistant')
+        
+        if 'Susceptible' in status_pivot.columns:
+            ax.plot(status_pivot.index, status_pivot['Susceptible'], 
+                'o-', linewidth=2, color='green', label='Susceptible')
+        
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Percentage')
+        ax.set_title(f'Resistance Status Trends: {study_name}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        output_path = (output_dir or self.figures_dir) / f"{study_name}_resistance_trends.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"Saved simple resistance trends to {output_path}")
     
     def plot_risk_model(
         self,

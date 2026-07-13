@@ -1,4 +1,3 @@
-# analysis/pipeline.py
 """
 Standardized Analysis Pipeline Orchestrator
 
@@ -134,25 +133,34 @@ class AnalysisPipeline:
         env['date'] = pd.to_datetime(env['date'])
         cases['date'] = pd.to_datetime(cases['date'])
         
-        merged = cases.merge(env, on=['date', 'year', 'month'], how='inner')
+        # Ensure date is set as index for proper merging
+        env = env.set_index('date')
+        cases = cases.set_index('date')
+        
+        # Merge on date index
+        merged = cases.join(env, how='inner').reset_index()
         
         if merged.empty:
             return {'error': 'No overlapping data for correlation'}
         
         # Calculate correlations
-        corr_cols = [col for col in merged.columns 
-                    if col in self.config.environmental_variables]
+        env_cols = [col for col in merged.columns 
+                   if col in self.config.environmental_variables]
         
         correlations = {}
-        for col in corr_cols:
-            if col in merged.columns:
+        for col in env_cols:
+            if col in merged.columns and merged[col].notna().any():
                 corr = merged['case_count'].corr(merged[col])
                 correlations[col] = corr
+        
+        # Create correlation matrix
+        corr_cols = ['case_count'] + [c for c in env_cols if c in merged.columns]
+        corr_matrix = merged[corr_cols].corr()
         
         return {
             'correlations': correlations,
             'merged_data': merged,
-            'correlation_matrix': merged[['case_count'] + corr_cols].corr()
+            'correlation_matrix': corr_matrix
         }
     
     def _analyze_lags(self) -> Dict:
@@ -167,16 +175,21 @@ class AnalysisPipeline:
         env['date'] = pd.to_datetime(env['date'])
         cases['date'] = pd.to_datetime(cases['date'])
         
-        merged = cases.merge(env, on=['date', 'year', 'month'], how='inner')
+        env = env.set_index('date')
+        cases = cases.set_index('date')
+        merged = cases.join(env, how='inner').reset_index()
         
         if merged.empty:
             return {'error': 'No overlapping data for lag analysis'}
+        
+        predictor_cols = [col for col in merged.columns 
+                         if col in self.config.environmental_variables]
         
         return self.modules.lag_correlation_analysis(
             merged,
             date_col='date',
             response_col='case_count',
-            predictor_cols=self.config.environmental_variables,
+            predictor_cols=predictor_cols,
             max_lags=self.config.max_lag_months
         )
     
@@ -202,6 +215,10 @@ class AnalysisPipeline:
         if resistance.empty:
             return {'error': 'No resistance data available'}
         
+        # Ensure we have date column
+        if 'date' not in resistance.columns:
+            return {'error': 'Resistance data missing date column'}
+        
         return self.modules.resistance_trend_analysis(
             resistance,
             date_col='date',
@@ -218,14 +235,27 @@ class AnalysisPipeline:
         if cases.empty or env.empty:
             return {'error': 'Insufficient data for risk modeling'}
         
+        # Merge cases and environment
+        cases['date'] = pd.to_datetime(cases['date'])
+        env['date'] = pd.to_datetime(env['date'])
+        
+        cases = cases.set_index('date')
+        env = env.set_index('date')
+        
+        merged = cases.join(env, how='inner').reset_index()
+        
+        if vectors is not None and not vectors.empty:
+            vectors['date'] = pd.to_datetime(vectors['date'])
+            vectors = vectors.set_index('date')
+            merged = merged.join(vectors[['count']], how='left')
+            merged['count'] = merged['count'].fillna(0)
+        
         predictor_cols = self.config.environmental_variables.copy()
-        if not vectors.empty:
+        if 'count' in merged.columns:
             predictor_cols.append('count')
         
         return self.modules.integrated_risk_model(
-            cases,
-            env,
-            vectors if not vectors.empty else None,
+            merged,
             date_col='date',
             response_col='case_count',
             predictor_cols=predictor_cols
@@ -301,7 +331,7 @@ class AnalysisPipeline:
                 
                 # Save summary as JSON
                 summary = {k: v for k, v in result.items() 
-                          if not isinstance(v, (pd.DataFrame, np.ndarray))}
+                          if not isinstance(v, (pd.DataFrame, np.ndarray)) and not isinstance(v, dict)}
                 if summary:
                     with open(data_dir / f"{name}_summary.json", 'w') as f:
                         json.dump(summary, f, indent=2, default=str)

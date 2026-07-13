@@ -3,7 +3,7 @@
 Script to run the standardized analysis pipeline for a specific study site.
 
 Usage:
-    python run_analysis.py --study "Siaya County" --country KE --start 2019 --end 2024
+    python run_analysis.py --study "<location_code/name>" --country <country name> --start 2019 --end 2024
 """
 
 import argparse

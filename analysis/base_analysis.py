@@ -1,4 +1,3 @@
-# analysis/base_analysis.py
 """
 Standardized Analysis Pipeline for CDM-based Vector-Borne Disease Studies
 
@@ -23,9 +22,9 @@ warnings.filterwarnings('ignore')
 
 from database.session import SessionLocal
 from database.models import (
-    DimInsecticide, DimLocation, DimResistanceTestType, DimTime, DimDisease, DimVector,
+    DimInsecticide, DimLocation, DimResistanceTestType, DimSocioeconomicIndicator, DimTime, DimDisease, DimVector,
     FactDiseaseCase, FactVectorObservation, FactEnvironment,
-    FactIntervention, FactInsecticideResistance, FactDiseaseBurden
+    FactIntervention, FactInsecticideResistance, FactDiseaseBurden, FactSocioeconomicCondition
 )
 
 # Setup logging
@@ -154,8 +153,6 @@ class BaseAnalysis:
         """
         logger.info("Querying data from CDM...")
         
-        location_filter = FactDiseaseCase.location_id.in_(self.location_ids)
-        
         data = {}
         
         # 1. Disease cases
@@ -181,6 +178,10 @@ class BaseAnalysis:
         # 6. Disease burden
         data['burden'] = self._query_burden()
         logger.info(f"  - Burden: {len(data['burden'])} records")
+        
+        # 7. Socioeconomic data
+        data['socioeconomic'] = self._query_socioeconomic()
+        logger.info(f"  - Socioeconomic: {len(data['socioeconomic'])} records")
         
         return data
     
@@ -228,6 +229,7 @@ class BaseAnalysis:
             DimTime.year,
             DimTime.month,
             DimVector.species_name,
+            DimVector.genus,
             FactVectorObservation.life_stage,
             FactVectorObservation.sex,
             FactVectorObservation.count,
@@ -248,7 +250,17 @@ class BaseAnalysis:
         if self.config.vector_codes:
             query = query.filter(DimVector.species_name.in_(self.config.vector_codes))
         
-        return pd.read_sql(query.statement, self.session.bind)
+        df = pd.read_sql(query.statement, self.session.bind)
+        
+        # Aggregate by date if needed
+        if not df.empty and 'count' in df.columns:
+            df = df.groupby(['date', 'year', 'month', 'species_name']).agg({
+                'count': 'sum',
+                'density_per_trap': 'mean',
+                'infection_rate': 'mean'
+            }).reset_index()
+        
+        return df
     
     def _query_environment(self) -> pd.DataFrame:
         """Query environmental data."""
@@ -258,8 +270,10 @@ class BaseAnalysis:
             DimTime.month,
             FactEnvironment.variable,
             FactEnvironment.value
+        ).select_from(
+            FactEnvironment
         ).join(
-            FactEnvironment, DimTime.date_id == FactEnvironment.date_id
+            DimTime, FactEnvironment.date_id == DimTime.date_id
         ).filter(
             FactEnvironment.location_id.in_(self.location_ids),
             DimTime.year.between(self.config.start_year, self.config.end_year),
@@ -280,24 +294,40 @@ class BaseAnalysis:
         return df
     
     def _query_interventions(self) -> pd.DataFrame:
-        """Query intervention data."""
+        """Query intervention data with proper date_id joins."""
         query = self.session.query(
             FactIntervention.intervention_type,
             FactIntervention.coverage,
             FactIntervention.date_start,
             FactIntervention.date_end,
+            DimTime.date.label('start_date'),  # Get actual date from dim_time
+            DimTime.year.label('start_year'),
+            DimTime.month.label('start_month'),
             DimDisease.disease_name
+        ).select_from(
+            FactIntervention
+        ).join(
+            DimTime, FactIntervention.date_start == DimTime.date_id  # Join on date_id
         ).join(
             DimDisease, FactIntervention.target_disease_code == DimDisease.disease_code
         ).filter(
             FactIntervention.location_id.in_(self.location_ids)
         )
         
-        return pd.read_sql(query.statement, self.session.bind)
+        df = pd.read_sql(query.statement, self.session.bind)
+        
+        # Ensure we have a consistent 'date' column for the analysis pipeline
+        if not df.empty:
+            # Use start_date as the intervention date
+            df['date'] = pd.to_datetime(df['start_date'])
+        
+        return df
     
     def _query_resistance(self) -> pd.DataFrame:
         """Query insecticide resistance data."""
         query = self.session.query(
+            DimLocation.name.label('location_name'),
+            DimLocation.country_code,
             DimTime.date,
             DimTime.year,
             DimTime.month,
@@ -306,30 +336,29 @@ class BaseAnalysis:
             DimInsecticide.chemical_class,
             DimResistanceTestType.test_type_name,
             FactInsecticideResistance.resistance_id,
-            FactInsecticideResistance.vector_observation_id,
+            FactInsecticideResistance.location_id,
             FactInsecticideResistance.insecticide_code,
             FactInsecticideResistance.test_type_code,
             FactInsecticideResistance.concentration,
             FactInsecticideResistance.exposure_time,
             FactInsecticideResistance.mortality,
-            FactInsecticideResistance.resistance_status
+            FactInsecticideResistance.resistance_status,
+            FactInsecticideResistance.n_insect_tested,
+            FactInsecticideResistance.n_insect_resistant
         ).select_from(
             FactInsecticideResistance
         ).join(
-            FactVectorObservation, 
-            FactInsecticideResistance.vector_observation_id == FactVectorObservation.observation_id
+            DimLocation, FactInsecticideResistance.location_id == DimLocation.location_id
         ).join(
-            DimTime, FactVectorObservation.date_id == DimTime.date_id
+            DimTime, FactInsecticideResistance.date_id == DimTime.date_id
         ).join(
-            DimVector, FactVectorObservation.vector_code == DimVector.vector_code
+            DimVector, FactInsecticideResistance.vector_code == DimVector.vector_code
         ).join(
-            DimInsecticide, 
-            FactInsecticideResistance.insecticide_code == DimInsecticide.insecticide_code
+            DimInsecticide, FactInsecticideResistance.insecticide_code == DimInsecticide.insecticide_code
         ).join(
-            DimResistanceTestType,
-            FactInsecticideResistance.test_type_code == DimResistanceTestType.test_type_code
+            DimResistanceTestType, FactInsecticideResistance.test_type_code == DimResistanceTestType.test_type_code
         ).filter(
-            FactVectorObservation.location_id.in_(self.location_ids),
+            FactInsecticideResistance.location_id.in_(self.location_ids),
             DimTime.year.between(self.config.start_year, self.config.end_year)
         )
         
@@ -344,6 +373,8 @@ class BaseAnalysis:
             FactDiseaseBurden.mortality_rate,
             FactDiseaseBurden.cases_mean,
             DimDisease.disease_name
+        ).select_from(
+            FactDiseaseBurden
         ).join(
             DimDisease, FactDiseaseBurden.disease_code == DimDisease.disease_code
         ).filter(
@@ -353,6 +384,28 @@ class BaseAnalysis:
         
         if self.config.disease_code:
             query = query.filter(FactDiseaseBurden.disease_code == self.config.disease_code)
+        
+        return pd.read_sql(query.statement, self.session.bind)
+    
+    def _query_socioeconomic(self) -> pd.DataFrame:
+        """Query socioeconomic data."""
+        query = self.session.query(
+            FactSocioeconomicCondition.year,
+            FactSocioeconomicCondition.indicator_value,
+            DimSocioeconomicIndicator.indicator_name,
+            DimSocioeconomicIndicator.unit,
+            DimLocation.name.label('location_name')
+        ).select_from(
+            FactSocioeconomicCondition
+        ).join(
+            DimSocioeconomicIndicator, 
+            FactSocioeconomicCondition.indicator_code == DimSocioeconomicIndicator.indicator_code
+        ).join(
+            DimLocation, FactSocioeconomicCondition.location_id == DimLocation.location_id
+        ).filter(
+            FactSocioeconomicCondition.location_id.in_(self.location_ids),
+            FactSocioeconomicCondition.year.between(self.config.start_year, self.config.end_year)
+        )
         
         return pd.read_sql(query.statement, self.session.bind)
     

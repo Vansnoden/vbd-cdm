@@ -445,7 +445,7 @@ def _parse_analysis_params(config: dict, filter_str: Optional[str]) -> dict:
     
     # Default values from config
     core = config.get('core', {})
-    study_region = core.get('study_region', 'Siaya, Kenya')
+    study_region = core.get('study_region', 'KE')
     study_period = core.get('study_period', '2019-2024')
     
     # Parse period
