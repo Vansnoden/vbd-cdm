@@ -193,24 +193,37 @@ class FactInsecticideResistance(Base):
     __tablename__ = "fact_insecticide_resistance"
 
     resistance_id = Column(Integer, primary_key=True, autoincrement=True)
-    vector_observation_id = Column(Integer, ForeignKey("fact_vector_observation.observation_id"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     insecticide_code = Column(String(20), ForeignKey("dim_insecticide.insecticide_code"), nullable=False)
     test_type_code = Column(String(20), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
 
     concentration = Column(Float)
     exposure_time = Column(Integer)
+    n_insect_tested = Column(Integer)
+    n_insect_susceptible = Column(Integer)
+    n_insect_resistant = Column(Integer)
+    n_insect_dead = Column(Integer)
+    vgsc_n_insect_tested = Column(Integer)
+    vgsc995l_vgsc995l_n = Column(Integer)
+    vgsc995l_vgsc995f_n = Column(Integer)
+    vgsc995f_vgsc995f_n = Column(Integer)
+    vgsc995l_vgsc995s_n = Column(Integer)
+    vgsc995s_vgsc995s_n = Column(Integer)
+    vgsc995f_vgsc995s_n = Column(Integer)
+    vgsc995s_vgsc995s_n = Column(Integer)
+    vgsc_generation = Column(String)
+    vgsc_generation = Column(String)
     mortality = Column(Float)
     resistance_status = Column(String(30))
 
     # Relationships
-    vector_observation = relationship("FactVectorObservation", backref="resistance_tests")
+    location = relationship("DimLocation")
     insecticide = relationship("DimInsecticide")
     test_type = relationship("DimResistanceTestType")
     source = relationship("DimSource")
 
     __table_args__ = (
-        Index("idx_fact_resistance_obs", "vector_observation_id"),
         Index("idx_fact_resistance_insecticide", "insecticide_code"),
         Index("idx_fact_resistance_source", "source_code"),
     )
@@ -220,7 +233,9 @@ class FactBionomics(Base):
     __tablename__ = "fact_bionomics"
 
     bionomics_id = Column(Integer, primary_key=True, autoincrement=True)
-    vector_observation_id = Column(Integer, ForeignKey("fact_vector_observation.observation_id"), nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
 
     biting_rate = Column(Float)
@@ -230,11 +245,12 @@ class FactBionomics(Base):
     larval_site_type = Column(String(100))
 
     # Relationships
-    vector_observation = relationship("FactVectorObservation", backref="bionomics_records")
+    location = relationship("DimLocation")
     source = relationship("DimSource")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    vector = relationship("DimVector")
 
     __table_args__ = (
-        Index("idx_fact_bionomics_obs", "vector_observation_id"),
         Index("idx_fact_bionomics_source", "source_code"),
     )
 

@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: a74fe1adf15b
+Revision ID: cb2cf0312d0e
 Revises: 
-Create Date: 2026-07-01 22:48:30.773336
+Create Date: 2026-07-13 14:00:10.025154
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'a74fe1adf15b'
+revision: str = 'cb2cf0312d0e'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -106,6 +106,24 @@ def upgrade() -> None:
     sa.Column('family', sa.String(length=50), nullable=True),
     sa.PrimaryKeyConstraint('vector_code')
     )
+    op.create_table('fact_bionomics',
+    sa.Column('bionomics_id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
+    sa.Column('date_id', sa.String(length=10), nullable=False),
+    sa.Column('vector_code', sa.String(length=20), nullable=False),
+    sa.Column('source_code', sa.String(length=20), nullable=False),
+    sa.Column('biting_rate', sa.Float(), nullable=True),
+    sa.Column('feeding_preference', sa.String(length=20), nullable=True),
+    sa.Column('biting_location', sa.String(length=20), nullable=True),
+    sa.Column('resting_behavior', sa.String(length=50), nullable=True),
+    sa.Column('larval_site_type', sa.String(length=100), nullable=True),
+    sa.ForeignKeyConstraint(['date_id'], ['dim_time.date_id'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
+    sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
+    sa.ForeignKeyConstraint(['vector_code'], ['dim_vector.vector_code'], ),
+    sa.PrimaryKeyConstraint('bionomics_id')
+    )
+    op.create_index('idx_fact_bionomics_source', 'fact_bionomics', ['source_code'], unique=False)
     op.create_table('fact_disease_burden',
     sa.Column('burden_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -187,6 +205,36 @@ def upgrade() -> None:
     )
     op.create_index('idx_fact_facility_location', 'fact_health_facility', ['location_id'], unique=False)
     op.create_index('idx_fact_facility_source', 'fact_health_facility', ['source_code'], unique=False)
+    op.create_table('fact_insecticide_resistance',
+    sa.Column('resistance_id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('location_id', sa.Integer(), nullable=False),
+    sa.Column('insecticide_code', sa.String(length=20), nullable=False),
+    sa.Column('test_type_code', sa.String(length=20), nullable=False),
+    sa.Column('source_code', sa.String(length=20), nullable=False),
+    sa.Column('concentration', sa.Float(), nullable=True),
+    sa.Column('exposure_time', sa.Integer(), nullable=True),
+    sa.Column('n_insect_tested', sa.Integer(), nullable=True),
+    sa.Column('n_insect_susceptible', sa.Integer(), nullable=True),
+    sa.Column('n_insect_resistant', sa.Integer(), nullable=True),
+    sa.Column('n_insect_dead', sa.Integer(), nullable=True),
+    sa.Column('vgsc_n_insect_tested', sa.Integer(), nullable=True),
+    sa.Column('vgsc995l_vgsc995l_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc995l_vgsc995f_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc995f_vgsc995f_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc995l_vgsc995s_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc995s_vgsc995s_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc995f_vgsc995s_n', sa.Integer(), nullable=True),
+    sa.Column('vgsc_generation', sa.String(), nullable=True),
+    sa.Column('mortality', sa.Float(), nullable=True),
+    sa.Column('resistance_status', sa.String(length=30), nullable=True),
+    sa.ForeignKeyConstraint(['insecticide_code'], ['dim_insecticide.insecticide_code'], ),
+    sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
+    sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
+    sa.ForeignKeyConstraint(['test_type_code'], ['dim_resistance_test_type.test_type_code'], ),
+    sa.PrimaryKeyConstraint('resistance_id')
+    )
+    op.create_index('idx_fact_resistance_insecticide', 'fact_insecticide_resistance', ['insecticide_code'], unique=False)
+    op.create_index('idx_fact_resistance_source', 'fact_insecticide_resistance', ['source_code'], unique=False)
     op.create_table('fact_intervention',
     sa.Column('intervention_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -248,53 +296,12 @@ def upgrade() -> None:
     op.create_index('idx_fact_vector_location', 'fact_vector_observation', ['location_id'], unique=False)
     op.create_index('idx_fact_vector_source', 'fact_vector_observation', ['source_code'], unique=False)
     op.create_index('idx_fact_vector_vector', 'fact_vector_observation', ['vector_code'], unique=False)
-    op.create_table('fact_bionomics',
-    sa.Column('bionomics_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('vector_observation_id', sa.Integer(), nullable=False),
-    sa.Column('source_code', sa.String(length=20), nullable=False),
-    sa.Column('biting_rate', sa.Float(), nullable=True),
-    sa.Column('feeding_preference', sa.String(length=20), nullable=True),
-    sa.Column('biting_location', sa.String(length=20), nullable=True),
-    sa.Column('resting_behavior', sa.String(length=50), nullable=True),
-    sa.Column('larval_site_type', sa.String(length=100), nullable=True),
-    sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
-    sa.ForeignKeyConstraint(['vector_observation_id'], ['fact_vector_observation.observation_id'], ),
-    sa.PrimaryKeyConstraint('bionomics_id')
-    )
-    op.create_index('idx_fact_bionomics_obs', 'fact_bionomics', ['vector_observation_id'], unique=False)
-    op.create_index('idx_fact_bionomics_source', 'fact_bionomics', ['source_code'], unique=False)
-    op.create_table('fact_insecticide_resistance',
-    sa.Column('resistance_id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('vector_observation_id', sa.Integer(), nullable=False),
-    sa.Column('insecticide_code', sa.String(length=20), nullable=False),
-    sa.Column('test_type_code', sa.String(length=20), nullable=False),
-    sa.Column('source_code', sa.String(length=20), nullable=False),
-    sa.Column('concentration', sa.Float(), nullable=True),
-    sa.Column('exposure_time', sa.Integer(), nullable=True),
-    sa.Column('mortality', sa.Float(), nullable=True),
-    sa.Column('resistance_status', sa.String(length=30), nullable=True),
-    sa.ForeignKeyConstraint(['insecticide_code'], ['dim_insecticide.insecticide_code'], ),
-    sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
-    sa.ForeignKeyConstraint(['test_type_code'], ['dim_resistance_test_type.test_type_code'], ),
-    sa.ForeignKeyConstraint(['vector_observation_id'], ['fact_vector_observation.observation_id'], ),
-    sa.PrimaryKeyConstraint('resistance_id')
-    )
-    op.create_index('idx_fact_resistance_insecticide', 'fact_insecticide_resistance', ['insecticide_code'], unique=False)
-    op.create_index('idx_fact_resistance_obs', 'fact_insecticide_resistance', ['vector_observation_id'], unique=False)
-    op.create_index('idx_fact_resistance_source', 'fact_insecticide_resistance', ['source_code'], unique=False)
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index('idx_fact_resistance_source', table_name='fact_insecticide_resistance')
-    op.drop_index('idx_fact_resistance_obs', table_name='fact_insecticide_resistance')
-    op.drop_index('idx_fact_resistance_insecticide', table_name='fact_insecticide_resistance')
-    op.drop_table('fact_insecticide_resistance')
-    op.drop_index('idx_fact_bionomics_source', table_name='fact_bionomics')
-    op.drop_index('idx_fact_bionomics_obs', table_name='fact_bionomics')
-    op.drop_table('fact_bionomics')
     op.drop_index('idx_fact_vector_vector', table_name='fact_vector_observation')
     op.drop_index('idx_fact_vector_source', table_name='fact_vector_observation')
     op.drop_index('idx_fact_vector_location', table_name='fact_vector_observation')
@@ -310,6 +317,9 @@ def downgrade() -> None:
     op.drop_index('idx_fact_intervention_location', table_name='fact_intervention')
     op.drop_index('idx_fact_intervention_disease', table_name='fact_intervention')
     op.drop_table('fact_intervention')
+    op.drop_index('idx_fact_resistance_source', table_name='fact_insecticide_resistance')
+    op.drop_index('idx_fact_resistance_insecticide', table_name='fact_insecticide_resistance')
+    op.drop_table('fact_insecticide_resistance')
     op.drop_index('idx_fact_facility_source', table_name='fact_health_facility')
     op.drop_index('idx_fact_facility_location', table_name='fact_health_facility')
     op.drop_table('fact_health_facility')
@@ -329,6 +339,8 @@ def downgrade() -> None:
     op.drop_index('idx_fact_burden_location', table_name='fact_disease_burden')
     op.drop_index('idx_fact_burden_disease', table_name='fact_disease_burden')
     op.drop_table('fact_disease_burden')
+    op.drop_index('idx_fact_bionomics_source', table_name='fact_bionomics')
+    op.drop_table('fact_bionomics')
     op.drop_table('dim_vector')
     op.drop_table('dim_time')
     op.drop_table('dim_source')

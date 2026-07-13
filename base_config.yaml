@@ -40,7 +40,7 @@ data_sources:
 process:
   steps:
     - ingest_data
-    # - generate_summary
+    - generate_summary
   analyze:
     filter: "dim_location.country_code = 'KE'"
     standard_pipelines:
