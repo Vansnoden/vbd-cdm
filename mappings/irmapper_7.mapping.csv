@@ -34,6 +34,7 @@ Capture method 1,fact_vector_observation,collection_method,cast,"{""type"": ""st
 ,fact_insecticide_resistance,insecticide_code,map,"{""ref"": ""dim_insecticide.insecticide_code"", ""columns"": [""Insecticide tested"", ""Insecticide class""], ""separator"": ""/""}",False,unknown/unknown,,
 ,fact_insecticide_resistance,test_type_code,map,"{""ref"": ""dim_resistance_test_type.test_type_code"", ""columns"": [""Test protocol"", ""Exposure period (min)"", ""Concentration (g)""], ""separator"": ""/""}",False,,,
 ,fact_insecticide_resistance,source_code,none,,False,IRMapper,,
+,fact_insecticide_resistance,date_id,format_date,"{""columns"": [""Start year"", ""Start month"", ""Start day""]}",False,2020-01-01,,
 "No. mosquitoes tested",fact_insecticide_resistance,vgsc_n_insect_tested,cast,"{""type"": ""int""}",False,,,
 L/L (no),fact_insecticide_resistance,vgsc995l_vgsc995l_n,cast,"{""type"": ""int""}",False,0,,
 L/F (no),fact_insecticide_resistance,vgsc995l_vgsc995f_n,cast,"{""type"": ""int""}",False,0,,

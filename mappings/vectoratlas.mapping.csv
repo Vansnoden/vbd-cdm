@@ -26,6 +26,8 @@ occurrence_n_total,fact_vector_observation,count,cast,"{""type"": ""int""}",Fals
 
 ,fact_bionomics,location_id,map,"{""ref"": ""dim_location.name"", ""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",False,,,int
 ,fact_bionomics,source_code,none,,False,VA,,
+,fact_bionomics,vector_code,map,"{""ref"": ""dim_vector.vector_code"", ""columns"":[""species""], ""separator"": """"}",False,,,
+,fact_bionomics,date_id,format_date,"{""columns"": [""year_start"", ""month_start"", ""day_start""]}",False,2020-01-01,,
 feeding_preference,fact_bionomics,feeding_preference,cast,"{""type"": ""str""}",False,,,
 resting_behavior,fact_bionomics,resting_behavior,cast,"{""type"": ""str""}",False,,,
 
@@ -45,6 +47,7 @@ mosquitoes_tested_n,fact_insecticide_resistance,n_insect_tested,cast,"{""type"":
 resistant_susceptible_n,fact_insecticide_resistance,n_insect_susceptible,cast,"{""type"": ""int""}",FALSE,,,
 resistant_resistant_n,fact_insecticide_resistance,n_insect_resistant,cast,"{""type"": ""int""}",FALSE,,,
 mosquitoes_dead_n,fact_insecticide_resistance,n_insect_dead,cast,"{""type"": ""int""}",FALSE,,,
+,fact_insecticide_resistance,date_id,format_date,"{""columns"": [""year_start"", ""month_start"", ""day_start""]}",False,2020-01-01,,
 ,fact_insecticide_resistance,insecticide_code,map,"{""ref"": ""dim_insecticide.insecticide_code"", ""columns"":[""insecticide_tested""], ""separator"": """"}",False,False,,
 ,fact_insecticide_resistance,test_type_code,map,"{""ref"": ""dim_resistance_test_type.test_type_code"", ""columns"":[""test_protocol""], ""separator"": """"}",False,False,,
 ,fact_insecticide_resistance,vector_observation_id,none,,False,False,,

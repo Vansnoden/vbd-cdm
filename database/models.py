@@ -194,6 +194,8 @@ class FactInsecticideResistance(Base):
 
     resistance_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
     insecticide_code = Column(String(20), ForeignKey("dim_insecticide.insecticide_code"), nullable=False)
     test_type_code = Column(String(20), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False)
     source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
@@ -222,10 +224,14 @@ class FactInsecticideResistance(Base):
     insecticide = relationship("DimInsecticide")
     test_type = relationship("DimResistanceTestType")
     source = relationship("DimSource")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    vector = relationship("DimVector")
 
     __table_args__ = (
         Index("idx_fact_resistance_insecticide", "insecticide_code"),
         Index("idx_fact_resistance_source", "source_code"),
+        Index("idx_fact_vector_date", "date_id"),
+        Index("idx_fact_vector_vector", "vector_code"),
     )
 
 
@@ -252,6 +258,8 @@ class FactBionomics(Base):
 
     __table_args__ = (
         Index("idx_fact_bionomics_source", "source_code"),
+        Index("idx_fact_vector_date", "date_id"),
+        Index("idx_fact_vector_vector", "vector_code"),
     )
 
 
