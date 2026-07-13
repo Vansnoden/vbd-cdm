@@ -230,8 +230,8 @@ class FactInsecticideResistance(Base):
     __table_args__ = (
         Index("idx_fact_resistance_insecticide", "insecticide_code"),
         Index("idx_fact_resistance_source", "source_code"),
-        Index("idx_fact_vector_date", "date_id"),
-        Index("idx_fact_vector_vector", "vector_code"),
+        Index("idx_fact_resistance_date", "date_id"),
+        Index("idx_fact_resistance_vector", "vector_code"),
     )
 
 
@@ -258,8 +258,8 @@ class FactBionomics(Base):
 
     __table_args__ = (
         Index("idx_fact_bionomics_source", "source_code"),
-        Index("idx_fact_vector_date", "date_id"),
-        Index("idx_fact_vector_vector", "vector_code"),
+        Index("idx_fact_bionomics_date", "date_id"),
+        Index("idx_fact_bionomics_vector", "vector_code"),
     )
 
 
