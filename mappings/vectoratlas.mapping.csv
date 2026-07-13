@@ -52,3 +52,4 @@ mosquitoes_dead_n,fact_insecticide_resistance,n_insect_dead,cast,"{""type"": ""i
 ,fact_insecticide_resistance,test_type_code,map,"{""ref"": ""dim_resistance_test_type.test_type_code"", ""columns"":[""test_protocol""], ""separator"": """"}",False,False,,
 ,fact_insecticide_resistance,vector_observation_id,none,,False,False,,
 ,fact_insecticide_resistance,source_code,none,,False,VA,,
+,fact_insecticide_resistance,vector_code,map,"{""ref"": ""dim_vector.vector_code"", ""columns"":[""species""], ""separator"": """"}",False,,,
