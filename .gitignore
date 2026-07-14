@@ -9,4 +9,5 @@ __pycache__/
 python_bundle.txt
 *_bundle.txt
 logs/
+outputs/*
 outputs/analysis/*
