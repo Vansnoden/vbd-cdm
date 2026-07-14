@@ -1,3 +1,4 @@
+# analysis/pipeline.py
 """
 Standardized Analysis Pipeline Orchestrator
 
@@ -13,7 +14,7 @@ from pathlib import Path
 import json
 from datetime import datetime
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List, Any
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -62,52 +63,124 @@ class AnalysisPipeline:
     def run(self) -> Dict:
         """
         Execute the complete analysis pipeline.
-        
-        Returns:
-            Dictionary with all analysis results
         """
         logger.info(f"Starting analysis for {self.config.study_name}")
         
-        # 1. Query data
-        self.data = self.base.query_data()
+        try:
+            # 1. Query data
+            self.data = self.base.query_data()
+            
+            # Check if we have any data
+            total_records = sum(len(df) for df in self.data.values())
+            if total_records == 0:
+                logger.warning("No data found in database!")
+                return {'error': 'No data available for analysis'}
+            
+            # Log data availability
+            data_summary = {k: len(v) for k, v in self.data.items()}
+            logger.info(f"Data summary: {data_summary}")
+            
+            # 2. Run analyses based on configuration and data availability
+            self._run_analyses()
+            
+            # 3. Generate visualizations
+            logger.info("Generating visualizations...")
+            self._generate_figures()
+            
+            # 4. Save results
+            self._save_results()
+            
+            # 5. Generate report
+            self._generate_report()
+            
+            logger.info("Analysis complete!")
+            return self.results
+            
+        except Exception as e:
+            logger.error(f"Pipeline execution failed: {e}", exc_info=True)
+            return {'error': str(e)}
+    
+    def _run_analyses(self):
+        """Run all configured analyses."""
         
-        # 2. Run analyses based on configuration
+        # Seasonal pattern analysis
         if self.config.run_seasonal:
             logger.info("Running seasonal pattern analysis...")
-            self.results['seasonal'] = self._analyze_seasonal()
+            if self.data.get('cases', pd.DataFrame()).empty:
+                logger.warning("No case data available for seasonal analysis")
+                self.results['seasonal'] = {'error': 'No case data available'}
+            else:
+                try:
+                    self.results['seasonal'] = self._analyze_seasonal()
+                except Exception as e:
+                    logger.error(f"Seasonal analysis failed: {e}")
+                    self.results['seasonal'] = {'error': str(e)}
         
+        # Climate correlation analysis
         if self.config.run_climate_correlation:
             logger.info("Running climate correlation analysis...")
-            self.results['climate_correlation'] = self._analyze_climate_correlation()
+            if self.data.get('environment', pd.DataFrame()).empty:
+                logger.warning("No environmental data available for climate correlation")
+                self.results['climate_correlation'] = {'error': 'No environmental data available'}
+            else:
+                try:
+                    self.results['climate_correlation'] = self._analyze_climate_correlation()
+                except Exception as e:
+                    logger.error(f"Climate correlation analysis failed: {e}")
+                    self.results['climate_correlation'] = {'error': str(e)}
         
+        # Lag analysis
         if self.config.run_lag_analysis:
             logger.info("Running lag analysis...")
-            self.results['lag_analysis'] = self._analyze_lags()
+            try:
+                self.results['lag_analysis'] = self._analyze_lags()
+            except Exception as e:
+                logger.error(f"Lag analysis failed: {e}")
+                self.results['lag_analysis'] = {'error': str(e)}
         
+        # Intervention impact analysis
         if self.config.run_intervention_impact:
             logger.info("Running intervention impact analysis...")
-            self.results['intervention_impact'] = self._analyze_interventions()
+            if self.data.get('interventions', pd.DataFrame()).empty:
+                logger.warning("No intervention data available")
+                self.results['intervention_impact'] = {'error': 'No intervention data available'}
+            else:
+                try:
+                    self.results['intervention_impact'] = self._analyze_interventions()
+                except Exception as e:
+                    logger.error(f"Intervention impact analysis failed: {e}")
+                    self.results['intervention_impact'] = {'error': str(e)}
         
+        # Resistance trend analysis
         if self.config.run_resistance_trends:
             logger.info("Running resistance trend analysis...")
-            self.results['resistance_trends'] = self._analyze_resistance()
+            if self.data.get('resistance', pd.DataFrame()).empty:
+                logger.warning("No resistance data available for trend analysis")
+                self.results['resistance_trends'] = {'error': 'No resistance data available'}
+            else:
+                try:
+                    self.results['resistance_trends'] = self._analyze_resistance()
+                except Exception as e:
+                    logger.error(f"Resistance trend analysis failed: {e}")
+                    self.results['resistance_trends'] = {'error': str(e)}
         
+        # Spatial analysis
+        if self.config.run_spatial_analysis:
+            logger.info("Running spatial analysis...")
+            try:
+                self.results['spatial_analysis'] = self._analyze_spatial()
+            except Exception as e:
+                logger.error(f"Spatial analysis failed: {e}")
+                self.results['spatial_analysis'] = {'error': str(e)}
+        
+        # Risk modeling
         if self.config.run_risk_modeling:
             logger.info("Building integrated risk model...")
-            self.results['risk_model'] = self._analyze_risk()
-        
-        # 3. Generate visualizations
-        logger.info("Generating visualizations...")
-        self._generate_figures()
-        
-        # 4. Save results
-        self._save_results()
-        
-        # 5. Generate report
-        self._generate_report()
-        
-        logger.info("Analysis complete!")
-        return self.results
+            try:
+                self.results['risk_model'] = self._analyze_risk()
+            except Exception as e:
+                logger.error(f"Risk modeling failed: {e}")
+                self.results['risk_model'] = {'error': str(e)}
     
     def _analyze_seasonal(self) -> Dict:
         """Run seasonal pattern analysis."""
@@ -122,26 +195,61 @@ class AnalysisPipeline:
         )
     
     def _analyze_climate_correlation(self) -> Dict:
-        """Run climate correlation analysis."""
+        """
+        Run climate correlation analysis.
+        
+        Handles duplicate columns by dropping them before merging.
+        """
         env = self.data.get('environment', pd.DataFrame())
         cases = self.data.get('cases', pd.DataFrame())
         
-        if env.empty or cases.empty:
-            return {'error': 'Insufficient data for climate correlation'}
+        if env.empty:
+            return {'error': 'No environmental data available'}
         
-        # Merge data
+        if cases.empty:
+            return {'error': 'No case data available for correlation'}
+        
+        # Make copies
+        env = env.copy()
+        cases = cases.copy()
+        
+        # Ensure date is datetime
         env['date'] = pd.to_datetime(env['date'])
         cases['date'] = pd.to_datetime(cases['date'])
         
-        # Ensure date is set as index for proper merging
-        env = env.set_index('date')
-        cases = cases.set_index('date')
+        # Log date ranges for debugging
+        logger.info(f"  Cases date range: {cases['date'].min()} to {cases['date'].max()}")
+        logger.info(f"  Environment date range: {env['date'].min()} to {env['date'].max()}")
         
-        # Merge on date index
-        merged = cases.join(env, how='inner').reset_index()
+        # Drop duplicate columns from env (keep only date as common column)
+        env_cols_to_drop = ['year', 'month']
+        for col in env_cols_to_drop:
+            if col in env.columns:
+                env = env.drop(columns=[col])
+        
+        # Merge on date
+        merged = cases.merge(env, on='date', how='inner')
         
         if merged.empty:
-            return {'error': 'No overlapping data for correlation'}
+            logger.warning("  No overlapping dates found between cases and environment")
+            
+            # Try to find closest date match by resampling
+            logger.info("  Attempting to resample cases to daily frequency...")
+            try:
+                # Create daily time series from cases
+                cases_daily = cases.set_index('date').resample('D').ffill().reset_index()
+                cases_daily = cases_daily.rename(columns={'index': 'date'})
+                merged = cases_daily.merge(env, on='date', how='inner')
+                
+                if not merged.empty:
+                    logger.info(f"  Found {len(merged)} overlapping records after resampling")
+                else:
+                    return {'error': 'No overlapping data for correlation'}
+            except Exception as e:
+                logger.warning(f"  Resampling failed: {e}")
+                return {'error': 'No overlapping data for correlation'}
+        
+        logger.info(f"  Merged data: {len(merged)} overlapping records")
         
         # Calculate correlations
         env_cols = [col for col in merged.columns 
@@ -150,12 +258,26 @@ class AnalysisPipeline:
         correlations = {}
         for col in env_cols:
             if col in merged.columns and merged[col].notna().any():
-                corr = merged['case_count'].corr(merged[col])
-                correlations[col] = corr
+                try:
+                    corr = merged['case_count'].corr(merged[col])
+                    if not np.isnan(corr):
+                        correlations[col] = corr
+                    else:
+                        correlations[col] = None
+                except Exception as e:
+                    logger.warning(f"Could not calculate correlation for {col}: {e}")
+                    correlations[col] = None
         
         # Create correlation matrix
-        corr_cols = ['case_count'] + [c for c in env_cols if c in merged.columns]
-        corr_matrix = merged[corr_cols].corr()
+        corr_cols = ['case_count'] + [c for c in env_cols if c in merged.columns and merged[c].notna().any()]
+        try:
+            if len(corr_cols) >= 2:
+                corr_matrix = merged[corr_cols].corr()
+            else:
+                corr_matrix = pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"Could not create correlation matrix: {e}")
+            corr_matrix = pd.DataFrame()
         
         return {
             'correlations': correlations,
@@ -164,33 +286,93 @@ class AnalysisPipeline:
         }
     
     def _analyze_lags(self) -> Dict:
-        """Run lag correlation analysis."""
+        """
+        Run lag correlation analysis.
+        
+        Handles duplicate columns by dropping them before merging.
+        """
         env = self.data.get('environment', pd.DataFrame())
         cases = self.data.get('cases', pd.DataFrame())
         
-        if env.empty or cases.empty:
-            return {'error': 'Insufficient data for lag analysis'}
+        if env.empty:
+            return {'error': 'No environmental data available for lag analysis'}
         
-        # Merge data
+        if cases.empty:
+            return {'error': 'No case data available for lag analysis'}
+        
+        # Make copies
+        env = env.copy()
+        cases = cases.copy()
+        
+        # Ensure date is datetime
         env['date'] = pd.to_datetime(env['date'])
         cases['date'] = pd.to_datetime(cases['date'])
         
-        env = env.set_index('date')
-        cases = cases.set_index('date')
-        merged = cases.join(env, how='inner').reset_index()
+        # Log date ranges for debugging
+        logger.info(f"  Cases date range: {cases['date'].min()} to {cases['date'].max()}")
+        logger.info(f"  Environment date range: {env['date'].min()} to {env['date'].max()}")
+        
+        # Drop duplicate columns from env
+        env_cols_to_drop = ['year', 'month']
+        for col in env_cols_to_drop:
+            if col in env.columns:
+                env = env.drop(columns=[col])
+        
+        # Merge on date
+        merged = cases.merge(env, on='date', how='inner')
         
         if merged.empty:
-            return {'error': 'No overlapping data for lag analysis'}
+            logger.warning("  No overlapping dates found between cases and environment")
+            
+            # Try to find closest date match by resampling
+            logger.info("  Attempting to resample cases to daily frequency...")
+            try:
+                cases_daily = cases.set_index('date').resample('D').ffill().reset_index()
+                cases_daily = cases_daily.rename(columns={'index': 'date'})
+                merged = cases_daily.merge(env, on='date', how='inner')
+                
+                if not merged.empty:
+                    logger.info(f"  Found {len(merged)} overlapping records after resampling")
+                else:
+                    return {'error': 'No overlapping data for lag analysis'}
+            except Exception as e:
+                logger.warning(f"  Resampling failed: {e}")
+                return {'error': 'No overlapping data for lag analysis'}
         
-        predictor_cols = [col for col in merged.columns 
-                         if col in self.config.environmental_variables]
+        logger.info(f"  Merged data: {len(merged)} overlapping records")
+        
+        # Ensure we have enough data
+        if len(merged) < 5:
+            return {'error': f'Not enough data for lag analysis. Need at least 5 records, got {len(merged)}'}
+        
+        # Create monthly aggregation
+        merged['date'] = pd.to_datetime(merged['date'])
+        merged['month'] = merged['date'].dt.to_period('M')
+        
+        # Aggregate to monthly
+        agg_dict = {'case_count': 'sum'}
+        env_cols = [col for col in merged.columns if col in self.config.environmental_variables]
+        for col in env_cols:
+            if col in merged.columns:
+                agg_dict[col] = 'mean'
+        
+        monthly = merged.groupby('month').agg(agg_dict).reset_index()
+        monthly['date'] = monthly['month'].dt.start_time
+        
+        if len(monthly) < 2:
+            return {'error': f'Not enough monthly data for lag analysis. Need at least 2 months, got {len(monthly)}'}
+        
+        predictor_cols = [col for col in monthly.columns if col in self.config.environmental_variables]
+        
+        if not predictor_cols:
+            return {'error': 'No valid predictor columns available'}
         
         return self.modules.lag_correlation_analysis(
-            merged,
+            monthly,
             date_col='date',
             response_col='case_count',
             predictor_cols=predictor_cols,
-            max_lags=self.config.max_lag_months
+            max_lags=min(self.config.max_lag_months, len(monthly) // 2)
         )
     
     def _analyze_interventions(self) -> Dict:
@@ -198,8 +380,19 @@ class AnalysisPipeline:
         cases = self.data.get('cases', pd.DataFrame())
         interventions = self.data.get('interventions', pd.DataFrame())
         
-        if cases.empty or interventions.empty:
+        if cases.empty:
+            return {'error': 'No case data available for intervention analysis'}
+        
+        if interventions.empty:
             return {'error': 'No intervention data available'}
+        
+        # Need at least 3 cases records for meaningful analysis
+        if len(cases) < 3:
+            return {'error': f'Not enough case data for intervention analysis. Need at least 3 records, got {len(cases)}'}
+        
+        # Check if interventions have date column
+        if 'date' not in interventions.columns:
+            return {'error': 'Intervention data missing date column'}
         
         return self.modules.intervention_impact_analysis(
             cases,
@@ -219,6 +412,17 @@ class AnalysisPipeline:
         if 'date' not in resistance.columns:
             return {'error': 'Resistance data missing date column'}
         
+        # Check if we have enough data
+        if len(resistance) < 3:
+            return {'error': f'Not enough resistance data. Need at least 3 records, got {len(resistance)}'}
+        
+        # Check if status column has data
+        if 'resistance_status' in resistance.columns:
+            status_counts = resistance['resistance_status'].value_counts()
+            logger.info(f"  Resistance status distribution: {dict(status_counts)}")
+        else:
+            return {'error': 'Resistance data missing status column'}
+        
         return self.modules.resistance_trend_analysis(
             resistance,
             date_col='date',
@@ -226,33 +430,109 @@ class AnalysisPipeline:
             group_cols=['species_name']
         )
     
+    def _analyze_spatial(self) -> Dict:
+        """Run spatial analysis."""
+        cases = self.data.get('cases', pd.DataFrame())
+        vectors = self.data.get('vectors', pd.DataFrame())
+        
+        if cases.empty and vectors.empty:
+            return {'error': 'No data available for spatial analysis'}
+        
+        # Combine data for spatial analysis
+        if not cases.empty:
+            # Check if location_id exists
+            if 'location_id' not in cases.columns:
+                return {'error': 'No location_id column in cases data for spatial analysis'}
+            
+            # Aggregate cases by location
+            spatial_cases = cases.groupby(['location_id']).agg({
+                'case_count': ['sum', 'mean', 'count']
+            }).reset_index()
+            spatial_cases.columns = ['location_id', 'total_cases', 'mean_cases', 'num_months']
+        else:
+            spatial_cases = pd.DataFrame()
+        
+        if not vectors.empty and 'count' in vectors.columns and 'location_id' in vectors.columns:
+            spatial_vectors = vectors.groupby(['location_id']).agg({
+                'count': 'sum',
+                'density_per_trap': 'mean'
+            }).reset_index()
+            spatial_vectors.columns = ['location_id', 'total_vectors', 'mean_density']
+        else:
+            spatial_vectors = pd.DataFrame()
+        
+        return {
+            'spatial_cases': spatial_cases,
+            'spatial_vectors': spatial_vectors,
+            'num_locations': max(len(spatial_cases), len(spatial_vectors))
+        }
+    
     def _analyze_risk(self) -> Dict:
         """Build integrated risk model."""
         cases = self.data.get('cases', pd.DataFrame())
         env = self.data.get('environment', pd.DataFrame())
         vectors = self.data.get('vectors', pd.DataFrame())
         
-        if cases.empty or env.empty:
-            return {'error': 'Insufficient data for risk modeling'}
+        if cases.empty:
+            return {'error': 'No case data available for risk modeling'}
         
-        # Merge cases and environment
+        if env.empty:
+            return {'error': 'No environmental data available for risk modeling'}
+        
+        # Need at least 5 data points
+        if len(cases) < 5:
+            return {'error': f'Not enough case data for risk modeling. Need at least 5 records, got {len(cases)}'}
+        
+        # Merge cases and environment - handle duplicate columns
+        cases = cases.copy()
+        env = env.copy()
+        
         cases['date'] = pd.to_datetime(cases['date'])
         env['date'] = pd.to_datetime(env['date'])
         
-        cases = cases.set_index('date')
-        env = env.set_index('date')
+        # Drop duplicate columns from env
+        env_cols_to_drop = ['year', 'month']
+        for col in env_cols_to_drop:
+            if col in env.columns:
+                env = env.drop(columns=[col])
         
-        merged = cases.join(env, how='inner').reset_index()
+        # Merge
+        merged = cases.merge(env, on='date', how='inner')
         
+        if merged.empty:
+            logger.warning("  No overlapping dates found between cases and environment for risk modeling")
+            return {'error': 'No overlapping data for risk modeling'}
+        
+        # Add vector data if available
         if vectors is not None and not vectors.empty:
+            vectors = vectors.copy()
             vectors['date'] = pd.to_datetime(vectors['date'])
-            vectors = vectors.set_index('date')
-            merged = merged.join(vectors[['count']], how='left')
-            merged['count'] = merged['count'].fillna(0)
+            # Aggregate vector data by date
+            if 'count' in vectors.columns:
+                vector_agg = vectors.groupby('date')['count'].sum().reset_index()
+                merged = merged.merge(vector_agg, on='date', how='left')
+                merged['count'] = merged['count'].fillna(0)
+            elif 'density_per_trap' in vectors.columns:
+                vector_agg = vectors.groupby('date')['density_per_trap'].mean().reset_index()
+                merged = merged.merge(vector_agg, on='date', how='left')
+                merged['density_per_trap'] = merged['density_per_trap'].fillna(0)
         
+        # Prepare predictor columns
         predictor_cols = self.config.environmental_variables.copy()
         if 'count' in merged.columns:
             predictor_cols.append('count')
+        if 'density_per_trap' in merged.columns:
+            predictor_cols.append('density_per_trap')
+        
+        # Filter to available columns
+        predictor_cols = [col for col in predictor_cols if col in merged.columns]
+        
+        if not predictor_cols:
+            return {'error': 'No valid predictor columns available for risk modeling'}
+        
+        # Check if we have enough data
+        if len(merged) < 10:
+            return {'error': f'Not enough data for risk modeling. Need at least 10 samples, got {len(merged)}'}
         
         return self.modules.integrated_risk_model(
             merged,
@@ -267,51 +547,105 @@ class AnalysisPipeline:
         fig_dir.mkdir(exist_ok=True)
         
         # Seasonal pattern figure
-        if 'seasonal' in self.results and 'error' not in self.results['seasonal']:
-            self.viz.plot_seasonal_patterns(
-                self.results['seasonal'],
-                self.config.study_name,
-                fig_dir
-            )
+        if 'seasonal' in self.results:
+            seasonal = self.results['seasonal']
+            if seasonal and 'error' not in seasonal:
+                try:
+                    self.viz.plot_seasonal_patterns(
+                        seasonal,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate seasonal plot: {e}")
+        
+        # Climate correlation figure
+        if 'climate_correlation' in self.results:
+            climate = self.results['climate_correlation']
+            if climate and 'error' not in climate:
+                try:
+                    self.viz.plot_climate_correlation(
+                        climate,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate climate correlation plot: {e}")
         
         # Lag analysis figure
-        if 'lag_analysis' in self.results and 'error' not in self.results['lag_analysis']:
-            self.viz.plot_lag_correlations(
-                self.results['lag_analysis'],
-                self.config.study_name,
-                fig_dir
-            )
+        if 'lag_analysis' in self.results:
+            lag = self.results['lag_analysis']
+            if lag and 'error' not in lag:
+                try:
+                    self.viz.plot_lag_correlations(
+                        lag,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate lag plot: {e}")
         
         # Intervention impact figure
-        if 'intervention_impact' in self.results and 'error' not in self.results['intervention_impact']:
-            self.viz.plot_intervention_impact(
-                self.results['intervention_impact'],
-                self.config.study_name,
-                fig_dir
-            )
+        if 'intervention_impact' in self.results:
+            impact = self.results['intervention_impact']
+            if impact and 'error' not in impact:
+                try:
+                    self.viz.plot_intervention_impact(
+                        impact,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate intervention plot: {e}")
         
         # Resistance trends figure
-        if 'resistance_trends' in self.results and 'error' not in self.results['resistance_trends']:
-            self.viz.plot_resistance_trends(
-                self.results['resistance_trends'],
-                self.config.study_name,
-                fig_dir
-            )
+        if 'resistance_trends' in self.results:
+            resistance = self.results['resistance_trends']
+            if resistance and 'error' not in resistance:
+                try:
+                    self.viz.plot_resistance_trends(
+                        resistance,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate resistance plot: {e}")
         
         # Risk model figure
-        if 'risk_model' in self.results and 'error' not in self.results['risk_model']:
-            self.viz.plot_risk_model(
-                self.results['risk_model'],
+        if 'risk_model' in self.results:
+            risk = self.results['risk_model']
+            if risk and 'error' not in risk:
+                try:
+                    self.viz.plot_risk_model(
+                        risk,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate risk model plot: {e}")
+        
+        # Spatial analysis figure
+        if 'spatial_analysis' in self.results:
+            spatial = self.results['spatial_analysis']
+            if spatial and 'error' not in spatial:
+                try:
+                    self.viz.plot_spatial_analysis(
+                        spatial,
+                        self.config.study_name,
+                        fig_dir
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not generate spatial analysis plot: {e}")
+        
+        # Overview dashboard - always try to create
+        try:
+            self.viz.create_dashboard(
+                self.results,
                 self.config.study_name,
                 fig_dir
             )
-        
-        # Overview dashboard
-        self.viz.create_dashboard(
-            self.results,
-            self.config.study_name,
-            fig_dir
-        )
+        except Exception as e:
+            logger.warning(f"Could not generate dashboard: {e}")
     
     def _save_results(self):
         """Save analysis results to files."""
@@ -322,19 +656,38 @@ class AnalysisPipeline:
             if isinstance(result, dict):
                 # Save DataFrames
                 for key, value in result.items():
-                    if isinstance(value, pd.DataFrame):
-                        value.to_csv(data_dir / f"{name}_{key}.csv", index=False)
+                    if isinstance(value, pd.DataFrame) and not value.empty:
+                        try:
+                            value.to_csv(data_dir / f"{name}_{key}.csv", index=False)
+                        except Exception as e:
+                            logger.warning(f"Could not save {name}_{key}.csv: {e}")
                     elif key == 'predictions' and isinstance(value, dict):
-                        # Save predictions as CSV
-                        pred_df = pd.DataFrame(value)
-                        pred_df.to_csv(data_dir / f"{name}_predictions.csv", index=False)
+                        try:
+                            pred_df = pd.DataFrame(value)
+                            pred_df.to_csv(data_dir / f"{name}_predictions.csv", index=False)
+                        except Exception as e:
+                            logger.warning(f"Could not save {name}_predictions.csv: {e}")
                 
-                # Save summary as JSON
-                summary = {k: v for k, v in result.items() 
-                          if not isinstance(v, (pd.DataFrame, np.ndarray)) and not isinstance(v, dict)}
+                # Save summary as JSON (excluding large objects)
+                summary = {}
+                for k, v in result.items():
+                    if k in ['model', 'scaler', 'decomposition', 'merged_data']:
+                        continue  # Skip large/unsupported objects
+                    if not isinstance(v, (pd.DataFrame, np.ndarray, dict)) or k == 'correlation_matrix':
+                        if k == 'correlation_matrix' and isinstance(v, pd.DataFrame):
+                            summary[k] = v.to_dict()
+                        elif isinstance(v, (int, float, str, bool, type(None))):
+                            summary[k] = v
+                        elif k == 'ccf' and isinstance(v, dict):
+                            summary[k] = {k2: v2.tolist() if isinstance(v2, np.ndarray) else v2 
+                                         for k2, v2 in v.items()}
+                
                 if summary:
-                    with open(data_dir / f"{name}_summary.json", 'w') as f:
-                        json.dump(summary, f, indent=2, default=str)
+                    try:
+                        with open(data_dir / f"{name}_summary.json", 'w') as f:
+                            json.dump(summary, f, indent=2, default=str)
+                    except Exception as e:
+                        logger.warning(f"Could not save {name}_summary.json: {e}")
     
     def _generate_report(self):
         """Generate a summary report."""
@@ -347,14 +700,23 @@ class AnalysisPipeline:
             'country': self.config.country_code,
             'period': f"{self.config.start_year}-{self.config.end_year}",
             'generated': datetime.now().isoformat(),
-            'summary': self._create_summary()
+            'data_summary': {k: len(v) for k, v in self.data.items() if isinstance(v, pd.DataFrame)},
+            'summary': self._create_summary(),
+            'errors': self._collect_errors()
         }
         
-        with open(report_dir / "analysis_report.json", 'w') as f:
-            json.dump(report, f, indent=2, default=str)
+        # Save JSON report
+        try:
+            with open(report_dir / "analysis_report.json", 'w') as f:
+                json.dump(report, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"Could not save JSON report: {e}")
         
         # Generate markdown report
-        self._generate_markdown_report(report, report_dir / "analysis_report.md")
+        try:
+            self._generate_markdown_report(report, report_dir / "analysis_report.md")
+        except Exception as e:
+            logger.warning(f"Could not generate markdown report: {e}")
     
     def _create_summary(self) -> Dict:
         """Create a summary of key findings."""
@@ -363,43 +725,71 @@ class AnalysisPipeline:
         # Seasonal patterns
         if 'seasonal' in self.results:
             seasonal = self.results['seasonal']
-            if 'peak_months' in seasonal and not seasonal['peak_months'].empty:
-                summary['peak_months'] = seasonal['peak_months'][['month', 'mean']].to_dict('records')
+            if seasonal and 'error' not in seasonal:
+                if 'peak_months' in seasonal and not seasonal['peak_months'].empty:
+                    try:
+                        summary['peak_months'] = seasonal['peak_months'][['month', 'mean']].to_dict('records')
+                    except:
+                        pass
+        
+        # Climate correlation
+        if 'climate_correlation' in self.results:
+            climate = self.results['climate_correlation']
+            if climate and 'error' not in climate:
+                if 'correlations' in climate:
+                    summary['climate_correlations'] = {k: v for k, v in climate['correlations'].items() 
+                                                      if v is not None}
         
         # Lag analysis
         if 'lag_analysis' in self.results:
             lag = self.results['lag_analysis']
-            if 'optimal_lags' in lag and lag['optimal_lags']:
-                summary['optimal_lags'] = lag['optimal_lags']
+            if lag and 'error' not in lag:
+                if 'optimal_lags' in lag and lag['optimal_lags']:
+                    summary['optimal_lags'] = lag['optimal_lags']
         
         # Intervention impact
         if 'intervention_impact' in self.results:
             impact = self.results['intervention_impact']
-            if 'summary' in impact:
-                summary['intervention_summary'] = impact['summary']
+            if impact and 'error' not in impact:
+                if 'summary' in impact:
+                    summary['intervention_summary'] = impact['summary']
         
         # Resistance trends
         if 'resistance_trends' in self.results:
             resistance = self.results['resistance_trends']
-            if 'overall_trend' in resistance:
-                summary['resistance_trend'] = resistance['overall_trend']
+            if resistance and 'error' not in resistance:
+                if 'overall_trend' in resistance:
+                    summary['resistance_trend'] = resistance['overall_trend']
         
         # Risk model
         if 'risk_model' in self.results:
             risk = self.results['risk_model']
-            if 'r2_score' in risk:
-                summary['model_performance'] = {
-                    'r2_score': risk['r2_score'],
-                    'rmse': risk['rmse']
-                }
-            if 'feature_importance' in risk:
-                summary['top_features'] = sorted(
-                    risk['feature_importance'].items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:5]
+            if risk and 'error' not in risk:
+                if 'r2_score' in risk:
+                    summary['model_performance'] = {
+                        'r2_score': risk['r2_score'],
+                        'rmse': risk['rmse']
+                    }
+                if 'feature_importance' in risk:
+                    try:
+                        top_features = sorted(
+                            risk['feature_importance'].items(),
+                            key=lambda x: x[1],
+                            reverse=True
+                        )[:5]
+                        summary['top_features'] = top_features
+                    except:
+                        pass
         
         return summary
+    
+    def _collect_errors(self) -> Dict:
+        """Collect all errors from analysis results."""
+        errors = {}
+        for name, result in self.results.items():
+            if isinstance(result, dict) and 'error' in result:
+                errors[name] = result['error']
+        return errors
     
     def _generate_markdown_report(self, report: Dict, output_path: Path):
         """Generate a markdown report from analysis results."""
@@ -410,50 +800,103 @@ class AnalysisPipeline:
         lines.append(f"**Period:** {report['period']}")
         lines.append(f"**Generated:** {report['generated']}")
         lines.append("")
-        lines.append("## Summary of Findings")
+        
+        # Data availability
+        lines.append("## Data Availability")
+        lines.append("")
+        data_summary = report.get('data_summary', {})
+        if data_summary:
+            lines.append("| Data Type | Records |")
+            lines.append("|-----------|---------|")
+            for key, count in data_summary.items():
+                lines.append(f"| {key} | {count} |")
+        else:
+            lines.append("No data available.")
         lines.append("")
         
-        summary = report['summary']
-        
-        if 'peak_months' in summary:
-            lines.append("### Seasonal Patterns")
-            lines.append("Peak months for disease activity:")
-            for month in summary['peak_months']:
-                lines.append(f"- Month {month['month']}: {month['mean']:.2f} cases/month")
+        # Summary of findings
+        summary = report.get('summary', {})
+        if summary:
+            lines.append("## Summary of Findings")
             lines.append("")
+            
+            if 'peak_months' in summary:
+                lines.append("### Seasonal Patterns")
+                lines.append("Peak months for disease activity:")
+                for month in summary['peak_months']:
+                    lines.append(f"- Month {month.get('month', 'N/A')}: {month.get('mean', 0):.2f} cases/month")
+                lines.append("")
+            
+            if 'climate_correlations' in summary:
+                lines.append("### Climate Correlations")
+                for var, corr in summary['climate_correlations'].items():
+                    if corr is not None:
+                        lines.append(f"- {var}: r = {corr:.3f}")
+                lines.append("")
+            
+            if 'optimal_lags' in summary:
+                lines.append("### Climate-Disease Lags")
+                lines.append("Optimal lag periods (months):")
+                for lag in summary['optimal_lags']:
+                    if isinstance(lag, dict):
+                        predictor = lag.get('predictor', 'N/A')
+                        lag_months = lag.get('lag_months', 'N/A')
+                        correlation = lag.get('correlation', 0)
+                        lines.append(f"- {predictor}: {lag_months} months (r={correlation:.3f})")
+                lines.append("")
+            
+            if 'intervention_summary' in summary:
+                lines.append("### Intervention Impact")
+                s = summary['intervention_summary']
+                if isinstance(s, dict):
+                    lines.append(f"- Average change: {s.get('avg_absolute_change', 0):.2f} cases")
+                    avg_rel = s.get('avg_relative_change', 0)
+                    if avg_rel is not None:
+                        lines.append(f"- Average relative change: {avg_rel:.1f}%")
+                    lines.append(f"- Significant interventions: {s.get('significant_interventions', 0)}")
+                lines.append("")
+            
+            if 'resistance_trend' in summary:
+                lines.append("### Insecticide Resistance Trends")
+                t = summary['resistance_trend']
+                if isinstance(t, dict):
+                    lines.append(f"- Trend direction: {t.get('direction', 'stable')}")
+                    slope = t.get('slope', 0)
+                    if slope is not None:
+                        lines.append(f"- Slope: {slope:.3f}")
+                    r_squared = t.get('r_squared', 0)
+                    if r_squared is not None:
+                        lines.append(f"- R²: {r_squared:.3f}")
+                    p_value = t.get('p_value', 0)
+                    if p_value is not None:
+                        lines.append(f"- p-value: {p_value:.4f}")
+                lines.append("")
+            
+            if 'model_performance' in summary:
+                lines.append("### Integrated Risk Model")
+                m = summary['model_performance']
+                if isinstance(m, dict):
+                    r2 = m.get('r2_score', 0)
+                    rmse = m.get('rmse', 0)
+                    if r2 is not None:
+                        lines.append(f"- R² score: {r2:.3f}")
+                    if rmse is not None:
+                        lines.append(f"- RMSE: {rmse:.3f}")
+                lines.append("")
+            
+            if 'top_features' in summary:
+                lines.append("### Top Risk Factors")
+                for feature, importance in summary['top_features']:
+                    lines.append(f"- {feature}: {importance:.3f}")
+                lines.append("")
         
-        if 'optimal_lags' in summary:
-            lines.append("### Climate-Disease Lags")
-            lines.append("Optimal lag periods (months):")
-            for lag in summary['optimal_lags']:
-                lines.append(f"- {lag['predictor']}: {lag['lag_months']} months (r={lag['correlation']:.3f})")
+        # Errors
+        errors = report.get('errors', {})
+        if errors:
+            lines.append("## Warnings/Errors")
             lines.append("")
-        
-        if 'intervention_summary' in summary:
-            lines.append("### Intervention Impact")
-            s = summary['intervention_summary']
-            lines.append(f"- Average change: {s['avg_absolute_change']:.2f} cases (±{s['avg_relative_change']:.1f}%)")
-            lines.append(f"- Significant interventions: {s['significant_interventions']}")
-            lines.append("")
-        
-        if 'resistance_trend' in summary:
-            lines.append("### Insecticide Resistance Trends")
-            t = summary['resistance_trend']
-            lines.append(f"- Trend direction: {t['direction']} (slope={t['slope']:.3f}, r²={t['r_squared']:.3f})")
-            lines.append(f"- Statistical significance: p={t['p_value']:.4f}")
-            lines.append("")
-        
-        if 'model_performance' in summary:
-            lines.append("### Integrated Risk Model")
-            m = summary['model_performance']
-            lines.append(f"- R² score: {m['r2_score']:.3f}")
-            lines.append(f"- RMSE: {m['rmse']:.3f}")
-            lines.append("")
-        
-        if 'top_features' in summary:
-            lines.append("### Key Risk Factors")
-            for feature, importance in summary['top_features']:
-                lines.append(f"- {feature}: {importance:.3f}")
+            for analysis, error in errors.items():
+                lines.append(f"- **{analysis}**: {error}")
             lines.append("")
         
         lines.append("---")
@@ -466,22 +909,27 @@ class AnalysisPipeline:
         lines.append("- `figures/`: Visualizations and plots")
         lines.append("- `analysis_report.json`: Raw results in JSON format")
         
-        with open(output_path, 'w') as f:
-            f.write('\n'.join(lines))
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+            logger.info(f"Markdown report saved to {output_path}")
+        except Exception as e:
+            logger.warning(f"Could not write markdown report: {e}")
     
     def close(self):
         """Close database connections."""
-        self.base.close()
+        if hasattr(self, 'base'):
+            self.base.close()
 
 
 # Convenience function
 def run_analysis(
     study_name: str,
-    location: str,
-    country: str = "KE",
-    start_year: int = 2019,
-    end_year: int = 2024,
-    output_dir: str = "analysis/outputs",
+    location: str = "ALL",
+    country: str = "ALL",
+    start_year: int = None,
+    end_year: int = None,
+    output_dir: str = "outputs/analysis",
     **kwargs
 ) -> Dict:
     """
@@ -489,16 +937,41 @@ def run_analysis(
     
     Args:
         study_name: Name of the study
-        location: Location name to analyze
-        country: Country code (default: "KE")
-        start_year: Start year (default: 2019)
-        end_year: End year (default: 2024)
-        output_dir: Output directory (default: "analysis/outputs")
+        location: Location name to analyze (use "ALL" for all locations)
+        country: Country code (use "ALL" for all countries)
+        start_year: Start year (default: get from data)
+        end_year: End year (default: get from data)
+        output_dir: Output directory (default: "outputs/analysis")
         **kwargs: Additional analysis parameters
     
     Returns:
         Dictionary with analysis results
     """
+    # If no years specified, get from data
+    if start_year is None or end_year is None:
+        try:
+            from database.session import SessionLocal
+            from database.models import DimTime
+            
+            session = SessionLocal()
+            try:
+                # Get min and max years from time dimension
+                min_year = session.query(DimTime.year).order_by(DimTime.year.asc()).first()
+                max_year = session.query(DimTime.year).order_by(DimTime.year.desc()).first()
+                
+                if min_year and max_year:
+                    start_year = start_year or min_year[0]
+                    end_year = end_year or max_year[0]
+                else:
+                    start_year = start_year or 2019
+                    end_year = end_year or 2024
+            finally:
+                session.close()
+        except Exception as e:
+            logger.warning(f"Could not get year range from database: {e}")
+            start_year = start_year or 2019
+            end_year = end_year or 2024
+    
     config = AnalysisConfig(
         study_name=study_name,
         location_name=location,

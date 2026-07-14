@@ -277,16 +277,18 @@ class MappingTransformer:
                 # Build query dynamically
                 query = session.query(model_class)
                 # Handle different field types (string vs numeric)
-                if isinstance(lookup_value, str):
-                    query = query.filter(getattr(model_class, field_name).ilike(lookup_value))
-                else:
-                    query = query.filter(getattr(model_class, field_name) == lookup_value)
+                # if isinstance(lookup_value, str):
+                #     query = query.filter(getattr(model_class, field_name).ilike(lookup_value))
+                # else:
+                #     query = query.filter(getattr(model_class, field_name) == lookup_value)
+                query = query.filter(getattr(model_class, field_name) == lookup_value)
                 result = query.first()
                 if result:
                     # Get the primary key
                     pk_column = model_class.__table__.primary_key.columns.values()[0]
                     pk_value = getattr(result, pk_column.name)
                     self._dimension_cache[cache_key] = pk_value
+                    logger.info(f"Looked up for PK Column {pk_column} with {field_name} == {lookup_value} in model {model_class}, Result ID: {pk_value}")
                     return pk_value
                 else:
                     logger.warning(f"No match found for {model_class.__tablename__}.{field_name} = '{lookup_value}'")

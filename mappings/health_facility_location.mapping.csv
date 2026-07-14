@@ -4,7 +4,6 @@ county,dim_location,name,none,,False,,,
 ,dim_location,location_code,concat,"{""columns"": [""county"", ""latitude"", ""longitude""], ""separator"": ""/""}",False,,unknown,
 ,dim_location,country_name,none,,False,Kenya,Kenya,
 ,dim_location,country_code,none,,False,KE,KE,
-,dim_location,admin_level,none,,False,county,county,
 ,dim_location,centroid_lat,none,,False,0.0,0.0,
 ,dim_location,centroid_lon,none,,False,0.0,0.0,
 

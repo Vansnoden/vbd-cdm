@@ -9,7 +9,6 @@ longitude_1,dim_location,centroid_lon,none,,True,,,
 species,dim_vector,species_name,none,,True,,,
 species,dim_vector,vector_code,none,,True,,,
 species,dim_vector,genus,split,"{""delimiter"": "" "", ""index"": 0}",False,,,
-,dim_vector,family,none,,False,Culicidae,,
 species,dim_vector,subspecies,split,"{""delimiter"": "" "", ""index"": 1}",False,,,
 
 ,dim_source,source_code,none,,False,"VA","VA",
@@ -38,7 +37,7 @@ irac_moa,dim_insecticide,irac_group,cast,"{""type"": ""str""}",FALSE,,,
 
 test_protocol,dim_resistance_test_type,test_type_name,none,,FALSE,WHO,,
 test_protocol,dim_resistance_test_type,test_type_code,none,,FALSE,WHO,,
-exposure_period_min,dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",FALSE,60,60,int
+exposure_period_min,dim_resistance_test_type,exposure_time_unit,cast,"{""type"": ""int""}",FALSE,,,int
 
 ,fact_insecticide_resistance,location_id,map,"{""ref"": ""dim_location.name"", ""columns"": [""country"", ""site"", ""latitude_1"", ""longitude_1""], ""separator"": ""/""}",False,,,int
 concentration_percent,fact_insecticide_resistance,concentration,cast,"{""type"": ""float""}",FALSE,,,

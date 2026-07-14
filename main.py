@@ -10,11 +10,13 @@ import sys
 import logging
 import argparse
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
+from datetime import datetime
 
 import pandas as pd
 from dotenv import load_dotenv
 
+from utilities.consolidation import DataConsolidator, run_consolidation
 from database.geoutils import enrich_location_dataframe
 
 # Add project root to path
@@ -360,6 +362,72 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
         return False
 
 
+def run_consolidation_step():
+    """Run the data consolidation step."""
+    logger.info("=" * 60)
+    logger.info("RUNNING DATA CONSOLIDATION")
+    logger.info("=" * 60)
+    
+    try:
+        consolidator = DataConsolidator()
+        try:
+            # Fix country codes first
+            fixed = consolidator.fix_location_country_codes()
+            logger.info(f"Fixed country codes for {fixed} locations")
+            
+            # Run full consolidation
+            results = consolidator.consolidate_all()
+            
+            # Log summary
+            loc_results = results.get('locations', {})
+            if loc_results and isinstance(loc_results, dict):
+                logger.info(f"Location consolidation: {loc_results.get('original_count', 0)} -> "
+                           f"{loc_results.get('merged_count', 0)} locations")
+            
+            vocab_results = results.get('vocabulary', {})
+            for table, result in vocab_results.items():
+                if isinstance(result, dict):
+                    dup_count = result.get('duplicates_found', 0)
+                    if dup_count > 0:
+                        logger.info(f"Consolidated {dup_count} duplicates in {table}")
+            
+            dup_results = results.get('duplicates', {})
+            for table, result in dup_results.items():
+                if isinstance(result, dict):
+                    dup_count = result.get('duplicate_count', 0)
+                    if dup_count > 0:
+                        logger.warning(f"Found {dup_count} duplicates in {table}")
+            
+            return results
+        finally:
+            consolidator.close()
+    except Exception as e:
+        logger.error(f"Consolidation failed: {e}")
+        return {'error': str(e)}
+
+
+def run_burden_expansion():
+    """
+    Run the burden expansion script to create daily case records.
+    This is a standalone function that can be called from main.
+    """
+    logger.info("=" * 60)
+    logger.info("RUNNING BURDEN EXPANSION")
+    logger.info("=" * 60)
+    
+    try:
+        from fix_cases import expand_burden_to_daily
+        expand_burden_to_daily()
+        logger.info("Burden expansion completed successfully")
+        return True
+    except ImportError:
+        logger.warning("fix_cases.py not found, attempting to use consolidation...")
+        return False
+    except Exception as e:
+        logger.error(f"Burden expansion failed: {e}")
+        return False
+
+
 def generate_summary(output_dir: str = "outputs"):
     """Generate database summary reports."""
     logger.info("Generating database summary...")
@@ -374,25 +442,13 @@ def generate_summary(output_dir: str = "outputs"):
     logger.info(f"Summary generated in {output_path}")
 
 
-def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = None):
-    """Placeholder for analysis pipelines."""
-    logger.info(f"Running analysis pipelines: {pipelines}")
-    if filter_str:
-        logger.info(f"With filter: {filter_str}")
-    # TODO: Implement actual analysis calls
-    # For now, just log
-    for pipeline in pipelines:
-        logger.info(f"Executing analysis pipeline: {pipeline}")
-
-
-# main.py - Updated run_analysis_pipelines function
-
-def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = None):
+def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_str: Optional[str] = None):
     """
     Run the standardized analysis pipelines.
     
     Args:
         pipelines: List of pipeline names to run
+        config: Full configuration dictionary
         filter_str: Optional filter string (e.g., "dim_location.country_code = 'KE'")
     """
     from analysis.pipeline import run_analysis
@@ -401,83 +457,185 @@ def run_analysis_pipelines(pipelines: List[str], filter_str: Optional[str] = Non
     if filter_str:
         logger.info(f"With filter: {filter_str}")
     
-    # Get config and parse parameters
-    config = load_yaml_config(str(PROJECT_ROOT / "siaya_config.yaml"))
+    # Parse analysis parameters from config
     params = _parse_analysis_params(config, filter_str)
+    
+    # Get analysis flags from config
+    process_cfg = config.get('process', {})
+    analyze_cfg = process_cfg.get('analyze', {})
+    
+    # Base analysis configuration - DO NOT include location_name here
+    # These are the core parameters that will be passed to run_analysis
+    base_params = {
+        'study_name': params.get('study_name', f"{params['location']}_analysis"),
+        'location': params['location'],  # Use 'location' not 'location_name'
+        'country': params['country'],
+        'start_year': params['start_year'],
+        'end_year': params['end_year'],
+        'output_dir': f"outputs/analysis/{params.get('output_subdir', '')}",
+        'environmental_variables': analyze_cfg.get('environmental_variables', ['t2m', 'tp']),
+        'max_lag_months': analyze_cfg.get('max_lag_months', 6),
+    }
     
     # Pipeline to analysis flag mapping
     pipeline_flags = {
-        'seasonal_patterns': {'run_seasonal': True},
-        'climate_vector_correlation': {'run_climate_correlation': True},
-        'lag_analysis': {'run_lag_analysis': True},
-        'early_warning_indicators': {'run_lag_analysis': True},
-        'intervention_impact': {'run_intervention_impact': True},
-        'resistance_trends': {'run_resistance_trends': True},
-        'integrated_risk_model': {'run_risk_modeling': True},
-        'spatial_analysis': {'run_spatial_analysis': True}
+        'seasonal_patterns': {'run_seasonal': True, 'run_climate_correlation': False, 
+                              'run_lag_analysis': False, 'run_intervention_impact': False,
+                              'run_resistance_trends': False, 'run_spatial_analysis': False,
+                              'run_risk_modeling': False},
+        'climate_vector_correlation': {'run_seasonal': False, 'run_climate_correlation': True,
+                                       'run_lag_analysis': False, 'run_intervention_impact': False,
+                                       'run_resistance_trends': False, 'run_spatial_analysis': False,
+                                       'run_risk_modeling': False},
+        'lag_analysis': {'run_seasonal': False, 'run_climate_correlation': False,
+                         'run_lag_analysis': True, 'run_intervention_impact': False,
+                         'run_resistance_trends': False, 'run_spatial_analysis': False,
+                         'run_risk_modeling': False},
+        'intervention_impact': {'run_seasonal': False, 'run_climate_correlation': False,
+                                'run_lag_analysis': False, 'run_intervention_impact': True,
+                                'run_resistance_trends': False, 'run_spatial_analysis': False,
+                                'run_risk_modeling': False},
+        'resistance_trends': {'run_seasonal': False, 'run_climate_correlation': False,
+                              'run_lag_analysis': False, 'run_intervention_impact': False,
+                              'run_resistance_trends': True, 'run_spatial_analysis': False,
+                              'run_risk_modeling': False},
+        'early_warning_indicators': {'run_seasonal': True, 'run_climate_correlation': True,
+                                     'run_lag_analysis': True, 'run_intervention_impact': False,
+                                     'run_resistance_trends': False, 'run_spatial_analysis': False,
+                                     'run_risk_modeling': False},
+        'spatial_analysis': {'run_seasonal': False, 'run_climate_correlation': False,
+                             'run_lag_analysis': False, 'run_intervention_impact': False,
+                             'run_resistance_trends': False, 'run_spatial_analysis': True,
+                             'run_risk_modeling': False},
+        'integrated_risk_model': {'run_seasonal': False, 'run_climate_correlation': False,
+                                  'run_lag_analysis': False, 'run_intervention_impact': False,
+                                  'run_resistance_trends': False, 'run_spatial_analysis': False,
+                                  'run_risk_modeling': True},
     }
     
+    # Get custom pipeline parameters
+    custom_pipelines = analyze_cfg.get('custom_pipelines', [])
+    custom_params = {cp['name']: cp.get('params', {}) for cp in custom_pipelines}
+    
+    # Run each pipeline
     for pipeline in pipelines:
         logger.info(f"Executing analysis pipeline: {pipeline}")
         try:
+            # Get flags for this pipeline
             flags = pipeline_flags.get(pipeline, {})
-            # Merge with any custom params from config
-            custom = _get_custom_params(config, pipeline)
+            
+            # Merge with any custom params
+            custom = custom_params.get(pipeline, {})
             flags.update(custom)
             
-            run_analysis(
-                study_name=f"{params['location']}_{pipeline}",
-                location=params['location'],
-                country=params['country'],
-                start_year=params['start_year'],
-                end_year=params['end_year'],
-                output_dir=f"analysis/outputs/{pipeline}",
-                **flags
-            )
-            logger.info(f"Completed: {pipeline}")
+            # Start with base params and add flags
+            # IMPORTANT: Use unpacking carefully - base_params already has all core params
+            pipeline_params = base_params.copy()
+            
+            # Add flags (these don't conflict with base_params)
+            for key, value in flags.items():
+                pipeline_params[key] = value
+            
+            # Set study name with pipeline suffix
+            study_name = params.get('study_name', params['location'])
+            pipeline_params['study_name'] = f"{study_name}_{pipeline}"
+            
+            # Set output subdirectory
+            pipeline_params['output_dir'] = f"outputs/analysis/{pipeline}"
+            
+            # Add custom parameters
+            if 'max_lag_months' in custom:
+                pipeline_params['max_lag_months'] = custom['max_lag_months']
+            if 'variables' in custom:
+                pipeline_params['environmental_variables'] = custom['variables']
+            
+            # Verify no duplicate keys
+            logger.debug(f"Pipeline params: {list(pipeline_params.keys())}")
+            
+            # Run the analysis - pass all params as keyword arguments
+            results = run_analysis(**pipeline_params)
+            
+            # Check for errors
+            if results and isinstance(results, dict) and 'error' in results:
+                logger.error(f"Analysis {pipeline} returned error: {results['error']}")
+            else:
+                logger.info(f"Completed: {pipeline}")
+                
         except Exception as e:
-            logger.error(f"Failed: {pipeline} - {e}")
+            logger.error(f"Failed: {pipeline} - {e}", exc_info=True)
+            
 
-
-def _parse_analysis_params(config: dict, filter_str: Optional[str]) -> dict:
-    """Extract analysis parameters from config and filter string."""
+def _parse_analysis_params(config: Dict[str, Any], filter_str: Optional[str]) -> Dict[str, Any]:
+    """
+    Extract analysis parameters from config and filter string.
+    
+    Args:
+        config: Full configuration dictionary
+        filter_str: Optional filter string
+        
+    Returns:
+        Dictionary with analysis parameters
+    """
     import re
     
-    # Default values from config
+    # Get core config
     core = config.get('core', {})
-    study_region = core.get('study_region', 'KE')
-    study_period = core.get('study_period', '2019-2024')
+    study_region = core.get('study_region', '')
+    study_period = core.get('study_period', '')
     
     # Parse period
-    start_year, end_year = 2019, 2024
+    start_year, end_year = None, None
     if study_period:
         parts = study_period.split('-')
         if len(parts) == 2:
-            start_year, end_year = int(parts[0]), int(parts[1])
+            try:
+                start_year, end_year = int(parts[0].strip()), int(parts[1].strip())
+            except ValueError:
+                start_year, end_year = 2019, 2024
+    else:
+        start_year, end_year = 2019, 2024
     
     # Parse location and country from filter or study_region
-    location, country = _extract_location_info(filter_str, study_region)
+    location, country, study_name = _extract_location_info(filter_str, study_region)
+    
+    # If location is still "ALL" and country is "ALL", use all available data
+    if location == "ALL" and country == "ALL":
+        logger.info("No specific filters found. Analysis will use all available data.")
     
     return {
+        'study_name': study_name or f"{location}_{country}",
         'location': location,
         'country': country,
         'start_year': start_year,
-        'end_year': end_year
+        'end_year': end_year,
+        'output_subdir': f"{location}_{country}".lower().replace(' ', '_')
     }
 
 
 def _extract_location_info(filter_str: Optional[str], study_region: str) -> tuple:
-    """Extract location name and country code from filter or study_region."""
+    """
+    Extract location name, country code, and study name from filter or study_region.
+    
+    Args:
+        filter_str: Optional filter string
+        study_region: Study region from config
+        
+    Returns:
+        Tuple of (location_name, country_code, study_name)
+    """
     import re
     
-    location, country = None, None
+    location = "ALL"
+    country = "ALL"
+    study_name = None
     
     if filter_str:
-        # Parse from filter: "dim_location.country_code = 'KE' AND dim_location.name LIKE '%Siaya%'"
+        # Extract country code
         country_match = re.search(r"country_code\s*=\s*'([^']+)'", filter_str)
         if country_match:
             country = country_match.group(1)
         
+        # Extract location name
         name_match = re.search(r"name\s+LIKE\s+'%([^%]+)%'", filter_str)
         if name_match:
             location = name_match.group(1)
@@ -486,21 +644,36 @@ def _extract_location_info(filter_str: Optional[str], study_region: str) -> tupl
             if name_match2:
                 location = name_match2.group(1)
     
-    # If not found in filter, try study_region
-    if not location or location == 'Siaya':
-        parts = study_region.split(',')
+    # If location is still "ALL", try to extract from study_region
+    if location == "ALL" and study_region:
+        # Try parsing "Siaya County, Kenya" format
+        parts = [p.strip() for p in study_region.split(',')]
         if parts:
-            location = parts[0].strip().replace(' County', '').strip()
+            # Remove common suffixes
+            location = parts[0].replace(' County', '').replace(' District', '').replace(' Region', '').strip()
+            study_name = location
+            
             if len(parts) > 1:
                 country_name = parts[1].strip()
-                country_map = {'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 
-                              'South Africa': 'ZA', 'Tanzania': 'TZ', 'Uganda': 'UG'}
+                country_map = {
+                    'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 
+                    'South Africa': 'ZA', 'Tanzania': 'TZ', 'Uganda': 'UG',
+                    'Ethiopia': 'ET', 'Rwanda': 'RW', 'ALL': 'ALL'
+                }
                 country = country_map.get(country_name, country)
+        else:
+            # If no comma, treat as just location
+            location = study_region.replace(' County', '').replace(' District', '').strip()
+            study_name = location
     
-    return location, country
+    # If study_name is still None, use location
+    if study_name is None:
+        study_name = location if location != "ALL" else "National"
+    
+    return location, country, study_name
 
 
-def _get_custom_params(config: dict, pipeline: str) -> dict:
+def _get_custom_params(config: Dict[str, Any], pipeline: str) -> Dict[str, Any]:
     """Get custom parameters for a specific pipeline from config."""
     process_cfg = config.get('process', {})
     analyze_cfg = process_cfg.get('analyze', {})
@@ -525,27 +698,54 @@ def _get_custom_params(config: dict, pipeline: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="CDM Integration Framework Orchestrator")
-    parser.add_argument("--config", default="siaya_config.yaml", help="Path to YAML configuration file")
+    parser.add_argument("--config", default="base_config.yaml", help="Path to YAML configuration file")
     parser.add_argument("--skip-ingest", action="store_true", help="Skip data ingestion")
     parser.add_argument("--skip-summary", action="store_true", help="Skip database summary generation")
     parser.add_argument("--skip-analysis", action="store_true", help="Skip analysis pipelines")
+    parser.add_argument("--skip-consolidation", action="store_true", help="Skip data consolidation")
+    parser.add_argument("--expand-burden", action="store_true", help="Force burden expansion before analysis")
     parser.add_argument("--source", help="Run only for a specific source name (optional)")
     args = parser.parse_args()
+    
     setup_environment()
+    
     # Load configuration
     config_path = PROJECT_ROOT / args.config
     if not config_path.exists():
         logger.error(f"Configuration file not found: {config_path}")
         sys.exit(1)
+    
     config = load_yaml_config(str(config_path))
     logger.info(f"Loaded configuration from {config_path}")
+    
     # Extract process steps
     process_cfg = config.get('process', {})
     steps = process_cfg.get('steps', [])
+    
     # Determine which steps to run
     run_ingest = not args.skip_ingest and 'ingest_data' in steps
+    run_consolidate = not args.skip_consolidation and 'consolidate' in steps
     run_summary = not args.skip_summary and 'generate_summary' in steps
     run_analysis = not args.skip_analysis and 'analyze' in steps
+    
+    # --- 0. Check case data before consolidation ---
+    if run_analysis and not run_consolidate:
+        logger.info("Skipping consolidation, but checking case data...")
+        try:
+            from database.session import SessionLocal
+            session = SessionLocal()
+            case_count = session.execute(text("SELECT COUNT(*) FROM fact_disease_case")).scalar()
+            session.close()
+            logger.info(f"Current case records: {case_count}")
+            
+            if case_count < 1000:
+                logger.warning("Few case records found. Consider running consolidation or burden expansion.")
+                if args.expand_burden or case_count < 100:
+                    logger.info("Running burden expansion...")
+                    run_burden_expansion()
+        except Exception as e:
+            logger.warning(f"Could not check case data: {e}")
+    
     # --- 1. Ingest data ---
     if run_ingest:
         data_sources = config.get('data_sources', {})
@@ -556,16 +756,29 @@ def main():
                 if args.source and source_name != args.source:
                     continue
                 run_ingestion_for_source(source_cfg)
+    
+    # 1.5. Consolidate data
+    if run_consolidate:
+        run_consolidation_step()
+    
     # --- 2. Generate summary ---
     if run_summary:
         generate_summary()
+    
+    # --- 2.5. Force burden expansion if requested ---
+    if args.expand_burden and not run_consolidate:
+        logger.info("Force expanding burden data...")
+        run_burden_expansion()
+    
     # --- 3. Run analysis ---
     if run_analysis:
         analysis_cfg = process_cfg.get('analyze', {})
         filter_str = analysis_cfg.get('filter')
         pipelines = analysis_cfg.get('standard_pipelines', [])
+        
         if pipelines:
-            run_analysis_pipelines(pipelines, filter_str)
+            # Pass the full config to allow custom parameters
+            run_analysis_pipelines(pipelines, config, filter_str)
         else:
             logger.info("No analysis pipelines defined.")
 

@@ -2,11 +2,10 @@ source_column,target_table,target_column,transform,transform_params,required,def
 
 Country Name,dim_location,country_name,none,,True,,,
 Country Code,dim_location,country_code,none,,True,,,
-,dim_location,name,concat,"{""columns"": [""Country Name"", ""Country Code""], ""separator"": "" ""}",False,,,
-,dim_location,location_code,concat,"{""columns"": [""Country Name"", ""Country Code""], ""separator"": ""/""}",False,,,
-,dim_location,admin_level,none,,False,country,country,
-,dim_location,centroid_lat,none,,False,0.0,0.0,
-,dim_location,centroid_lon,none,,False,0.0,0.0,
+,dim_location,name,concat,"{""columns"": [""Country Code"", ""Country Name""], ""separator"": ""/""}",False,,,
+,dim_location,location_code,concat,"{""columns"": [""Country Code"", ""Country Name""], ""separator"": ""/""}",False,,,
+,dim_location,centroid_lat,none,,False,-0.023559,-0.023559,
+,dim_location,centroid_lon,none,,False,37.906193,37.906193,
 
 Indicator Name,dim_socioeconomic_indicator,indicator_name,none,,True,,,
 Indicator Code,dim_socioeconomic_indicator,indicator_code,none,,True,,,
@@ -71,6 +70,6 @@ Indicator Code,dim_socioeconomic_indicator,indicator_code,none,,True,,,
 
 Year,fact_socioeconomic_condition,year,cast,"{""type"": ""int""}",True,,,
 Value,fact_socioeconomic_condition,indicator_value,cast,"{""type"": ""float""}",True,0.0,,
-,fact_socioeconomic_condition,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""Country Name"", ""Country Code""], ""separator"": ""/""}",False,,,
+,fact_socioeconomic_condition,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""Country Code"", ""Country Name""], ""separator"": ""/""}",False,,,
 ,fact_socioeconomic_condition,indicator_code,map,"{""ref"": ""dim_socioeconomic_indicator.indicator_code"", ""columns"": [""Indicator Code""], ""separator"": """"}",False,,,
 ,fact_socioeconomic_condition,source_code,none,,False,WB/WDI,WB/WDI,

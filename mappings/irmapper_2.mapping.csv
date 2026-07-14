@@ -13,14 +13,14 @@ Species,dim_vector,vector_code,none,,False,,,
 ,dim_vector,description,concat,"{""columns"": [""Species"", ""Identification method 1"", ""Identification method 2""], ""separator"": "" - ""}",False,,,
 ,dim_vector,source_standard,none,,False,IRMapper,IRMapper,
 
-"Insecticide tested",dim_insecticide,insecticide_name,none,,False,'unknown',,
+"Insecticide tested",dim_insecticide,insecticide_name,none,,False,unknown,,
 "Insecticide class",dim_insecticide,chemical_class,cast,"{""type"": ""str""}",False,,,
-,dim_insecticide,insecticide_code,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class""], ""separator"": ""/""}",False,permethrin_pyrethroid,,
+,dim_insecticide,insecticide_code,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class""], ""separator"": ""/""}",False,permethrin/pyrethroid,,
 ,dim_insecticide,description,concat,"{""columns"": [""Insecticide tested"", ""Insecticide class"", ""Concentration (%)""], ""separator"": "" - ""}",False,,,
 ,dim_insecticide,source_standard,none,,False,IRMapper,IRMapper,
 
-"Test protocol",dim_resistance_test_type,test_type_name,none,,False,"unknown",,
-,dim_resistance_test_type,test_type_code,concat,"{""columns"": [""Test protocol"", ""Exposure time (min)"", ""Concentration (%)""], ""separator"": ""/""}",False,WHO_60_0.75,,
+"Test protocol",dim_resistance_test_type,test_type_name,none,,False,unknown,,
+,dim_resistance_test_type,test_type_code,concat,"{""columns"": [""Test protocol"", ""Exposure time (min)"", ""Concentration (%)""], ""separator"": ""/""}",False,WHO/60/0.75,,
 ,dim_resistance_test_type,description,concat,"{""columns"": [""Test protocol"", ""Concentration (%)"", ""percent_concentration""], ""separator"": ""/""}",False,,,
 ,dim_resistance_test_type,source_standard,none,,False,IRMapper,IRMapper,
 

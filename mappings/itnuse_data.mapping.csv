@@ -6,7 +6,7 @@ COUNTY,dim_location,name,map,"{""ref"": ""dim_location.name""}",True,,,
 ,dim_location,admin_level,none,,False,county,county,
 ,dim_location,centroid_lat,none,,False,0.06,0.06,
 ,dim_location,centroid_lon,none,,False,34.28,34.28,
-,dim_location,location_code,concat,"{""columns"": [""country"", ""COUNTY""], ""separator"": ""/""}",False,Siaya_KE,,
+,dim_location,location_code,none,,False,KE/Siaya,KE/Siaya,
 
 ,dim_source,source_code,none,,False,ITN Use Data,ITN Use Data,
 ,dim_source,source_name,none,,False,ITN Use Data,ITN Use Data,
@@ -28,7 +28,7 @@ VARIABLE,fact_intervention,intervention_type,map,"{
 }",True,itn_use,itn_use,
 
 VALUE,fact_intervention,coverage,cast,"{""type"": ""float""}",True,,,
-,fact_intervention,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""country"", ""COUNTY""], ""separator"": ""/""}",False,,,
+,fact_intervention,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""COUNTRY"", ""COUNTY""], ""separator"": ""/""}",False,,,
 ,fact_intervention,date_start,none,,False,2022-01-01,2022-01-01,
 ,fact_intervention,date_end,none,,False,2022-12-01,2022-12-01,
 ,fact_intervention,target_disease_code,none,,False,MAL,MAL,
