@@ -1,7 +1,7 @@
 
 
 
-## How to rum
+## How to run
 
 # Full pipeline
 ```python main.py```
@@ -14,3 +14,6 @@
 
 # Skip analysis
 ```python main.py --skip-analysis```
+
+# Update documenation
+```sphinx-build -b html docs _build/html```
