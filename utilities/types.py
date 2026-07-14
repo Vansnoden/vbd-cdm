@@ -8,5 +8,5 @@ import pandas as pd
 class ProcessResult(BaseModel):
     status: bool
     errors: Optional[dict] = None
-    data: Optional[pd.Dataframe] = None
+    data: Optional[pd.DataFrame] = None
 
