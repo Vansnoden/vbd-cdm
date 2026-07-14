@@ -1,284 +1,393 @@
-#-*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 import datetime
-
-from sqlalchemy import Column, DateTime, Integer, String, Float, Date, ForeignKey, Text, UniqueConstraint
+import uuid
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Index, Text
 from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
-from geoalchemy2 import Geometry 
 from database.session import Base
 
 
+# ========================= DIMENSIONS =========================
+
 class DimTime(Base):
-    """Time dimension table for easy temporal analysis"""
+    """Time dimension table"""
     __tablename__ = "dim_time"
-    
+
     date_id = Column(String(10), primary_key=True)  # YYYY-MM-DD
     date = Column(Date, nullable=False)
     year = Column(Integer, nullable=False)
     month = Column(Integer, nullable=False)
     week = Column(Integer)
     day_of_year = Column(Integer)
-    season = Column(String(20))  # 'dry', 'wet', 'spring', etc.
-    is_holiday = Column(String(3), default='no')  # 'yes' or 'no'
+    season = Column(String(20))
+    is_holiday = Column(Boolean, default=False)
 
 
-class Location(Base):
-    """Geographic locations hierarchy"""
-    __tablename__ = "location"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), unique=True, nullable=False)
+class DimLocation(Base):
+    """Location hierarchy (country, region, district, site)"""
+    __tablename__ = "dim_location"
+
+    location_id = Column(Integer,  primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
-    admin_level = Column(String(50))  # country, state, district, village
-    parent_location_code = Column(String(50), ForeignKey("location.location_code"))
-    # For spatial: use Geometry column for PostGIS, Text for SQLite
-    geometry_wkt = Column(Text)  # WKT representation
+    location_code = Column(String, unique=True)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
+    country_code = Column(String(10))
+    country_name = Column(String(100))
+    admin_level = Column(String(50))
 
-    # Self-referential relationship
-    parent = relationship("Location", remote_side=[location_code], backref="children")
+
+class DimDisease(Base):
+    """Disease vocabulary with standard alignment"""
+    __tablename__ = "dim_disease"
+
+    disease_code = Column(String(20), primary_key=True)
+    disease_name = Column(String(100), nullable=False)
+    description = Column(String(500))
+    source_standard = Column(String(100))
+    pathogen = Column(String(100))
+    icd_code = Column(String(20))
 
 
-class HostCase(Base):
-    """Human or animal disease cases"""
-    __tablename__ = "host_case"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    case_identifier = Column(String(100), unique=True)  # External ID
-    location_code = Column(String(50), ForeignKey("location.location_code"))
-    date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"))
-    date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"))
-    
-    # Disease classification
-    disease = Column(String(100), nullable=False)  # 'malaria', 'dengue'
-    pathogen = Column(String(100))  # 'Plasmodium falciparum'
-    case_status = Column(String(50))  # 'suspected', 'probable', 'confirmed'
-    confirmation_method = Column(String(100))  # 'PCR', 'RDT', 'clinical'
-    
-    # Host details
-    host_type = Column(String(50), default='human')  # 'human', 'animal'
-    age_years = Column(Integer)
-    age_group = Column(String(50))
+class DimVector(Base):
+    """Vector species/subspecies vocabulary"""
+    __tablename__ = "dim_vector"
+
+    vector_code = Column(String(20), primary_key=True)
+    species_name = Column(String(100), nullable=False)
+    subspecies = Column(String(50))
+    description = Column(String(500))
+    source_standard = Column(String(100))
+    genus = Column(String(50))
+    family = Column(String(50))
+
+
+class DimInsecticide(Base):
+    """Insecticide vocabulary"""
+    __tablename__ = "dim_insecticide"
+
+    insecticide_code = Column(String(20), primary_key=True)
+    insecticide_name = Column(String(100), nullable=False)
+    chemical_class = Column(String(50))
+    description = Column(String(500))
+    source_standard = Column(String(100))
+    irac_group = Column(String(20))
+
+
+class DimIdentificationMethod(Base):
+    """Diagnostic method vocabulary"""
+    __tablename__ = "dim_identification_method"
+
+    method_code = Column(String(20), primary_key=True)
+    method_name = Column(String(100), nullable=False)
+    method_type = Column(String(50))
+    description = Column(String(500))
+    source_standard = Column(String(100))
+
+
+class DimResistanceTestType(Base):
+    """Resistance bioassay type vocabulary"""
+    __tablename__ = "dim_resistance_test_type"
+
+    test_type_code = Column(String(20), primary_key=True)
+    test_type_name = Column(String(100), nullable=False)
+    exposure_time_unit = Column(String(20))
+    description = Column(String(500))
+    source_standard = Column(String(100))
+
+
+class DimSocioeconomicIndicator(Base):
+    """Socioeconomic indicator vocabulary"""
+    __tablename__ = "dim_socioeconomic_indicator"
+
+    indicator_code = Column(String(50), primary_key=True)
+    indicator_name = Column(String(200), nullable=False)
+    unit = Column(String(50))
+    source = Column(String(200))
+    description = Column(String(500))
+    source_standard = Column(String(100))
+
+
+class DimSource(Base):
+    """Data source provenance"""
+    __tablename__ = "dim_source"
+
+    source_code = Column(String(20), primary_key=True)
+    source_name = Column(String(200), nullable=False)
+    source_description = Column(String(500))
+    source_standard = Column(String(100))
+    source_url = Column(String(500))
+    version = Column(String(50))
+
+
+# ========================= FACT TABLES =========================
+
+class FactVectorObservation(Base):
+    __tablename__ = "fact_vector_observation"
+
+    observation_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    life_stage = Column(String(50))
     sex = Column(String(10))
-    outcome = Column(String(50))  # 'recovered', 'died', 'unknown'
-    
-    # Relationships
-    location = relationship("Location")
-    onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
-    reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
+    collection_method = Column(String(100))
+    count = Column(Integer)
+    density_per_trap = Column(Float)
+    tested_for_pathogen = Column(String(100))
+    infection_status = Column(String(20))
+    infection_rate = Column(Float)
 
-
-class DiseaseBurden(Base):
-    """Disease burden data from sources like Malaria Atlas Project"""
-    __tablename__ = "disease_burden"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
-    year = Column(Integer, nullable=False)
-    disease = Column(String(50), nullable=False)  # 'malaria', 'dengue', etc.
-    
-    # Incidence and prevalence metrics
-    incidence_rate = Column(Float)  # Cases per 1000 population per year
-    prevalence_rate = Column(Float)  # Percentage of population infected
-    mortality_rate = Column(Float)  # Deaths per 1000 population per year
-    cases_lower = Column(Float)  # Lower confidence interval
-    cases_upper = Column(Float)  # Upper confidence interval
-    cases_mean = Column(Float)   # Mean estimate
-    
-    # Metadata
-    source = Column(String(200))  # e.g., 'Malaria Atlas Project'
-    version = Column(String(50))   # Dataset version
-    raster_file = Column(String(500))  # Original raster file name
-    extraction_method = Column(String(50))  # 'mean', 'median', etc.
-    
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-    
     # Relationships
-    location = relationship("Location")
-    
+    location = relationship("DimLocation")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    vector = relationship("DimVector")
+    source = relationship("DimSource")
+
     __table_args__ = (
-        UniqueConstraint('location_code', 'year', 'disease', name='uq_disease_burden_loc_year_disease'),
+        Index("idx_fact_vector_location", "location_id"),
+        Index("idx_fact_vector_date", "date_id"),
+        Index("idx_fact_vector_vector", "vector_code"),
+        Index("idx_fact_vector_source", "source_code"),
     )
 
 
-class VectorObservation(Base):
-    """Vector surveillance data"""
-    __tablename__ = "vector_observation"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
-    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
-    
-    # Vector details
-    vector_species = Column(String(100), nullable=False)
-    vector_subspecies = Column(String(100))
-    life_stage = Column(String(50))  # 'egg', 'larva', 'pupa', 'adult'
-    sex = Column(String(10))  # 'male', 'female', 'mixed'
-    
-    # Collection methods
-    collection_method = Column(String(100))  # 'CDC_light_trap', 'BG_sentinel'
-    count = Column(Integer)
-    density_per_trap = Column(Float)  # Calculated field
-    
-    # Infection status
-    tested_for_pathogen = Column(String(100))
-    infection_status = Column(String(50))  # 'positive', 'negative'
-    infection_rate = Column(Float)  # Proportion positive
-    
+class FactDiseaseCase(Base):
+    __tablename__ = "fact_disease_case"
+
+    case_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
+    identification_method_code = Column(String(20), ForeignKey("dim_identification_method.method_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    case_status = Column(String(20))
+    host_type = Column(String(20))
+    age_years = Column(Integer)
+    age_group = Column(String(20))
+    sex = Column(String(10))
+    outcome = Column(String(20))
+
     # Relationships
-    location = relationship("Location")
-    date = relationship("DimTime")
+    location = relationship("DimLocation")
+    onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
+    reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
+    disease = relationship("DimDisease")
+    identification_method = relationship("DimIdentificationMethod")
+    source = relationship("DimSource")
+
+    __table_args__ = (
+        Index("idx_fact_case_location", "location_id"),
+        Index("idx_fact_case_onset", "date_id_onset"),
+        Index("idx_fact_case_reported", "date_id_reported"),
+        Index("idx_fact_case_disease", "disease_code"),
+        Index("idx_fact_case_source", "source_code"),
+    )
 
 
-class EnvironmentalFactor(Base):
-    """Climate and environmental data"""
-    __tablename__ = "environmental_factor"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
-    date_id = Column(String(10), ForeignKey("dim_time.date_id"))
-    
-    # Climate variables
-    temperature_mean = Column(Float)  # °C
-    temperature_min = Column(Float)
-    temperature_max = Column(Float)
-    rainfall_total = Column(Float)  # mm
-    relative_humidity = Column(Float)  # %
-    
-    # Remote sensing indices
-    ndvi = Column(Float)  # Normalized Difference Vegetation Index
-    evi = Column(Float)   # Enhanced Vegetation Index
-    lst_day = Column(Float)  # Land Surface Temperature (day)
-    
-    # Derived indicators
-    aridity_index = Column(Float)
-    potential_breeding_sites = Column(Integer)  # Estimated from rainfall
-    
-    __table_args__ = (UniqueConstraint('location_code', 'date_id', name='uq_env_location_date'),)
-    
+class FactInsecticideResistance(Base):
+    __tablename__ = "fact_insecticide_resistance"
+
+    resistance_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
+    insecticide_code = Column(String(20), ForeignKey("dim_insecticide.insecticide_code"), nullable=False)
+    test_type_code = Column(String(20), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    concentration = Column(Float)
+    exposure_time = Column(Integer)
+    n_insect_tested = Column(Integer)
+    n_insect_susceptible = Column(Integer)
+    n_insect_resistant = Column(Integer)
+    n_insect_dead = Column(Integer)
+    vgsc_n_insect_tested = Column(Integer)
+    vgsc995l_vgsc995l_n = Column(Integer)
+    vgsc995l_vgsc995f_n = Column(Integer)
+    vgsc995f_vgsc995f_n = Column(Integer)
+    vgsc995l_vgsc995s_n = Column(Integer)
+    vgsc995s_vgsc995s_n = Column(Integer)
+    vgsc995f_vgsc995s_n = Column(Integer)
+    vgsc995s_vgsc995s_n = Column(Integer)
+    vgsc_generation = Column(String)
+    vgsc_generation = Column(String)
+    mortality = Column(Float)
+    resistance_status = Column(String(30))
+
     # Relationships
-    location = relationship("Location")
-    date = relationship("DimTime")
+    location = relationship("DimLocation")
+    insecticide = relationship("DimInsecticide")
+    test_type = relationship("DimResistanceTestType")
+    source = relationship("DimSource")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    vector = relationship("DimVector")
+
+    __table_args__ = (
+        Index("idx_fact_resistance_insecticide", "insecticide_code"),
+        Index("idx_fact_resistance_source", "source_code"),
+        Index("idx_fact_resistance_date", "date_id"),
+        Index("idx_fact_resistance_vector", "vector_code"),
+    )
 
 
-class HealthFacility(Base):
-    __tablename__ = "health_facility"
-    id = Column(Integer, primary_key=True)
-    facility_code = Column(String(50), unique=True)
+class FactBionomics(Base):
+    __tablename__ = "fact_bionomics"
+
+    bionomics_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    biting_rate = Column(Float)
+    feeding_preference = Column(String(20))
+    biting_location = Column(String(20))
+    resting_behavior = Column(String(50))
+    larval_site_type = Column(String(100))
+
+    # Relationships
+    location = relationship("DimLocation")
+    source = relationship("DimSource")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    vector = relationship("DimVector")
+
+    __table_args__ = (
+        Index("idx_fact_bionomics_source", "source_code"),
+        Index("idx_fact_bionomics_date", "date_id"),
+        Index("idx_fact_bionomics_vector", "vector_code"),
+    )
+
+
+class FactIntervention(Base):
+    __tablename__ = "fact_intervention"
+
+    intervention_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_start = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    date_end = Column(String(10), ForeignKey("dim_time.date_id"))
+    target_disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    intervention_type = Column(String(50))
+    coverage = Column(Float)
+
+    # Relationships
+    location = relationship("DimLocation")
+    start_date = relationship("DimTime", foreign_keys=[date_start])
+    end_date = relationship("DimTime", foreign_keys=[date_end])
+    target_disease = relationship("DimDisease")
+    source = relationship("DimSource")
+
+    __table_args__ = (
+        Index("idx_fact_intervention_location", "location_id"),
+        Index("idx_fact_intervention_start", "date_start"),
+        Index("idx_fact_intervention_disease", "target_disease_code"),
+        Index("idx_fact_intervention_source", "source_code"),
+    )
+
+
+class FactSocioeconomicCondition(Base):
+    __tablename__ = "fact_socioeconomic_condition"
+
+    socio_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    year = Column(Integer, nullable=False)
+    indicator_code = Column(String(50), ForeignKey("dim_socioeconomic_indicator.indicator_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    indicator_value = Column(Float)
+
+    # Relationships
+    location = relationship("DimLocation")
+    indicator = relationship("DimSocioeconomicIndicator")
+    source = relationship("DimSource")
+
+    __table_args__ = (
+        UniqueConstraint("location_id", "year", "indicator_code", name="uq_socio_loc_year_indicator"),
+        Index("idx_fact_socio_location", "location_id"),
+        Index("idx_fact_socio_year", "year"),
+        Index("idx_fact_socio_indicator", "indicator_code"),
+        Index("idx_fact_socio_source", "source_code"),
+    )
+
+
+class FactHealthFacility(Base):
+    __tablename__ = "fact_health_facility"
+
+    facility_id = Column(Integer, primary_key=True, autoincrement=True)
+    facility_code = Column(String(50), unique=True, nullable=False)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
     name = Column(String(200))
-    location_code = Column(String(50), ForeignKey("location.location_code"))
     lat = Column(Float)
     lon = Column(Float)
-    type = Column(String(50))  # hospital, clinic, dispensary
+    type = Column(String(50))
     catchment_population = Column(Integer)
 
-class Intervention(Base):
-    __tablename__ = "intervention"
-    id = Column(Integer, primary_key=True)
-    intervention_type = Column(String(50))  # 'IRS', 'ITN', 'larviciding'
-    date_start = Column(Date)
-    date_end = Column(Date)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
-    coverage = Column(Float)  # percentage or number
-    target_disease = Column(String(50))  # 'malaria', 'dengue', 'both'
+    # Relationships
+    location = relationship("DimLocation")
+    source = relationship("DimSource")
 
-class ResistanceTest(Base):
-    __tablename__ = "resistance_test"
-    id = Column(Integer, primary_key=True)
-    vector_observation_id = Column(Integer, ForeignKey("vector_observation.id"))
-    test_type = Column(String(50))  # 'WHO tube', 'CDC bottle'
-    insecticide = Column(String(100))
-    concentration = Column(Float)
-    exposure_time = Column(Integer)  # minutes
-    mortality = Column(Float)        # proportion dead
-    resistance_status = Column(String(50))  # 'susceptible', 'confirmed', 'possible'
-
-class SocioEconomic(Base):
-    __tablename__ = "socioeconomic"
-    id = Column(Integer, primary_key=True)
-    location_code = Column(String(50), ForeignKey("location.location_code"))
-    year = Column(Integer)
-    indicator_name = Column(String(100))  # e.g., 'ITN_use', 'poverty_rate'
-    indicator_value = Column(Float)
-    source = Column(String(100))
+    __table_args__ = (
+        Index("idx_fact_facility_location", "location_id"),
+        Index("idx_fact_facility_source", "source_code"),
+    )
 
 
+class FactDiseaseBurden(Base):
+    __tablename__ = "fact_disease_burden"
 
-# class Intervention(Base):
-#     __tablename__ = "intervention"
-    
-#     id = Column(Integer, primary_key=True)
-#     campaign_id = Column(String(100), nullable=True)
-#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
-#     year = Column(Integer, nullable=False)
-#     month = Column(Integer, nullable=False)
-#     intervention_type = Column(String(50), nullable=False)
-#     sub_type = Column(String(100))
-#     coverage_numeric = Column(Float)
-#     coverage_unit = Column(String(50))
-#     coverage_percent = Column(Float)
-#     target_population = Column(Integer)
-#     source = Column(String(200))
-#     notes = Column(Text)
-#     last_updated = Column(DateTime, default=datetime.utcnow)
-    
-#     __table_args__ = (
-#         UniqueConstraint('location_code', 'year', 'month', 'intervention_type', 
-#                          name='uq_intervention_loc_date_type'),
-#     )
+    burden_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    year = Column(Integer, nullable=False)
+    disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
 
+    incidence_rate = Column(Float)
+    prevalence_rate = Column(Float)
+    mortality_rate = Column(Float)
+    cases_mean = Column(Float)
 
-# class CaseLine(Base):
-#     __tablename__ = "case_line"
+    # Relationships
+    location = relationship("DimLocation")
+    disease = relationship("DimDisease")
+    source = relationship("DimSource")
 
-#     id = Column(Integer, primary_key=True)
-#     case_identifier = Column(String(100), unique=True)
-#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
-#     date_onset = Column(Date)
-#     date_report = Column(Date)
-#     date_confirmation = Column(Date)
-#     disease = Column(String(50), nullable=False)
-#     pathogen = Column(String(100))
-#     case_status = Column(String(20), nullable=False)
-#     confirmation_method = Column(String(50))
-#     age_years = Column(Integer)
-#     age_group = Column(String(20))
-#     sex = Column(String(10))
-#     pregnancy_status = Column(String(20))
-#     severity = Column(String(20))
-#     outcome = Column(String(20))
-#     outcome_date = Column(Date)
-#     treatment = Column(String(100))
-#     source = Column(String(200))
-#     last_updated = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("location_id", "year", "disease_code", name="uq_burden_loc_year_disease"),
+        Index("idx_fact_burden_location", "location_id"),
+        Index("idx_fact_burden_year", "year"),
+        Index("idx_fact_burden_disease", "disease_code"),
+        Index("idx_fact_burden_source", "source_code"),
+    )
 
 
-# class HealthFacility(Base):
-#     __tablename__ = "health_facility"
+class FactEnvironment(Base):
+    """Environmental data (temperature, rainfall, etc.) stored in long format"""
+    __tablename__ = "fact_environment"
 
-#     id = Column(Integer, primary_key=True)
-#     facility_code = Column(String(50), unique=True, nullable=False)
-#     name = Column(String(200), nullable=False)
-#     location_code = Column(String(50), ForeignKey("location.location_code"), nullable=False)
-#     facility_type = Column(String(50))
-#     ownership = Column(String(50))
-#     operational_status = Column(String(20), default='functional')
-#     latitude = Column(Float, nullable=False)
-#     longitude = Column(Float, nullable=False)
-#     geocoding_method = Column(String(50))
-#     address = Column(Text)
-#     catchment_population = Column(Integer)
-#     catchment_area_km2 = Column(Float)
-#     has_maternity = Column(Boolean, default=False)
-#     has_lab = Column(Boolean, default=False)
-#     has_microscopy = Column(Boolean, default=False)
-#     has_rdt = Column(Boolean, default=False)
-#     has_act = Column(Boolean, default=False)
-#     inpatient_beds = Column(Integer)
-#     outpatient_visits_2023 = Column(Integer)  # or use a separate year table for multiple years
-#     source = Column(String(200))
-#     last_updated = Column(DateTime)
+    fact_env_id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
+    date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
+    variable = Column(String(50), nullable=False)   # e.g., 'temperature_mean', 'rainfall_total'
+    value = Column(Float, nullable=False)
+    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+
+    # Relationships
+    location = relationship("DimLocation")
+    time = relationship("DimTime", foreign_keys=[date_id])
+    source = relationship("DimSource")
+
+    __table_args__ = (
+        UniqueConstraint("location_id", "date_id", "variable", name="uq_env_loc_date_var"),
+        Index("idx_fact_env_location", "location_id"),
+        Index("idx_fact_env_date", "date_id"),
+        Index("idx_fact_env_variable", "variable"),
+        Index("idx_fact_env_source", "source_code"),
+    )

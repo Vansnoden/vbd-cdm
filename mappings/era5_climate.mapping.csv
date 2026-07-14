@@ -1,0 +1,18 @@
+source_column,target_table,target_column,transform,transform_params,default_value,required,static_value,source_data_type
+
+lat,dim_location,centroid_lat,none,,0,False,,
+lon,dim_location,centroid_lon,none,,0,False,,
+,dim_location,name,concat,"{""columns"":[""lat"",""lon""],""separator"":""/""}",Siaya County,False,,
+,dim_location,location_code,concat,"{""columns"":[""lat"",""lon""],""separator"":""/""}",,False,,
+,dim_location,country_name,none,,Kenya,False,Kenya,
+,dim_location,country_code,none,,KE,False,KE,
+
+,dim_source,source_code,none,,,False,ERA5,
+,dim_source,source_name,none,,,False,ECMWF ERA5-Land,
+,dim_source,source_url,none,,,False,https://cds.climate.copernicus.eu,
+
+time,fact_environment,date_id,date_parse,"{""format"":""%Y-%m-%d""}",,True,,
+,fact_environment,location_id,map,"{""ref"":""dim_location.location_code"",""columns"":[""lat"",""lon""],""separator"":""/""}",,False,,
+variable,fact_environment,variable,none,,,True,,
+value,fact_environment,value,none,,,False,,
+,fact_environment,source_code,none,,,False,ERA5,

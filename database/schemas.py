@@ -1,11 +1,11 @@
-#-*- coding:utf-8 -*-
-
+# -*- coding: utf-8 -*-
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List
+from typing import Optional
 from datetime import date, datetime
 
 
-# -------------------- DimTime --------------------
+# ========================= DIMENSIONS =========================
+
 class DimTimeCreate(BaseModel):
     """Schema for creating time dimension records."""
     date_id: str = Field(..., description="Date in YYYY-MM-DD format")
@@ -15,7 +15,7 @@ class DimTimeCreate(BaseModel):
     week: Optional[int] = None
     day_of_year: Optional[int] = None
     season: Optional[str] = None
-    is_holiday: Optional[str] = "no"
+    is_holiday: Optional[bool] = False
 
     @field_validator('date_id')
     def validate_date_id(cls, v):
@@ -32,14 +32,14 @@ class DimTimeCreate(BaseModel):
         return v
 
 
-# -------------------- Location --------------------
-class LocationCreate(BaseModel):
-    """Schema for creating/updating locations."""
-    location_code: str = Field(..., description="Unique identifier for the location")
+class DimLocationCreate(BaseModel):
+    """Schema for creating location records."""
+    location_id: int
+    location_code: str
     name: str
-    admin_level: str = Field(..., description="e.g., country, state, district, village")
-    parent_location_code: Optional[str] = None
-    geometry_wkt: Optional[str] = None
+    country_name: Optional[str] = None
+    country_code: Optional[str] = None
+    admin_level: Optional[str] = None
     centroid_lat: Optional[float] = None
     centroid_lon: Optional[float] = None
 
@@ -56,18 +56,117 @@ class LocationCreate(BaseModel):
         return v
 
 
-# -------------------- HostCase --------------------
-class HostCaseCreate(BaseModel):
-    """Schema for creating disease case records."""
-    case_identifier: str = Field(..., description="External identifier for the case")
-    location_code: str
-    date_id_onset: str = Field(..., description="Date of symptom onset (YYYY-MM-DD)")
-    date_id_reported: str = Field(..., description="Date case was reported (YYYY-MM-DD)")
-    disease: str
+class DimDiseaseCreate(BaseModel):
+    """Schema for disease vocabulary with standard alignment."""
+    disease_code: str = Field(..., max_length=20)
+    disease_name: str
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
     pathogen: Optional[str] = None
-    case_status: str = "suspected"
-    confirmation_method: Optional[str] = None
-    host_type: str = "human"
+    icd_code: Optional[str] = None
+
+
+class DimVectorCreate(BaseModel):
+    """Schema for vector species vocabulary."""
+    vector_code: str = Field(..., max_length=20)
+    species_name: str
+    subspecies: Optional[str] = None
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
+    genus: Optional[str] = None
+    family: Optional[str] = None
+
+
+class DimInsecticideCreate(BaseModel):
+    """Schema for insecticide vocabulary."""
+    insecticide_code: str = Field(..., max_length=20)
+    insecticide_name: str
+    chemical_class: Optional[str] = None
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
+    irac_group: Optional[str] = None
+
+
+class DimIdentificationMethodCreate(BaseModel):
+    """Schema for diagnostic method vocabulary."""
+    method_code: str = Field(..., max_length=20)
+    method_name: str
+    method_type: Optional[str] = None
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
+
+
+class DimResistanceTestTypeCreate(BaseModel):
+    """Schema for resistance test type vocabulary."""
+    test_type_code: str = Field(..., max_length=20)
+    test_type_name: str
+    exposure_time_unit: Optional[str] = None
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
+
+
+class DimSocioeconomicIndicatorCreate(BaseModel):
+    """Schema for socioeconomic indicator vocabulary."""
+    indicator_code: str = Field(..., max_length=50)
+    indicator_name: str
+    unit: Optional[str] = None
+    source: Optional[str] = None
+    description: Optional[str] = None
+    source_standard: Optional[str] = None
+
+
+class DimSourceCreate(BaseModel):
+    """Schema for data source provenance."""
+    source_code: str = Field(..., max_length=20)
+    source_name: str
+    source_description: Optional[str] = None
+    source_standard: Optional[str] = None
+    source_url: Optional[str] = None
+    version: Optional[str] = None
+
+
+# ========================= FACT TABLES =========================
+
+class FactVectorObservationCreate(BaseModel):
+    """Schema for vector observation records."""
+    location_id: int
+    date_id: str
+    vector_code: str
+    source_code: str
+    life_stage: Optional[str] = None
+    sex: Optional[str] = None
+    collection_method: Optional[str] = None
+    count: Optional[int] = None
+    density_per_trap: Optional[float] = None
+    tested_for_pathogen: Optional[str] = None
+    infection_status: Optional[str] = None
+    infection_rate: Optional[float] = None
+
+    @field_validator('date_id')
+    def validate_date_id(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+        except ValueError:
+            raise ValueError("date_id must be in YYYY-MM-DD format")
+        return v
+
+    @field_validator('infection_rate')
+    def validate_rate(cls, v):
+        if v is not None and (v < 0 or v > 1):
+            raise ValueError("infection_rate must be between 0 and 1")
+        return v
+
+
+class FactDiseaseCaseCreate(BaseModel):
+    """Schema for disease case records."""
+    location_id: int
+    date_id_onset: str
+    date_id_reported: str
+    disease_code: str
+    identification_method_code: str
+    source_code: str
+    case_status: Optional[str] = "suspected"
+    host_type: Optional[str] = "human"
     age_years: Optional[int] = None
     age_group: Optional[str] = None
     sex: Optional[str] = None
@@ -94,53 +193,110 @@ class HostCaseCreate(BaseModel):
         return v
 
 
-# -------------------- VectorObservation --------------------
-class VectorObservationCreate(BaseModel):
-    """Schema for creating vector surveillance records."""
-    location_code: str
-    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
-    vector_species: str
-    vector_subspecies: Optional[str] = None
-    life_stage: Optional[str] = None  # egg, larva, pupa, adult
-    sex: Optional[str] = None          # male, female, mixed
-    collection_method: Optional[str] = None
-    trap_id: Optional[str] = None
-    count: Optional[int] = None
-    density_per_trap: Optional[float] = None
-    tested_for_pathogen: Optional[str] = None
-    infection_status: Optional[str] = None  # positive, negative
-    infection_rate: Optional[float] = None
+class FactInsecticideResistanceCreate(BaseModel):
+    """Schema for insecticide resistance test records."""
+    vector_observation_id: int
+    insecticide_code: str
+    test_type_code: str
+    source_code: str
+    concentration: Optional[float] = None
+    exposure_time: Optional[int] = None
+    mortality: Optional[float] = None
+    resistance_status: Optional[str] = None
 
-    @field_validator('date_id')
-    def validate_date_id(cls, v):
-        try:
-            datetime.strptime(v, '%Y-%m-%d')
-        except ValueError:
-            raise ValueError("date_id must be in YYYY-MM-DD format")
-        return v
-
-    @field_validator('infection_rate')
-    def validate_rate(cls, v):
+    @field_validator('mortality')
+    def validate_mortality(cls, v):
         if v is not None and (v < 0 or v > 1):
-            raise ValueError("infection_rate must be between 0 and 1")
+            raise ValueError("mortality must be between 0 and 1")
         return v
 
 
-# -------------------- EnvironmentalFactor --------------------
-class EnvironmentalFactorCreate(BaseModel):
-    """Schema for creating environmental data records."""
-    location_code: str
-    date_id: str = Field(..., description="Date of observation (YYYY-MM-DD)")
-    temperature_mean: Optional[float] = None
-    temperature_min: Optional[float] = None
-    temperature_max: Optional[float] = None
-    rainfall_total: Optional[float] = None
-    relative_humidity: Optional[float] = None
-    ndvi: Optional[float] = None
-    evi: Optional[float] = None
-    lst_day: Optional[float] = None
-    aridity_index: Optional[float] = None
-    potential_breeding_sites: Optional[int] = None
+class FactBionomicsCreate(BaseModel):
+    """Schema for bionomics records."""
+    vector_observation_id: int
+    source_code: str
+    biting_rate: Optional[float] = None
+    feeding_preference: Optional[str] = None      # anthropophagic, zoophagic, mixed
+    biting_location: Optional[str] = None         # endophagic, exophagic, mixed
+    resting_behavior: Optional[str] = None
+    larval_site_type: Optional[str] = None
+
+
+class FactInterventionCreate(BaseModel):
+    """Schema for intervention records."""
+    location_id: int
+    date_start: date
+    date_end: Optional[date] = None
+    target_disease_code: str
+    source_code: str
+    intervention_type: Optional[str] = None
+    coverage: Optional[float] = None
+
+    @field_validator('coverage')
+    def validate_coverage(cls, v):
+        if v is not None and (v < 0 or v > 100):
+            raise ValueError("coverage should be between 0 and 100 (percentage)")
+        return v
+
+
+class FactSocioeconomicConditionCreate(BaseModel):
+    """Schema for socioeconomic condition records."""
+    location_id: int
+    year: int
+    indicator_code: str
+    source_code: str
+    indicator_value: float
+
+    @field_validator('year')
+    def validate_year(cls, v):
+        if v < 1900 or v > 2100:
+            raise ValueError("year out of reasonable range")
+        return v
+
+
+class FactHealthFacilityCreate(BaseModel):
+    """Schema for health facility records."""
+    facility_code: str
+    location_id: int
+    source_code: str
+    name: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    type: Optional[str] = None
+    catchment_population: Optional[int] = None
+
+    @field_validator('lat')
+    def validate_lat(cls, v):
+        if v is not None and (v < -90 or v > 90):
+            raise ValueError("latitude must be between -90 and 90")
+        return v
+
+    @field_validator('lon')
+    def validate_lon(cls, v):
+        if v is not None and (v < -180 or v > 180):
+            raise ValueError("longitude must be between -180 and 180")
+        return v
+
+
+class FactDiseaseBurdenCreate(BaseModel):
+    """Schema for disease burden estimates."""
+    location_id: int
+    year: int
+    disease_code: str
+    source_code: str
+    incidence_rate: Optional[float] = None
+    prevalence_rate: Optional[float] = None
+    mortality_rate: Optional[float] = None
+    cases_mean: Optional[float] = None
+
+
+class FactEnvironmentalCreate(BaseModel):
+    """Schema for environmental data (long format)."""
+    location_id: int
+    date_id: str
+    variable: str = Field(..., description="e.g., 'temperature_mean', 'rainfall_total'")
+    value: float
+    source_code: str
 
     @field_validator('date_id')
     def validate_date_id(cls, v):
@@ -150,102 +306,113 @@ class EnvironmentalFactorCreate(BaseModel):
             raise ValueError("date_id must be in YYYY-MM-DD format")
         return v
 
-    @field_validator('temperature_mean', 'temperature_min', 'temperature_max')
-    def validate_temperature(cls, v):
-        if v is not None and v < -100:
-            raise ValueError("unrealistically low temperature")
-        return v
-
-    @field_validator('rainfall_total')
-    def validate_rainfall(cls, v):
-        if v is not None and v < 0:
-            raise ValueError("rainfall cannot be negative")
-        return v
-
-    @field_validator('relative_humidity')
-    def validate_humidity(cls, v):
-        if v is not None and (v < 0 or v > 100):
-            raise ValueError("relative humidity must be between 0 and 100")
-        return v
-
-    @field_validator('ndvi', 'evi')
-    def validate_vegetation_indices(cls, v):
-        if v is not None and (v < -1 or v > 1):
-            raise ValueError("NDVI and EVI must be between -1 and 1")
+    @field_validator('variable')
+    def validate_variable(cls, v):
+        allowed = {'temperature_mean', 'temperature_min', 'temperature_max',
+                   'rainfall_total', 'relative_humidity', 'ndvi', 'evi',
+                   'lst_day', 'aridity_index', 'potential_breeding_sites'}
+        if v not in allowed:
+            # Allow any variable but warn? Or just accept.
+            pass
         return v
 
 
-# -------------------- Optional: Response Schemas (if you ever need to return data via API) --------------------
-class LocationResponse(LocationCreate):
-    id: int
-    class Config:
-        from_attributes = True
+# ========================= RESPONSE SCHEMAS =========================
 
-class HostCaseResponse(HostCaseCreate):
-    id: int
-    class Config:
-        from_attributes = True
-
-class VectorObservationResponse(VectorObservationCreate):
-    id: int
-    class Config:
-        from_attributes = True
-
-class EnvironmentalFactorResponse(EnvironmentalFactorCreate):
-    id: int
+class DimTimeResponse(DimTimeCreate):
     class Config:
         from_attributes = True
 
 
-# -------------------- DiseaseBurden --------------------
-class DiseaseBurdenBase(BaseModel):
-    """Base schema for disease burden data."""
-    location_code: str
-    year: int
-    disease: str
-    incidence_rate: Optional[float] = None
-    prevalence_rate: Optional[float] = None
-    mortality_rate: Optional[float] = None
-    cases_lower: Optional[float] = None
-    cases_upper: Optional[float] = None
-    cases_mean: Optional[float] = None
-    source: Optional[str] = None
-    version: Optional[str] = None
-    raster_file: Optional[str] = None
-    extraction_method: Optional[str] = None
-
-
-class DiseaseBurdenCreate(DiseaseBurdenBase):
-    """Schema for creating disease burden records."""
-    pass
-
-
-class DiseaseBurdenUpdate(BaseModel):
-    """Schema for updating disease burden records."""
-    incidence_rate: Optional[float] = None
-    prevalence_rate: Optional[float] = None
-    mortality_rate: Optional[float] = None
-    cases_lower: Optional[float] = None
-    cases_upper: Optional[float] = None
-    cases_mean: Optional[float] = None
-    source: Optional[str] = None
-    version: Optional[str] = None
-    extraction_method: Optional[str] = None
-
-
-class DiseaseBurdenResponse(DiseaseBurdenBase):
-    """Schema for disease burden response."""
-    id: int
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-    
+class DimLocationResponse(DimLocationCreate):
     class Config:
         from_attributes = True
 
 
-class DiseaseBurdenInDB(DiseaseBurdenBase):
-    """Schema for disease burden in database."""
-    id: int
-    
+class DimDiseaseResponse(DimDiseaseCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimVectorResponse(DimVectorCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimInsecticideResponse(DimInsecticideCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimIdentificationMethodResponse(DimIdentificationMethodCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimResistanceTestTypeResponse(DimResistanceTestTypeCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimSocioeconomicIndicatorResponse(DimSocioeconomicIndicatorCreate):
+    class Config:
+        from_attributes = True
+
+
+class DimSourceResponse(DimSourceCreate):
+    class Config:
+        from_attributes = True
+
+
+class FactVectorObservationResponse(FactVectorObservationCreate):
+    observation_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactDiseaseCaseResponse(FactDiseaseCaseCreate):
+    case_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactInsecticideResistanceResponse(FactInsecticideResistanceCreate):
+    resistance_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactBionomicsResponse(FactBionomicsCreate):
+    bionomics_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactInterventionResponse(FactInterventionCreate):
+    intervention_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactSocioeconomicConditionResponse(FactSocioeconomicConditionCreate):
+    socio_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactHealthFacilityResponse(FactHealthFacilityCreate):
+    facility_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactDiseaseBurdenResponse(FactDiseaseBurdenCreate):
+    burden_id: int
+    class Config:
+        from_attributes = True
+
+
+class FactEnvironmentalResponse(FactEnvironmentalCreate):
+    fact_env_id: int
     class Config:
         from_attributes = True

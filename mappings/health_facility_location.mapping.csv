@@ -1,0 +1,24 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+
+county,dim_location,name,none,,False,,,
+,dim_location,location_code,concat,"{""columns"": [""county"", ""latitude"", ""longitude""], ""separator"": ""/""}",False,,unknown,
+,dim_location,country_name,none,,False,Kenya,Kenya,
+,dim_location,country_code,none,,False,KE,KE,
+,dim_location,centroid_lat,none,,False,0.0,0.0,
+,dim_location,centroid_lon,none,,False,0.0,0.0,
+
+,dim_source,source_code,none,,False,KMOH,KMOH,
+,dim_source,source_name,none,,False,Kenya Ministry of Health,Kenya Ministry of Health,
+,dim_source,source_description,none,,False,Kenya health facilities registry,Kenya Ministry of Health,
+,dim_source,source_standard,none,,False,Ministry of Health Kenya,Ministry of Health Kenya,
+,dim_source,source_url,none,,False,https://www.health.go.ke,https://www.health.go.ke,
+,dim_source,version,none,,False,2024,2024,
+
+name_title,fact_health_facility,name,cast,"{""type"": ""str""}",False,,,
+facility_type,fact_health_facility,type,cast,"{""type"": ""str""}",False,health_facility,health_facility,
+keph_level,fact_health_facility,type,concat,"{""columns"": [""facility_type"", ""keph_level""], ""separator"": "" - ""}",False,,,
+latitude,fact_health_facility,lat,cast,"{""type"": ""float""}",False,,,
+longitude,fact_health_facility,lon,cast,"{""type"": ""float""}",False,,,
+,fact_health_facility,location_id,map,"{""ref"": ""dim_location.location_code"", ""columns"": [""county"", ""latitude"", ""longitude""], ""separator"": ""/""}",False,unknown,,
+,fact_health_facility,facility_code,concat,"{""columns"": [""county"", ""name_title""], ""separator"": ""/""}",False,,,
+,fact_health_facility,source_code,none,,False,KMOH,KMOH,
