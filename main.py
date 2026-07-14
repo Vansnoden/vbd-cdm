@@ -12,6 +12,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
+from sqlalchemy import text
 
 import pandas as pd
 from dotenv import load_dotenv
