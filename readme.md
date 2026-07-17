@@ -3,17 +3,17 @@
 
 ## How to run
 
-# Full pipeline
+### Full pipeline
 ```python main.py```
 
-# Skip ingestion, only regenerate summary
+### Skip ingestion, only regenerate summary
 ```python main.py --skip-ingest```
 
-# Run only one source
+### Run only one source
 ```python main.py --source "climate_timeseries"```
 
-# Skip analysis
+### Skip analysis
 ```python main.py --skip-analysis```
 
-# Update documenation
+### Update documenation
 ```sphinx-build -b html docs _build/html```
