@@ -17,8 +17,7 @@ from sqlalchemy import text
 import pandas as pd
 from dotenv import load_dotenv
 
-from utilities.consolidation import DataConsolidator, run_consolidation
-from database.geoutils import enrich_location_dataframe
+from utilities.consolidation import DataConsolidator, run_consolidation, enrich_location_dataframe
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.absolute()

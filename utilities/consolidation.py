@@ -10,11 +10,12 @@ It handles:
 - Duplicate detection, resolution, and fact-table aggregation
 - Expanding yearly burden data to daily records
 - Computing resistance status from mortality data
+- ISO country code standardization with multiple geocoding fallback methods
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 import logging
@@ -22,6 +23,7 @@ from functools import lru_cache
 import re
 from math import radians, sin, cos, sqrt, asin
 from datetime import datetime, timedelta
+import warnings
 
 from database.session import SessionLocal
 from database.models import DimLocation, DimVector, DimInsecticide, DimDisease, DimSource, DimTime
@@ -30,6 +32,299 @@ from database.constants import COUNTRY_LOOKUP
 logger = logging.getLogger(__name__)
 
 
+# ========================= ISO COUNTRY CODE MAPPINGS =========================
+
+# ISO 3166-1 alpha-2 to alpha-3 mapping
+ISO_COUNTRY_CODES = {
+    'KE': 'KEN', 'GH': 'GHA', 'NG': 'NGA', 'ZA': 'ZAF', 'TZ': 'TZA',
+    'UG': 'UGA', 'ET': 'ETH', 'DZ': 'DZA', 'AO': 'AGO', 'BJ': 'BEN',
+    'BW': 'BWA', 'BF': 'BFA', 'BI': 'BDI', 'CV': 'CPV', 'CM': 'CMR',
+    'CF': 'CAF', 'TD': 'TCD', 'KM': 'COM', 'CG': 'COG', 'CI': 'CIV',
+    'DJ': 'DJI', 'EG': 'EGY', 'GQ': 'GNQ', 'ER': 'ERI', 'SZ': 'SWZ',
+    'GA': 'GAB', 'GM': 'GMB', 'GN': 'GIN', 'GW': 'GNB', 'LS': 'LSO',
+    'LR': 'LBR', 'LY': 'LBY', 'MG': 'MDG', 'MW': 'MWI', 'ML': 'MLI',
+    'MR': 'MRT', 'MU': 'MUS', 'MA': 'MAR', 'MZ': 'MOZ', 'NA': 'NAM',
+    'NE': 'NER', 'RW': 'RWA', 'ST': 'STP', 'SN': 'SEN', 'SC': 'SYC',
+    'SL': 'SLE', 'SO': 'SOM', 'SS': 'SSD', 'SD': 'SDN', 'TG': 'TGO',
+    'TN': 'TUN', 'ZM': 'ZMB', 'ZW': 'ZWE'
+}
+
+# Country names to ISO codes mapping
+COUNTRY_NAME_TO_ISO = {
+    'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 'South Africa': 'ZA',
+    'Tanzania': 'TZ', 'Uganda': 'UG', 'Ethiopia': 'ET', 'Algeria': 'DZ',
+    'Angola': 'AO', 'Benin': 'BJ', 'Botswana': 'BW', 'Burkina Faso': 'BF',
+    'Burundi': 'BI', 'Cabo Verde': 'CV', 'Cameroon': 'CM', 
+    'Central African Republic': 'CF', 'Chad': 'TD', 'Comoros': 'KM',
+    'Congo': 'CG', "Côte d'Ivoire": 'CI', 'Djibouti': 'DJ', 'Egypt': 'EG',
+    'Equatorial Guinea': 'GQ', 'Eritrea': 'ER', 'Eswatini': 'SZ',
+    'Gabon': 'GA', 'Gambia': 'GM', 'Guinea': 'GN', 'Guinea-Bissau': 'GW',
+    'Lesotho': 'LS', 'Liberia': 'LR', 'Libya': 'LY', 'Madagascar': 'MG',
+    'Malawi': 'MW', 'Mali': 'ML', 'Mauritania': 'MR', 'Mauritius': 'MU',
+    'Morocco': 'MA', 'Mozambique': 'MZ', 'Namibia': 'NA', 'Niger': 'NE',
+    'Rwanda': 'RW', 'São Tomé and Príncipe': 'ST', 'Senegal': 'SN',
+    'Seychelles': 'SC', 'Sierra Leone': 'SL', 'Somalia': 'SO',
+    'South Sudan': 'SS', 'Sudan': 'SD', 'Togo': 'TG', 'Tunisia': 'TN',
+    'Zambia': 'ZM', 'Zimbabwe': 'ZW'
+}
+
+# ISO code to country name mapping
+ISO_TO_COUNTRY_NAME = {v: k for k, v in COUNTRY_NAME_TO_ISO.items()}
+
+# Country aliases for normalization
+COUNTRY_ALIASES = {
+    'USA': 'US', 'U.S.A.': 'US', 'United States': 'US', 'United States of America': 'US',
+    'UK': 'GB', 'U.K.': 'GB', 'United Kingdom': 'GB', 'Great Britain': 'GB',
+    'UAE': 'AE', 'U.A.E.': 'AE', 'United Arab Emirates': 'AE',
+    'RSA': 'ZA', 'S.A.': 'ZA',
+    'Tanzania, United Republic of': 'TZ',
+    'Congo, Democratic Republic of': 'CD', 'DRC': 'CD', 'D.R.C.': 'CD',
+    'Congo, Republic of': 'CG',
+    'Swaziland': 'SZ',
+    'Ivory Coast': 'CI',
+    'Czechia': 'CZ', 'Czech Republic': 'CZ',
+    'South Korea': 'KR', 'Korea': 'KR',
+    'North Korea': 'KP', 'DPRK': 'KP',
+}
+
+
+def get_iso_country_code(country: Union[str, None]) -> Optional[str]:
+    """
+    Get ISO alpha-2 country code from a country name or code.
+    
+    Args:
+        country: Country name or code (e.g., 'Kenya', 'KE', 'KEN')
+        
+    Returns:
+        ISO alpha-2 code or None if not found
+    """
+    if not country:
+        return None
+    
+    country = str(country).strip()
+    country_upper = country.upper()
+    
+    # Check aliases first
+    if country_upper in COUNTRY_ALIASES:
+        return COUNTRY_ALIASES[country_upper]
+    
+    # If it's already a valid ISO code (alpha-2)
+    if country_upper in ISO_COUNTRY_CODES:
+        return country_upper
+    
+    # If it's an alpha-3 code, find alpha-2
+    if country_upper in ISO_COUNTRY_CODES.values():
+        for iso2, iso3 in ISO_COUNTRY_CODES.items():
+            if iso3 == country_upper:
+                return iso2
+    
+    # Try exact match by name
+    if country in COUNTRY_NAME_TO_ISO:
+        return COUNTRY_NAME_TO_ISO[country]
+    
+    # Try case-insensitive match by name
+    for name, code in COUNTRY_NAME_TO_ISO.items():
+        if country.lower() == name.lower():
+            return code
+    
+    # Try partial match
+    for name, code in COUNTRY_NAME_TO_ISO.items():
+        if country.lower() in name.lower() or name.lower() in country.lower():
+            return code
+    
+    return None
+
+
+def get_country_name(code: Union[str, None]) -> Optional[str]:
+    """
+    Get country name from ISO alpha-2 code.
+    
+    Args:
+        code: ISO alpha-2 country code
+        
+    Returns:
+        Country name or None if not found
+    """
+    if not code:
+        return None
+    
+    code = code.upper()
+    return ISO_TO_COUNTRY_NAME.get(code)
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculate the great circle distance between two points in kilometers.
+    
+    Args:
+        lat1, lon1: First point in decimal degrees
+        lat2, lon2: Second point in decimal degrees
+        
+    Returns:
+        Distance in kilometers
+    """
+    R = 6371  # Earth's radius in kilometers
+    
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    
+    return R * c
+
+
+@lru_cache(maxsize=10000)
+def get_country_from_coords(lat: float, lon: float, max_distance_km: float = 200.0) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get ISO country name and code from latitude and longitude coordinates.
+    
+    Uses multiple methods in order of reliability:
+    1. reverse_geocode library (requires internet)
+    2. Nearest coordinate in COUNTRY_LOOKUP
+    3. Bounding box estimation for fallback
+    
+    Args:
+        lat: Latitude in decimal degrees
+        lon: Longitude in decimal degrees
+        max_distance_km: Maximum distance in kilometers to consider a match
+        
+    Returns:
+        Tuple of (country_name, country_code) or (None, None) if not found
+    """
+    if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+        return None, None
+    
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        logger.warning(f"Invalid coordinates: ({lat}, {lon})")
+        return None, None
+    
+    # Method 1: Try reverse_geocode first (most accurate)
+    try:
+        import reverse_geocode as rg
+        result = rg.search([(lat, lon)])
+        if result and len(result) > 0:
+            country_name = result[0].get('country')
+            country_code_raw = result[0].get('country_code')
+            
+            if country_code_raw:
+                country_code = country_code_raw.upper()
+                # Ensure we have a valid alpha-2 code
+                if len(country_code) == 3:
+                    for iso2, iso3 in ISO_COUNTRY_CODES.items():
+                        if iso3 == country_code:
+                            country_code = iso2
+                            break
+                elif len(country_code) != 2:
+                    country_code = None
+                
+                if country_code and country_code in ISO_COUNTRY_CODES:
+                    correct_name = ISO_TO_COUNTRY_NAME.get(country_code, country_name)
+                    return correct_name, country_code
+    except ImportError:
+        logger.debug("reverse_geocode not installed, using fallback methods")
+    except Exception as e:
+        logger.debug(f"Reverse geocode failed for ({lat}, {lon}): {e}")
+    
+    # Method 2: Nearest known coordinate lookup
+    country_name, country_code = _get_country_from_nearest(lat, lon, max_distance_km)
+    if country_code:
+        return country_name, country_code
+    
+    # Method 3: Bounding box fallback for known regions
+    country_name, country_code = _get_country_from_bounding_box(lat, lon)
+    if country_code:
+        return country_name, country_code
+    
+    logger.debug(f"No country found for coordinates ({lat}, {lon})")
+    return None, None
+
+
+def _get_country_from_nearest(lat: float, lon: float, max_distance_km: float = 200.0) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Find nearest country using the COUNTRY_LOOKUP table with Haversine distance.
+    
+    Args:
+        lat: Latitude in decimal degrees
+        lon: Longitude in decimal degrees
+        max_distance_km: Maximum distance in kilometers to consider a match
+        
+    Returns:
+        Tuple of (country_name, country_code) or (None, None) if not found
+    """
+    if not COUNTRY_LOOKUP:
+        return None, None
+    
+    min_dist = float('inf')
+    best_match = None
+    
+    for (ref_lat, ref_lon), country_info in COUNTRY_LOOKUP.items():
+        try:
+            dist = haversine_distance(lat, lon, ref_lat, ref_lon)
+            if dist < min_dist and dist < max_distance_km:
+                min_dist = dist
+                best_match = country_info
+        except Exception as e:
+            logger.debug(f"Error calculating distance for ({lat}, {lon}) to ({ref_lat}, {ref_lon}): {e}")
+            continue
+    
+    if best_match:
+        country_name, country_code_raw = best_match
+        country_code = country_code_raw.upper()
+        if country_code in ISO_COUNTRY_CODES:
+            return country_name, country_code
+        # Try to get ISO code from name
+        iso_code = get_iso_country_code(country_name)
+        if iso_code:
+            return country_name, iso_code
+    
+    return None, None
+
+
+def _get_country_from_bounding_box(lat: float, lon: float) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fallback: Use simple bounding box for African countries.
+    """
+    # African continent bounding box (rough)
+    if -35 <= lat <= 37 and -20 <= lon <= 55:
+        # More specific checks for large countries
+        if 4 <= lat <= 14 and 0 <= lon <= 15:  # West Africa
+            return "Nigeria", "NG"
+        elif 4 <= lat <= 12 and 34 <= lon <= 42:  # East Africa
+            return "Kenya", "KE"
+        elif -12 <= lat <= -4 and 28 <= lon <= 36:  # Southern Africa
+            return "Zambia", "ZM"
+        elif 24 <= lat <= 33 and 25 <= lon <= 35:  # North Africa
+            return "Egypt", "EG"
+        elif -27 <= lat <= -22 and 15 <= lon <= 30:  # South Africa
+            return "South Africa", "ZA"
+        elif 8 <= lat <= 12 and -2 <= lon <= 6:  # Ghana
+            return "Ghana", "GH"
+        elif -6 <= lat <= -1 and 29 <= lon <= 34:  # Tanzania
+            return "Tanzania", "TZ"
+        elif 0 <= lat <= 4 and 32 <= lon <= 35:  # Uganda
+            return "Uganda", "UG"
+        elif 4 <= lat <= 15 and 35 <= lon <= 48:  # Ethiopia
+            return "Ethiopia", "ET"
+        elif 0 <= lat <= 6 and 8 <= lon <= 12:  # Cameroon
+            return "Cameroon", "CM"
+        elif 24 <= lat <= 37 and -10 <= lon <= -1:  # Morocco
+            return "Morocco", "MA"
+        elif 11 <= lat <= 20 and -17 <= lon <= -13:  # Senegal
+            return "Senegal", "SN"
+        elif 4 <= lat <= 10 and 38 <= lon <= 48:  # Somalia
+            return "Somalia", "SO"
+        elif 8 <= lat <= 22 and 0 <= lon <= 10:  # Togo/Benin/Burkina
+            return "Burkina Faso", "BF"
+        elif 15 <= lat <= 23 and 1 <= lon <= 11:  # Mali/Niger
+            return "Mali", "ML"
+    
+    return None, None
+
+
+# ========================= DATA CONSOLIDATOR CLASS =========================
+
 class DataConsolidator:
     """
     Consolidates and standardizes data in the CDM.
@@ -37,7 +332,7 @@ class DataConsolidator:
     This class handles:
     1. Location deduplication and standardization
     2. Coordinate clustering to identify nearby locations
-    3. Country code assignment using COUNTRY_LOOKUP
+    3. Country code assignment using ISO standards
     4. Vocabulary alignment
     5. Duplicate detection, resolution, and fact-table aggregation
     6. Expanding yearly burden data to daily records
@@ -113,27 +408,47 @@ class DataConsolidator:
     def _bind_climate_coordinates_to_region(self, study_region: str = "Kenya"):
         """
         Snaps unmapped coordinate strings (like '0.231/34.291') inside the database
-        to standard region names (such as 'Siaya County (Climate Grid)') and populates
-        their country fields so that query filters capture them.
+        to standard region names and populates their country fields.
         """
         logger.info("Aligning raw coordinate points with administrative study region...")
         
-        # 1. Standardize country code/name on all records missing country data
-        self.session.execute(text("""
-            UPDATE dim_location
-            SET country_name = :region,
-                country_code = 'KE'
-            WHERE country_name IS NULL OR country_name = '' OR country_name = 'None'
-        """), {"region": study_region})
+        # Get ISO code for the study region
+        region_code = get_iso_country_code(study_region)
+        if not region_code:
+            region_code = 'KE'  # Default to Kenya
+            logger.warning(f"Could not get ISO code for '{study_region}', using '{region_code}'")
         
-        # 2. Map coordinates within Siaya geographical boundaries to 'Siaya County (Climate Grid)'
-        self.session.execute(text("""
+        region_name = get_country_name(region_code) or study_region
+        
+        # 1. Standardize country code/name on all records missing country data
+        result = self.session.execute(text("""
             UPDATE dim_location
-            SET name = 'Siaya County (Climate Grid)'
-            WHERE (name LIKE '%/%' OR name IS NULL OR name = '')
-              AND (centroid_lat BETWEEN -0.5 AND 0.5)
-              AND (centroid_lon BETWEEN 34.0 AND 34.7)
-        """))
+            SET country_name = :region_name,
+                country_code = :region_code
+            WHERE country_name IS NULL 
+               OR country_name = '' 
+               OR country_name = 'None'
+               OR country_name = 'UNKNOWN'
+               OR country_code IS NULL 
+               OR country_code = '' 
+               OR country_code = 'UNKNOWN'
+        """), {"region_name": region_name, "region_code": region_code})
+        
+        logger.info(f"  Updated {result.rowcount} locations with missing country data")
+        
+        # 2. Map coordinates within region boundaries (specific to Kenya/Siaya)
+        if region_code == 'KE':
+            result = self.session.execute(text("""
+                UPDATE dim_location
+                SET name = 'Siaya County (Climate Grid)',
+                    country_name = :region_name,
+                    country_code = :region_code
+                WHERE (name LIKE '%/%' OR name IS NULL OR name = '' OR name = 'Siaya')
+                  AND (centroid_lat BETWEEN -0.5 AND 0.5)
+                  AND (centroid_lon BETWEEN 34.0 AND 34.7)
+            """), {"region_name": region_name, "region_code": region_code})
+            logger.info(f"  Mapped {result.rowcount} climate grid coordinates to Siaya County")
+        
         self.session.commit()
 
     def _compute_resistance_status(self):
@@ -662,59 +977,166 @@ class DataConsolidator:
         self.session.commit()
         logger.info(f"Expanded {inserted_count} daily records, skipped {skipped_count}, errors: {error_count}")
 
-    def consolidate_all(self, study_region: str = "Kenya") -> Dict[str, Any]:
+    # ========================= COUNTRY CODE STANDARDIZATION =========================
+    
+    def _standardize_country_codes(self, dry_run: bool = False) -> Dict[str, Any]:
         """
-        Run all consolidation steps.
+        Standardize all country codes in dim_location to ISO alpha-2 format.
         
+        This method:
+        1. Fixes missing country codes using coordinates
+        2. Normalizes existing country codes to ISO standard
+        3. Standardizes country names to match ISO codes
+        
+        Args:
+            dry_run: If True, only report what would be changed
+            
         Returns:
-            Dictionary with consolidation results
+            Dictionary with standardization results
         """
         logger.info("=" * 60)
-        logger.info("STARTING DATA CONSOLIDATION")
+        logger.info("STANDARDIZING COUNTRY CODES TO ISO FORMAT")
         logger.info("=" * 60)
-        
-        # Step 0: Ensure raw coordinate bindings are set before clustering
-        self._bind_climate_coordinates_to_region(study_region=study_region)
-        
-        # Step 0.5: Expand burden data to daily records
-        self._expand_burden_to_daily()
-        
-        # Step 0.6: Compute resistance status from mortality data
-        self._compute_resistance_status()
-        
-        # Step 1: Consolidate locations
-        loc_results = self.consolidate_locations()
-        
-        # Step 2: Consolidate vocabulary
-        vocab_results = self.consolidate_vocabulary()
-        
-        # Step 3: Detect duplicates
-        dup_results = self.detect_duplicates()
-        
-        # Step 4: Resolve residual fact table duplicates
-        self.resolve_fact_table_duplicates()
         
         results = {
-            'locations': loc_results,
-            'vocabulary': vocab_results,
-            'duplicates': dup_results
+            'total_locations': 0,
+            'fixed_missing': 0,
+            'normalized_codes': 0,
+            'standardized_names': 0,
+            'unresolved': 0,
+            'changes': []
         }
         
-        logger.info("=" * 60)
-        logger.info("CONSOLIDATION COMPLETE")
-        logger.info("=" * 60)
+        locations = self.session.query(DimLocation).all()
+        results['total_locations'] = len(locations)
+        
+        if not locations:
+            logger.info("No locations found in database")
+            return results
+        
+        code_changes = {}
+        name_changes = {}
+        
+        for loc in locations:
+            changes = {'location_id': loc.location_id, 'name': loc.name}
+            needs_update = False
+            
+            # 1. Handle missing or invalid country codes
+            current_code = loc.country_code.strip().upper() if loc.country_code else ''
+            is_missing = not current_code or current_code in ['UNKNOWN', 'N/A', 'NULL', 'NONE', '']
+            
+            if is_missing:
+                if loc.centroid_lat and loc.centroid_lon:
+                    country_name, country_code = get_country_from_coords(
+                        loc.centroid_lat, 
+                        loc.centroid_lon
+                    )
+                    if country_code:
+                        if not dry_run:
+                            loc.country_code = country_code
+                            loc.country_name = country_name
+                        changes['new_country_code'] = country_code
+                        changes['new_country_name'] = country_name
+                        results['fixed_missing'] += 1
+                        needs_update = True
+                    else:
+                        results['unresolved'] += 1
+                        changes['status'] = 'unresolved - no country found'
+                else:
+                    results['unresolved'] += 1
+                    changes['status'] = 'unresolved - no coordinates'
+            
+            # 2. Normalize existing codes to ISO format
+            elif current_code:
+                normalized_code = get_iso_country_code(current_code)
+                
+                if normalized_code and normalized_code != current_code:
+                    if not dry_run:
+                        loc.country_code = normalized_code
+                    changes['old_code'] = current_code
+                    changes['new_code'] = normalized_code
+                    results['normalized_codes'] += 1
+                    needs_update = True
+                    code_changes[current_code] = normalized_code
+                elif current_code not in ISO_COUNTRY_CODES:
+                    # Code exists but is not a valid ISO code
+                    normalized_code = get_iso_country_code(loc.country_name)
+                    if normalized_code:
+                        if not dry_run:
+                            loc.country_code = normalized_code
+                        changes['old_code'] = current_code
+                        changes['new_code'] = normalized_code
+                        results['normalized_codes'] += 1
+                        needs_update = True
+                        code_changes[current_code] = normalized_code
+            
+            # 3. Standardize country name to match ISO code
+            if loc.country_code and loc.country_code in ISO_COUNTRY_CODES:
+                correct_name = ISO_TO_COUNTRY_NAME.get(loc.country_code)
+                if correct_name:
+                    current_name = loc.country_name.strip() if loc.country_name else ''
+                    if current_name != correct_name:
+                        if not dry_run:
+                            loc.country_name = correct_name
+                        changes['old_name'] = current_name or 'None'
+                        changes['new_name'] = correct_name
+                        results['standardized_names'] += 1
+                        needs_update = True
+                        if current_name:
+                            name_changes[current_name] = correct_name
+            
+            if needs_update and not dry_run:
+                self.session.add(loc)
+            
+            if changes:
+                results['changes'].append(changes)
+        
+        if not dry_run:
+            self.session.commit()
+            logger.info("Country code standardization complete")
+        else:
+            logger.info(f"DRY RUN: Would standardize {len(results['changes'])} locations")
+        
+        # Log summary
+        logger.info("-" * 40)
+        logger.info(f"  Total locations: {results['total_locations']}")
+        logger.info(f"  Fixed missing codes: {results['fixed_missing']}")
+        logger.info(f"  Normalized codes: {results['normalized_codes']}")
+        logger.info(f"  Standardized names: {results['standardized_names']}")
+        logger.info(f"  Unresolved: {results['unresolved']}")
+        
+        if code_changes:
+            logger.info(f"  Code changes: {code_changes}")
+        if name_changes:
+            logger.info(f"  Name changes: {name_changes}")
         
         return results
+
+    # ========================= LOCATION CONSOLIDATION =========================
     
     def consolidate_locations(self, 
-                             distance_threshold_km: float = 1.0,
+                             distance_threshold_km: float = 5.0,
                              min_samples: int = 1,
                              dry_run: bool = False) -> Dict[str, Any]:
         """
-        Consolidate location data by clustering nearby coordinates.
-        """
-        logger.info("Consolidating location data...")
+        Consolidate location data with enhanced country code standardization.
         
+        Args:
+            distance_threshold_km: Maximum distance in km for clustering
+            min_samples: Minimum samples for DBSCAN cluster
+            dry_run: If True, only report what would be changed
+        """
+        logger.info("=" * 60)
+        logger.info("CONSOLIDATING LOCATIONS")
+        logger.info("=" * 60)
+        
+        # STEP 1: Standardize country codes first
+        code_results = self._standardize_country_codes(dry_run=dry_run)
+        
+        # STEP 2: Bind climate coordinates to regions
+        self._bind_climate_coordinates_to_region()
+        
+        # STEP 3: Get all locations
         locations = self.session.query(DimLocation).all()
         
         if not locations:
@@ -723,6 +1145,7 @@ class DataConsolidator:
         
         logger.info(f"Found {len(locations)} locations in database")
         
+        # STEP 4: Create DataFrame for processing
         loc_data = pd.DataFrame([{
             'location_id': loc.location_id,
             'name': loc.name,
@@ -734,137 +1157,106 @@ class DataConsolidator:
             'admin_level': getattr(loc, 'admin_level', None)
         } for loc in locations])
         
-        country_fix_results = self._fix_country_codes_for_locations(loc_data, dry_run)
+        # STEP 5: Normalize names
         loc_data['name_normalized'] = loc_data['name'].apply(self._normalize_location_name)
         
+        # STEP 6: Separate locations with and without coordinates
         has_coords = loc_data['centroid_lat'].notna() & loc_data['centroid_lon'].notna()
         loc_with_coords = loc_data[has_coords].copy()
         loc_no_coords = loc_data[~has_coords].copy()
         
         logger.info(f"Locations with coordinates: {len(loc_with_coords)}, without: {len(loc_no_coords)}")
         
-        if loc_with_coords.empty:
-            logger.warning("No locations with coordinates found")
-            return {'status': 'no_coords', 'message': 'No locations with coordinates'}
+        # STEP 7: Merge by name (same name, same country)
+        name_results = self._merge_by_name(loc_data, dry_run)
         
-        name_merge_results = self._merge_by_name(loc_data, dry_run)
+        # STEP 8: Cluster by proximity (only within same country if possible)
+        cluster_results = {}
+        if not loc_with_coords.empty:
+            clusters = self._cluster_locations_by_country_and_proximity(
+                loc_with_coords, 
+                distance_threshold_km, 
+                min_samples
+            )
+            cluster_results = self._merge_location_clusters(loc_with_coords, clusters, dry_run)
         
-        clusters = self._cluster_locations_by_proximity(
-            loc_with_coords, 
-            distance_threshold_km, 
-            min_samples
-        )
-        
-        cluster_results = self._merge_location_clusters(loc_with_coords, clusters, dry_run)
+        # STEP 9: Fix any remaining missing country codes
+        final_fix = self.fix_location_country_codes()
         
         results = {
+            'code_standardization': code_results,
             'original_count': len(loc_data),
-            'country_fixes': country_fix_results,
-            'name_duplicate_groups': name_merge_results,
+            'name_duplicate_groups': name_results,
             'cluster_results': cluster_results,
-            'locations_without_coords': len(loc_no_coords)
+            'locations_without_coords': len(loc_no_coords),
+            'final_country_fixes': final_fix
         }
         
         if not dry_run:
             self.session.commit()
         
         logger.info(f"Location consolidation complete: {results['original_count']} original locations")
-        logger.info(f"  Country fixes: {country_fix_results.get('fixed', 0)}")
-        logger.info(f"  Name duplicate groups: {len(name_merge_results)}")
-        logger.info(f"  Clusters merged: {cluster_results.get('merged_count', 0)}")
+        logger.info(f"  Name duplicate groups merged: {len(name_results)}")
+        if isinstance(cluster_results, dict):
+            logger.info(f"  Clusters merged: {cluster_results.get('merged_count', 0)}")
+        logger.info(f"  Final country fixes: {final_fix}")
         
         return results
-    
-    def _fix_country_codes_for_locations(self, loc_data: pd.DataFrame, dry_run: bool = False) -> Dict[str, Any]:
-        """Fix country codes for locations using the COUNTRY_LOOKUP."""
-        logger.info("Fixing country codes using COUNTRY_LOOKUP...")
-        
-        results = {
-            'fixed': 0,
-            'already_had_country': 0,
-            'no_coords': 0,
-            'not_found': 0,
-            'details': []
-        }
-        
-        for idx, row in loc_data.iterrows():
-            if row['country_code'] and row['country_code'] != '':
-                results['already_had_country'] += 1
-                continue
-            
-            if pd.isna(row['centroid_lat']) or pd.isna(row['centroid_lon']):
-                results['no_coords'] += 1
-                continue
-            
-            country_name, country_code = self._find_nearest_country(
-                row['centroid_lat'], 
-                row['centroid_lon']
-            )
-            
-            if country_code:
-                if not dry_run:
-                    loc = self.session.query(DimLocation).filter_by(
-                        location_id=row['location_id']
-                    ).first()
-                    
-                    if loc:
-                        loc.country_code = country_code
-                        loc.country_name = country_name
-                        self.session.add(loc)
-                
-                results['fixed'] += 1
-                results['details'].append({
-                    'location_id': row['location_id'],
-                    'name': row['name'],
-                    'lat': row['centroid_lat'],
-                    'lon': row['centroid_lon'],
-                    'country_code': country_code,
-                    'country_name': country_name
-                })
-                logger.info(f"  Assigned {country_code} to '{row['name']}' ({row['location_id']})")
-            else:
-                results['not_found'] += 1
-                logger.warning(f"  No country found for '{row['name']}' at ({row['centroid_lat']}, {row['centroid_lon']})")
-        
-        if not dry_run:
-            self.session.commit()
-        
-        return results
-    
+
     def _normalize_location_name(self, name: str) -> str:
         """Normalize a location name for comparison."""
         if not name or not isinstance(name, str):
             return ""
         
         name = name.lower()
-        suffixes = [' county', ' district', ' region', ' province', ' state', ' municipality', ' city']
+        # Remove common suffixes
+        suffixes = [' county', ' district', ' region', ' province', ' state', ' municipality', ' city', ' town']
         for suffix in suffixes:
             if name.endswith(suffix):
                 name = name[:-len(suffix)]
         
-        prefixes = ['county of ', 'district of ', 'region of ']
+        # Remove common prefixes
+        prefixes = ['county of ', 'district of ', 'region of ', 'state of ']
         for prefix in prefixes:
             if name.startswith(prefix):
                 name = name[len(prefix):]
         
+        # Remove parenthetical content
+        name = re.sub(r'\([^)]*\)', '', name)
+        
+        # Remove extra punctuation and spaces
         name = re.sub(r'[^\w\s]', '', name)
         name = re.sub(r'\s+', ' ', name).strip()
         
         return name
-    
+
     def _merge_by_name(self, loc_data: pd.DataFrame, dry_run: bool = False) -> List[Dict[str, Any]]:
-        """Merge locations that have the same normalized name."""
+        """
+        Merge locations that have the same normalized name AND same country code.
+        """
+        logger.info("Merging duplicate locations by name and country...")
+        
         results = []
         
-        for name, group in loc_data.groupby('name_normalized'):
+        # Group by normalized name and country code
+        group_cols = ['name_normalized']
+        if 'country_code' in loc_data.columns:
+            group_cols.append('country_code')
+        
+        for (name, country_code), group in loc_data.groupby(group_cols):
             if len(group) <= 1:
                 continue
             
+            # Prefer locations with country code and coordinates
             group['has_country'] = group['country_code'].notna()
             group['has_coords'] = group['centroid_lat'].notna() & group['centroid_lon'].notna()
+            group['has_admin'] = group['admin_level'].notna()
+            
+            # Sort by data quality
             group_sorted = group.sort_values(
-                by=['has_country', 'has_coords', 'location_id'],
-                ascending=[False, False, True]
+                by=['has_country', 'has_coords', 'has_admin', 'name'],
+                ascending=[False, False, False, True],
+                na_position='last'
             )
             
             canonical = group_sorted.iloc[0]
@@ -880,19 +1272,32 @@ class DataConsolidator:
                             {"src_id": source_id}
                         )
                 
+                # Update canonical location with best available data
                 loc = self.session.query(DimLocation).filter_by(location_id=canonical_id).first()
                 if loc:
+                    # Use best available country code
                     if not loc.country_code and canonical['country_code']:
                         loc.country_code = canonical['country_code']
                         loc.country_name = canonical['country_name']
+                    
+                    # Use best available coordinates
                     if not loc.centroid_lat and canonical['centroid_lat']:
                         loc.centroid_lat = canonical['centroid_lat']
                         loc.centroid_lon = canonical['centroid_lon']
+                    
+                    # Use most descriptive name
+                    if len(str(loc.name)) < len(str(canonical['name'])):
+                        loc.name = canonical['name']
+                    
+                    if hasattr(loc, 'admin_level'):
+                        loc.admin_level = canonical.get('admin_level') or loc.admin_level
+                    
                     self.session.add(loc)
                 self.session.commit()
             
             results.append({
                 'name': name,
+                'country_code': country_code,
                 'canonical_id': canonical_id,
                 'canonical_name': canonical['name'],
                 'merged_ids': [int(row['location_id']) for _, row in group_sorted.iterrows() 
@@ -900,43 +1305,50 @@ class DataConsolidator:
                 'count': len(group)
             })
             
-            logger.info(f"Name merge: '{name}' -> canonical ID {canonical_id} merging {len(group)-1} duplicates")
+            logger.info(f"Name merge: '{name}' ({country_code}) -> canonical ID {canonical_id} merging {len(group)-1} duplicates")
         
         return results
-    
-    def _cluster_locations_by_proximity(self, 
-                                       loc_df: pd.DataFrame,
-                                       eps_km: float,
-                                       min_samples: int) -> pd.Series:
-        """Cluster locations using DBSCAN with geodesic distance."""
-        from sklearn.cluster import DBSCAN
-        from geopy.distance import geodesic
+
+    def _cluster_locations_by_country_and_proximity(self, 
+                                                   loc_df: pd.DataFrame,
+                                                   eps_km: float,
+                                                   min_samples: int) -> pd.Series:
+        """
+        Cluster locations by proximity, ensuring clusters are within the same country.
+        """
+        try:
+            from sklearn.cluster import DBSCAN
+            from geopy.distance import geodesic
+        except ImportError:
+            logger.warning("sklearn or geopy not installed. Falling back to simple clustering.")
+            return pd.Series([-1] * len(loc_df), index=loc_df.index)
         
-        coords_data = loc_df[['centroid_lat', 'centroid_lon']].values
-        coords = np.array(coords_data, dtype=np.float64)
+        if loc_df.empty:
+            return pd.Series([-1] * len(loc_df), index=loc_df.index)
         
-        if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
-            valid_mask = ~(np.isnan(coords).any(axis=1) | np.isinf(coords).any(axis=1))
-            if not valid_mask.any():
-                logger.warning("No valid coordinates for clustering")
-                return pd.Series([-1] * len(loc_df), index=loc_df.index)
+        # Group by country to avoid cross-border clustering
+        final_clusters = pd.Series([-1] * len(loc_df), index=loc_df.index)
+        cluster_counter = 0
+        
+        for country, group in loc_df.groupby('country_code'):
+            if len(group) < min_samples:
+                continue
             
-            valid_coords = coords[valid_mask]
-            valid_indices = loc_df.index[valid_mask]
-            coords_rad = np.radians(valid_coords)
+            coords = group[['centroid_lat', 'centroid_lon']].values
             
-            def geodesic_distance(x, y):
-                lat1, lon1 = np.degrees(x[0]), np.degrees(x[1])
-                lat2, lon2 = np.degrees(y[0]), np.degrees(y[1])
-                return geodesic((lat1, lon1), (lat2, lon2)).kilometers
+            # Check for valid coordinates
+            if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
+                valid_mask = ~(np.isnan(coords).any(axis=1) | np.isinf(coords).any(axis=1))
+                if not valid_mask.any():
+                    continue
+                coords = coords[valid_mask]
+                valid_indices = group.index[valid_mask]
+            else:
+                valid_indices = group.index
             
-            db = DBSCAN(eps=eps_km, min_samples=min_samples, metric=geodesic_distance)
-            cluster_labels = db.fit_predict(coords_rad)
+            if len(coords) < min_samples:
+                continue
             
-            full_labels = pd.Series([-1] * len(loc_df), index=loc_df.index)
-            full_labels[valid_indices] = cluster_labels
-            return full_labels
-        else:
             coords_rad = np.radians(coords)
             
             def geodesic_distance(x, y):
@@ -944,10 +1356,25 @@ class DataConsolidator:
                 lat2, lon2 = np.degrees(y[0]), np.degrees(y[1])
                 return geodesic((lat1, lon1), (lat2, lon2)).kilometers
             
+            # Apply DBSCAN
             db = DBSCAN(eps=eps_km, min_samples=min_samples, metric=geodesic_distance)
             clusters = db.fit_predict(coords_rad)
-            return pd.Series(clusters, index=loc_df.index)
-    
+            
+            # Assign cluster IDs, skipping noise (-1)
+            for i, cl in enumerate(clusters):
+                if cl != -1:
+                    idx = valid_indices[i]
+                    final_clusters[idx] = cluster_counter + cl
+        
+        # Convert to integer cluster IDs
+        unique_clusters = final_clusters.unique()
+        cluster_map = {old: new for new, old in enumerate(unique_clusters) if old != -1}
+        if cluster_map:
+            final_clusters = final_clusters.replace(cluster_map)
+            final_clusters = final_clusters.fillna(-1).astype(int)
+        
+        return final_clusters
+
     def _merge_location_clusters(self, 
                                  loc_df: pd.DataFrame, 
                                  clusters: pd.Series,
@@ -997,7 +1424,7 @@ class DataConsolidator:
                         loc.centroid_lat = canonical['centroid_lat']
                         loc.centroid_lon = canonical['centroid_lon']
                     if hasattr(loc, 'admin_level'):
-                        loc.admin_level = canonical['admin_level'] or loc.admin_level
+                        loc.admin_level = canonical.get('admin_level') or loc.admin_level
                     self.session.add(loc)
                 self.session.commit()
             
@@ -1012,7 +1439,7 @@ class DataConsolidator:
             logger.info(f"Cluster {cluster_id}: {len(group)} locations -> canonical '{canonical['name']}' (ID: {canonical_id})")
         
         return results
-    
+
     def _merge_fact_locations(self, source_id: int, target_id: int):
         """Safely re-link location foreign keys in fact tables."""
         logger.info(f"Safely merging location references: ID {source_id} -> ID {target_id}...")
@@ -1216,6 +1643,8 @@ class DataConsolidator:
             self.session.rollback()
             logger.warning(f"Could not deduplicate case records: {e}")
 
+    # ========================= VOCABULARY CONSOLIDATION =========================
+    
     def consolidate_vocabulary(self) -> Dict[str, Any]:
         """Consolidate vocabulary tables."""
         logger.info("Consolidating vocabulary...")
@@ -1245,7 +1674,7 @@ class DataConsolidator:
         
         self.session.commit()
         return results
-    
+
     def _consolidate_dimension(self, 
                                model_class,
                                name_col: str,
@@ -1291,7 +1720,7 @@ class DataConsolidator:
             'duplicates_found': len(duplicates),
             'merged': merged
         }
-    
+
     def _update_fact_references(self, 
                                 dimension_model, 
                                 old_code: str, 
@@ -1335,6 +1764,8 @@ class DataConsolidator:
                 logger.info(f"Updated {table_name}.{fk_col} from {old_code} to {new_code}")
             except Exception as e:
                 logger.warning(f"Failed to update {table_name}.{fk_col}: {e}")
+
+    # ========================= DUPLICATE DETECTION =========================
     
     def detect_duplicates(self) -> Dict[str, Any]:
         """Detect duplicate records in fact tables."""
@@ -1358,7 +1789,7 @@ class DataConsolidator:
             ['location_id', 'date_id', 'variable']
         )
         return results
-    
+
     def _check_fact_duplicates(self, 
                                table_name: str, 
                                key_columns: List[str]) -> Dict[str, Any]:
@@ -1384,23 +1815,38 @@ class DataConsolidator:
                 'error': str(e),
                 'duplicate_count': 0
             }
-    
+
     def fix_location_country_codes(self) -> int:
-        """Fix missing or incorrect country codes using the COUNTRY_LOOKUP."""
-        logger.info("Fixing location country codes using COUNTRY_LOOKUP...")
+        """
+        Fix missing or incorrect country codes using enhanced geocoding.
         
+        Returns:
+            Number of locations updated
+        """
+        logger.info("Fixing location country codes...")
+        
+        # Get all locations with missing or invalid country codes
         locations = self.session.query(DimLocation).filter(
             (DimLocation.country_code.is_(None)) | 
             (DimLocation.country_code == '') |
+            (DimLocation.country_code == 'UNKNOWN') |
+            (DimLocation.country_code == 'N/A') |
             (DimLocation.country_name.is_(None)) |
-            (DimLocation.country_name == '')
+            (DimLocation.country_name == '') |
+            (DimLocation.country_name == 'UNKNOWN')
         ).all()
+        
+        if not locations:
+            logger.info("No locations with missing country codes found")
+            return 0
+        
+        logger.info(f"Found {len(locations)} locations with missing country codes")
         
         updated = 0
         for loc in locations:
             if loc.centroid_lat and loc.centroid_lon:
                 try:
-                    country_name, country_code = self._find_nearest_country(
+                    country_name, country_code = get_country_from_coords(
                         loc.centroid_lat, 
                         loc.centroid_lon
                     )
@@ -1416,7 +1862,7 @@ class DataConsolidator:
         self.session.commit()
         logger.info(f"Updated country codes for {updated} locations")
         return updated
-    
+
     def summarize_locations(self) -> pd.DataFrame:
         """Generate a summary of locations in the database."""
         locations = self.session.query(DimLocation).all()
@@ -1431,9 +1877,9 @@ class DataConsolidator:
         } for loc in locations])
         
         return summary
-    
+
     def validate_country_codes(self) -> Dict[str, Any]:
-        """Validate that all locations have correct country codes."""
+        """Validate that all locations have correct ISO country codes."""
         logger.info("Validating country codes...")
         
         locations = self.session.query(DimLocation).all()
@@ -1456,8 +1902,8 @@ class DataConsolidator:
                 })
                 continue
             
-            country_codes = set(code for _, code in self._country_lookup.values())
-            if loc.country_code in country_codes:
+            iso_code = get_iso_country_code(loc.country_code)
+            if iso_code:
                 results['valid'] += 1
             else:
                 results['invalid'] += 1
@@ -1472,15 +1918,86 @@ class DataConsolidator:
                    f"{results['invalid']} invalid, {results['missing']} missing")
         
         return results
+
+    # ========================= MAIN CONSOLIDATION =========================
     
+    def consolidate_all(self, study_region: str = "Kenya") -> Dict[str, Any]:
+        """
+        Run all consolidation steps with enhanced country code standardization.
+        """
+        logger.info("=" * 60)
+        logger.info("STARTING DATA CONSOLIDATION")
+        logger.info("=" * 60)
+        
+        # Step 1: STANDARDIZE COUNTRY CODES FIRST
+        logger.info("Step 1: Standardizing country codes to ISO format...")
+        self._standardize_country_codes()
+        
+        # Step 2: Bind raw coordinate strings to regions
+        logger.info("Step 2: Binding climate coordinates to regions...")
+        self._bind_climate_coordinates_to_region(study_region=study_region)
+        
+        # Step 3: Expand burden data to daily records
+        logger.info("Step 3: Expanding burden data to daily records...")
+        self._expand_burden_to_daily()
+        
+        # Step 4: Compute resistance status from mortality data
+        logger.info("Step 4: Computing resistance status...")
+        self._compute_resistance_status()
+        
+        # Step 5: Consolidate locations with enhanced country handling
+        logger.info("Step 5: Consolidating locations...")
+        loc_results = self.consolidate_locations()
+        
+        # Step 6: Consolidate vocabulary
+        logger.info("Step 6: Consolidating vocabulary...")
+        vocab_results = self.consolidate_vocabulary()
+        
+        # Step 7: Detect duplicates
+        logger.info("Step 7: Detecting duplicates...")
+        dup_results = self.detect_duplicates()
+        
+        # Step 8: Resolve fact table duplicates
+        logger.info("Step 8: Resolving fact table duplicates...")
+        self.resolve_fact_table_duplicates()
+        
+        # Step 9: Final verification
+        logger.info("Step 9: Verifying country codes...")
+        validation = self.validate_country_codes()
+        
+        results = {
+            'locations': loc_results,
+            'vocabulary': vocab_results,
+            'duplicates': dup_results,
+            'validation': validation
+        }
+        
+        logger.info("=" * 60)
+        logger.info("CONSOLIDATION COMPLETE")
+        logger.info(f"  Total locations: {validation.get('total', 0)}")
+        logger.info(f"  Valid country codes: {validation.get('valid', 0)}")
+        logger.info(f"  Invalid/missing: {validation.get('invalid', 0) + validation.get('missing', 0)}")
+        logger.info("=" * 60)
+        
+        return results
+
     def close(self):
         """Close the database session."""
-        self.session.close()
+        if self.session:
+            self.session.close()
 
+
+# ========================= CONVENIENCE FUNCTIONS =========================
 
 def run_consolidation(dry_run: bool = False):
     """
     Convenience function to run consolidation.
+    
+    Args:
+        dry_run: If True, only report what would be changed
+        
+    Returns:
+        Consolidation results
     """
     consolidator = DataConsolidator()
     try:
@@ -1488,3 +2005,87 @@ def run_consolidation(dry_run: bool = False):
         return results
     finally:
         consolidator.close()
+
+
+def enrich_location_dataframe(
+    df: pd.DataFrame,
+    lat_col: str = 'centroid_lat',
+    lon_col: str = 'centroid_lon',
+    country_code_col: str = 'country_code',
+    country_name_col: str = 'country_name'
+) -> pd.DataFrame:
+    """
+    Fill missing country_code and country_name from centroid_lat/centroid_lon.
+    Standardizes country codes to ISO alpha-2 format.
+    
+    Args:
+        df: DataFrame with location data
+        lat_col: Name of latitude column
+        lon_col: Name of longitude column
+        country_code_col: Name of country code column
+        country_name_col: Name of country name column
+        
+    Returns:
+        DataFrame with enriched country data
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    # Ensure both columns exist
+    if country_code_col not in df.columns:
+        df[country_code_col] = None
+    if country_name_col not in df.columns:
+        df[country_name_col] = None
+
+    # Identify rows that need enrichment
+    missing_mask = (
+        df[country_code_col].isna() | 
+        (df[country_code_col] == '') |
+        (df[country_code_col] == 'UNKNOWN') |
+        (df[country_code_col] == 'N/A') |
+        (df[country_code_col] == 'NULL')
+    )
+
+    # Also check for invalid country codes
+    if not df[country_code_col].isna().all():
+        invalid_mask = ~df[country_code_col].isin(ISO_COUNTRY_CODES.keys()) & df[country_code_col].notna()
+        missing_mask = missing_mask | invalid_mask
+
+    if not missing_mask.any():
+        return df
+
+    # Build list of (lat, lon) for rows needing enrichment
+    coords_list = []
+    indices = []
+    for idx in df.index[missing_mask]:
+        lat = df.loc[idx, lat_col]
+        lon = df.loc[idx, lon_col]
+        if pd.notna(lat) and pd.notna(lon):
+            coords_list.append((lat, lon))
+            indices.append(idx)
+
+    if not coords_list:
+        return df
+
+    # Bulk geocode
+    results = []
+    for lat, lon in coords_list:
+        results.append(get_country_from_coords(lat, lon))
+
+    # Assign results back
+    for idx, (name, code) in zip(indices, results):
+        if code is not None:
+            df.loc[idx, country_code_col] = code
+            df.loc[idx, country_name_col] = name
+        else:
+            # Try to get ISO code from existing name
+            existing_name = df.loc[idx, country_name_col]
+            if existing_name:
+                iso_code = get_iso_country_code(existing_name)
+                if iso_code:
+                    df.loc[idx, country_code_col] = iso_code
+                    df.loc[idx, country_name_col] = get_country_name(iso_code) or existing_name
+
+    return df
