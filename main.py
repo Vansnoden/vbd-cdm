@@ -464,11 +464,10 @@ def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_
     process_cfg = config.get('process', {})
     analyze_cfg = process_cfg.get('analyze', {})
     
-    # Base analysis configuration - DO NOT include location_name here
-    # These are the core parameters that will be passed to run_analysis
+    # Base analysis configuration
     base_params = {
         'study_name': params.get('study_name', f"{params['location']}_analysis"),
-        'location': params['location'],  # Use 'location' not 'location_name'
+        'location': params['location'],
         'country': params['country'],
         'start_year': params['start_year'],
         'end_year': params['end_year'],
@@ -479,41 +478,139 @@ def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_
     
     # Pipeline to analysis flag mapping
     pipeline_flags = {
-        'seasonal_patterns': {'run_seasonal': True, 'run_climate_correlation': False, 
-                              'run_lag_analysis': False, 'run_intervention_impact': False,
-                              'run_resistance_trends': False, 'run_spatial_analysis': False,
-                              'run_risk_modeling': False},
-        'climate_vector_correlation': {'run_seasonal': False, 'run_climate_correlation': True,
-                                       'run_lag_analysis': False, 'run_intervention_impact': False,
-                                       'run_resistance_trends': False, 'run_spatial_analysis': False,
-                                       'run_risk_modeling': False},
-        'lag_analysis': {'run_seasonal': False, 'run_climate_correlation': False,
-                         'run_lag_analysis': True, 'run_intervention_impact': False,
-                         'run_resistance_trends': False, 'run_spatial_analysis': False,
-                         'run_risk_modeling': False},
-        'intervention_impact': {'run_seasonal': False, 'run_climate_correlation': False,
-                                'run_lag_analysis': False, 'run_intervention_impact': True,
-                                'run_resistance_trends': False, 'run_spatial_analysis': False,
-                                'run_risk_modeling': False},
-        'resistance_trends': {'run_seasonal': False, 'run_climate_correlation': False,
-                              'run_lag_analysis': False, 'run_intervention_impact': False,
-                              'run_resistance_trends': True, 'run_spatial_analysis': False,
-                              'run_risk_modeling': False},
-        'early_warning_indicators': {'run_seasonal': True, 'run_climate_correlation': True,
-                                     'run_lag_analysis': True, 'run_intervention_impact': False,
-                                     'run_resistance_trends': False, 'run_spatial_analysis': False,
-                                     'run_risk_modeling': False},
-        'spatial_analysis': {'run_seasonal': False, 'run_climate_correlation': False,
-                             'run_lag_analysis': False, 'run_intervention_impact': False,
-                             'run_resistance_trends': False, 'run_spatial_analysis': True,
-                             'run_risk_modeling': False},
-        'integrated_risk_model': {'run_seasonal': False, 'run_climate_correlation': False,
-                                  'run_lag_analysis': False, 'run_intervention_impact': False,
-                                  'run_resistance_trends': False, 'run_spatial_analysis': False,
-                                  'run_risk_modeling': True},
+        'seasonal_patterns': {
+            'run_seasonal': True, 
+            'run_climate_correlation': False, 
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'climate_vector_correlation': {
+            'run_seasonal': False, 
+            'run_climate_correlation': True,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': True,
+            'run_vector_disease': True, 
+            'run_vector_occurrence': True,
+            'run_vector_clustering': False
+        },
+        'lag_analysis': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': True, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'intervention_impact': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': True,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'resistance_trends': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': True, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'early_warning_indicators': {
+            'run_seasonal': True, 
+            'run_climate_correlation': True,
+            'run_lag_analysis': True, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': True,
+            'run_vector_disease': True,
+            'run_vector_occurrence': True,
+            'run_vector_clustering': False
+        },
+        'vector_climate_analysis': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': True,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'vector_disease_analysis': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': True,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'spatial_analysis': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': True,
+            'run_risk_modeling': False,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
+        'integrated_risk_model': {
+            'run_seasonal': False, 
+            'run_climate_correlation': False,
+            'run_lag_analysis': False, 
+            'run_intervention_impact': False,
+            'run_resistance_trends': False, 
+            'run_spatial_analysis': False,
+            'run_risk_modeling': True,
+            'run_vector_climate': False,
+            'run_vector_disease': False,
+            'run_vector_occurrence': False,
+            'run_vector_clustering': False
+        },
     }
     
-    # Get custom pipeline parameters
+    # Get custom pipeline parameters from config
     custom_pipelines = analyze_cfg.get('custom_pipelines', [])
     custom_params = {cp['name']: cp.get('params', {}) for cp in custom_pipelines}
     
@@ -526,10 +623,8 @@ def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_
             
             # Merge with any custom params
             custom = custom_params.get(pipeline, {})
-            flags.update(custom)
             
             # Start with base params and add flags
-            # IMPORTANT: Use unpacking carefully - base_params already has all core params
             pipeline_params = base_params.copy()
             
             # Add flags (these don't conflict with base_params)
@@ -548,9 +643,10 @@ def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_
                 pipeline_params['max_lag_months'] = custom['max_lag_months']
             if 'variables' in custom:
                 pipeline_params['environmental_variables'] = custom['variables']
-            
-            # Verify no duplicate keys
-            logger.debug(f"Pipeline params: {list(pipeline_params.keys())}")
+            if 'features' in custom:
+                pipeline_params['features'] = custom['features']
+            if 'target' in custom:
+                pipeline_params['target'] = custom['target']
             
             # Run the analysis - pass all params as keyword arguments
             results = run_analysis(**pipeline_params)
@@ -563,7 +659,7 @@ def run_analysis_pipelines(pipelines: List[str], config: Dict[str, Any], filter_
                 
         except Exception as e:
             logger.error(f"Failed: {pipeline} - {e}", exc_info=True)
-            
+
 
 def _parse_analysis_params(config: Dict[str, Any], filter_str: Optional[str]) -> Dict[str, Any]:
     """
@@ -671,29 +767,6 @@ def _extract_location_info(filter_str: Optional[str], study_region: str) -> tupl
         study_name = location if location != "ALL" else "National"
     
     return location, country, study_name
-
-
-def _get_custom_params(config: Dict[str, Any], pipeline: str) -> Dict[str, Any]:
-    """Get custom parameters for a specific pipeline from config."""
-    process_cfg = config.get('process', {})
-    analyze_cfg = process_cfg.get('analyze', {})
-    custom_pipelines = analyze_cfg.get('custom_pipelines', [])
-    
-    for cp in custom_pipelines:
-        if cp.get('name') == pipeline:
-            params = cp.get('params', {})
-            # Map custom params to analysis flags
-            result = {}
-            if 'max_lag_months' in params:
-                result['max_lag_months'] = params['max_lag_months']
-            if 'variables' in params:
-                result['environmental_variables'] = params['variables']
-            if 'features' in params:
-                result['features'] = params['features']
-            if 'target' in params:
-                result['target'] = params['target']
-            return result
-    return {}
 
 
 def main():

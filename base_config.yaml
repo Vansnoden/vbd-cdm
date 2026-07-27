@@ -7,117 +7,117 @@ core:
 data_sources:
   
   # 1. VECTOR ATLAS DATA (occurrence, bionomics, resistance)
-  # vectoratlas:
-  #   source_name: "Vector Atlas Occurrence"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/vectoratlas.mapping.csv"
-  #   extract_mode: "single"
+  vectoratlas:
+    source_name: "Vector Atlas Occurrence"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/vectoratlas_data.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/vectoratlas.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_1:
-  #   source_name: "IRMapper Resistance Data 1"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_1.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_1:
+    source_name: "IRMapper Resistance Data 1"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_1.mapping.csv"
+    extract_mode: "single"
   
-  # irmapper_ir_2:
-  #   source_name: "IRMapper Resistance Data 2"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/2_standard_who_susc_test_species.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_2.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_2:
+    source_name: "IRMapper Resistance Data 2"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/2_standard_who_susc_test_species.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_2.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_3:
-  #   source_name: "IRMapper Resistance Data 3"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_3.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_3:
+    source_name: "IRMapper Resistance Data 3"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_3.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_4:
-  #   source_name: "IRMapper Resistance Data 4"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_4.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_4:
+    source_name: "IRMapper Resistance Data 4"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_4.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_5:
-  #   source_name: "IRMapper Resistance Data 5"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_5.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_5:
+    source_name: "IRMapper Resistance Data 5"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_5.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_6:
-  #   source_name: "IRMapper Resistance Data 6"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/6_Vgsc-allele-freq_complex-subgroup.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_6.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_6:
+    source_name: "IRMapper Resistance Data 6"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/6_Vgsc-allele-freq_complex-subgroup.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_6.mapping.csv"
+    extract_mode: "single"
 
-  # irmapper_ir_7:
-  #   source_name: "IRMapper Resistance Data 7"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/7_Vgsc-allele-freq_species.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/irmapper_7.mapping.csv"
-  #   extract_mode: "single"
+  irmapper_ir_7:
+    source_name: "IRMapper Resistance Data 7"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/7_Vgsc-allele-freq_species.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/irmapper_7.mapping.csv"
+    extract_mode: "single"
 
   # 4. CLIMATE DATA (DAILY)
   climate_timeseries:
@@ -135,60 +135,60 @@ data_sources:
       # - "sp"         # Surface pressure (Pa)
 
   # 5. MALARIA INCIDENCE
-  # malaria_incidence:
-  #   source_name: "Malaria Atlas Project - Kenya"
-  #   type: "folder"
-  #   extension: "tif"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence"
-  #   matching: "mappings/malariaatlas_pf_incidence.mapping.csv"
-  #   extract_mode: "chunked"
-  #   extension_options:
-  #     window_size: 1024
+  malaria_incidence:
+    source_name: "Malaria Atlas Project - Kenya"
+    type: "folder"
+    extension: "tif"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence"
+    matching: "mappings/malariaatlas_pf_incidence.mapping.csv"
+    extract_mode: "chunked"
+    extension_options:
+      window_size: 1024
 
-  # # 6. HEALTH FACILITY DATA
-  # health_facilities:
-  #   source_name: "Kenya Health Facilities"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/health_facilities/kmhfr_facilities.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/health_facility_location.mapping.csv"
-  #   extract_mode: "single"
+  # 6. HEALTH FACILITY DATA
+  health_facilities:
+    source_name: "Kenya Health Facilities"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/health_facilities/kmhfr_facilities.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/health_facility_location.mapping.csv"
+    extract_mode: "single"
 
-  # # 7. SOCIOECONOMIC DATA
-  # socioeconomic:
-  #   source_name: "World Bank Kenya Indicators"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/worldbank_indicator.mapping.csv"
-  #   extract_mode: "single"
+  # 7. SOCIOECONOMIC DATA
+  socioeconomic:
+    source_name: "World Bank Kenya Indicators"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/worldbank_indicator.mapping.csv"
+    extract_mode: "single"
 
-  # # 8. INTERVENTION DATA (ITN USE Distribution)
-  # interventions:
-  #   source_name: "ITN Use"
-  #   type: "file"
-  #   extension: "csv"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/itn_usage_data.csv"
-  #   extension_options:
-  #     sep: ","
-  #     quotechar: '"'
-  #     encoding: "utf-8"
-  #     on_bad_lines: "warn"
-  #     engine: "python"
-  #   matching: "mappings/itnuse_data.mapping.csv"
-  #   extract_mode: "single"
+  # 8. INTERVENTION DATA (ITN USE Distribution)
+  interventions:
+    source_name: "ITN Use"
+    type: "file"
+    extension: "csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/itn_usage_data.csv"
+    extension_options:
+      sep: ","
+      quotechar: '"'
+      encoding: "utf-8"
+      on_bad_lines: "warn"
+      engine: "python"
+    matching: "mappings/itnuse_data.mapping.csv"
+    extract_mode: "single"
 
 process:
   steps:
@@ -211,9 +211,14 @@ process:
     standard_pipelines:
       - seasonal_patterns
       - climate_vector_correlation
-      - resistance_trends
+      - lag_analysis
       - intervention_impact
+      - resistance_trends
       - early_warning_indicators
+      - vector_climate_analysis
+      - vector_disease_analysis
+      - spatial_analysis
+      - integrated_risk_model
     custom_pipelines:
       - name: "lag_analysis"
         params:

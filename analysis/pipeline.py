@@ -128,6 +128,58 @@ class AnalysisPipeline:
                 except Exception as e:
                     logger.error(f"Climate correlation analysis failed: {e}")
                     self.results['climate_correlation'] = {'error': str(e)}
+
+        # Vector-Climate Analysis
+        if self.config.run_vector_climate:
+            logger.info("Running vector-climate analysis...")
+            if self.data.get('vectors', pd.DataFrame()).empty:
+                logger.warning("No vector data available for vector-climate analysis")
+                self.results['vector_climate'] = {'error': 'No vector data available'}
+            else:
+                try:
+                    self.results['vector_climate'] = self._analyze_vector_climate()
+                except Exception as e:
+                    logger.error(f"Vector-climate analysis failed: {e}")
+                    self.results['vector_climate'] = {'error': str(e)}
+        
+        # Vector-Disease Analysis
+        if self.config.run_vector_disease:
+            logger.info("Running vector-disease analysis...")
+            if self.data.get('vectors', pd.DataFrame()).empty or self.data.get('cases', pd.DataFrame()).empty:
+                logger.warning("No vector or case data available for vector-disease analysis")
+                self.results['vector_disease'] = {'error': 'No vector or case data available'}
+            else:
+                try:
+                    self.results['vector_disease'] = self._analyze_vector_disease()
+                except Exception as e:
+                    logger.error(f"Vector-disease analysis failed: {e}")
+                    self.results['vector_disease'] = {'error': str(e)}
+        
+        # Vector Occurrence Analysis
+        if self.config.run_vector_occurrence:
+            logger.info("Running vector occurrence analysis...")
+            if self.data.get('vectors', pd.DataFrame()).empty:
+                logger.warning("No vector data available for occurrence analysis")
+                self.results['vector_occurrence'] = {'error': 'No vector data available'}
+            else:
+                try:
+                    self.results['vector_occurrence'] = self._analyze_vector_occurrence()
+                except Exception as e:
+                    logger.error(f"Vector occurrence analysis failed: {e}")
+                    self.results['vector_occurrence'] = {'error': str(e)}
+        
+        # Vector Clustering
+        if self.config.run_vector_clustering:
+            logger.info("Running vector clustering analysis...")
+            if self.data.get('vectors', pd.DataFrame()).empty:
+                logger.warning("No vector data available for clustering")
+                self.results['vector_clustering'] = {'error': 'No vector data available'}
+            else:
+                try:
+                    self.results['vector_clustering'] = self._analyze_vector_clustering()
+                except Exception as e:
+                    logger.error(f"Vector clustering analysis failed: {e}")
+                    self.results['vector_clustering'] = {'error': str(e)}
         
         # Lag analysis
         if self.config.run_lag_analysis:
@@ -194,14 +246,14 @@ class AnalysisPipeline:
             value_col='case_count'
         )
     
+
     def _analyze_climate_correlation(self) -> Dict:
         """
-        Run climate correlation analysis.
-        
-        Handles duplicate columns by dropping them before merging.
+        Run climate correlation analysis with vector data integration.
         """
         env = self.data.get('environment', pd.DataFrame())
         cases = self.data.get('cases', pd.DataFrame())
+        vectors = self.data.get('vectors', pd.DataFrame())
         
         if env.empty:
             return {'error': 'No environmental data available'}
@@ -253,7 +305,7 @@ class AnalysisPipeline:
         
         # Calculate correlations
         env_cols = [col for col in merged.columns 
-                   if col in self.config.environmental_variables]
+                if col in self.config.environmental_variables]
         
         correlations = {}
         for col in env_cols:
@@ -267,6 +319,29 @@ class AnalysisPipeline:
                 except Exception as e:
                     logger.warning(f"Could not calculate correlation for {col}: {e}")
                     correlations[col] = None
+        
+        # NEW: Also calculate vector-climate correlations if vector data exists
+        vector_climate_results = {}
+        vector_disease_results = {}
+        
+        if not vectors.empty:
+            logger.info("  Including vector data in correlation analysis...")
+            
+            # Vector-Climate
+            try:
+                vector_climate = self._analyze_vector_climate()
+                if vector_climate and 'error' not in vector_climate:
+                    vector_climate_results = vector_climate
+            except Exception as e:
+                logger.warning(f"Vector-climate analysis failed: {e}")
+            
+            # Vector-Disease
+            try:
+                vector_disease = self._analyze_vector_disease()
+                if vector_disease and 'error' not in vector_disease:
+                    vector_disease_results = vector_disease
+            except Exception as e:
+                logger.warning(f"Vector-disease analysis failed: {e}")
         
         # Create correlation matrix
         corr_cols = ['case_count'] + [c for c in env_cols if c in merged.columns and merged[c].notna().any()]
@@ -282,8 +357,11 @@ class AnalysisPipeline:
         return {
             'correlations': correlations,
             'merged_data': merged,
-            'correlation_matrix': corr_matrix
+            'correlation_matrix': corr_matrix,
+            'vector_climate': vector_climate_results,
+            'vector_disease': vector_disease_results
         }
+
     
     def _analyze_lags(self) -> Dict:
         """
@@ -430,36 +508,41 @@ class AnalysisPipeline:
             group_cols=['species_name']
         )
     
+
     def _analyze_spatial(self) -> Dict:
-        """Run spatial analysis."""
+        """Run spatial analysis with proper location handling."""
         cases = self.data.get('cases', pd.DataFrame())
         vectors = self.data.get('vectors', pd.DataFrame())
+        locations = self.data.get('locations', pd.DataFrame())
         
         if cases.empty and vectors.empty:
             return {'error': 'No data available for spatial analysis'}
         
-        # Combine data for spatial analysis
+        # Handle cases data
+        spatial_cases = pd.DataFrame()
         if not cases.empty:
-            # Check if location_id exists
+            # Cases may not have location_id if aggregated
             if 'location_id' not in cases.columns:
-                return {'error': 'No location_id column in cases data for spatial analysis'}
+                # Try to infer location_id from other columns or create a default
+                logger.warning("No location_id column in cases data for spatial analysis")
+                # Create a default location_id for all cases
+                cases['location_id'] = 1  # Default location
             
             # Aggregate cases by location
-            spatial_cases = cases.groupby(['location_id']).agg({
-                'case_count': ['sum', 'mean', 'count']
-            }).reset_index()
-            spatial_cases.columns = ['location_id', 'total_cases', 'mean_cases', 'num_months']
-        else:
-            spatial_cases = pd.DataFrame()
+            if 'location_id' in cases.columns:
+                spatial_cases = cases.groupby(['location_id']).agg({
+                    'case_count': ['sum', 'mean', 'count']
+                }).reset_index()
+                spatial_cases.columns = ['location_id', 'total_cases', 'mean_cases', 'num_months']
         
+        # Handle vectors data
+        spatial_vectors = pd.DataFrame()
         if not vectors.empty and 'count' in vectors.columns and 'location_id' in vectors.columns:
             spatial_vectors = vectors.groupby(['location_id']).agg({
                 'count': 'sum',
                 'density_per_trap': 'mean'
             }).reset_index()
             spatial_vectors.columns = ['location_id', 'total_vectors', 'mean_density']
-        else:
-            spatial_vectors = pd.DataFrame()
         
         return {
             'spatial_cases': spatial_cases,
@@ -467,6 +550,7 @@ class AnalysisPipeline:
             'num_locations': max(len(spatial_cases), len(spatial_vectors))
         }
     
+
     def _analyze_risk(self) -> Dict:
         """Build integrated risk model."""
         cases = self.data.get('cases', pd.DataFrame())
@@ -483,7 +567,7 @@ class AnalysisPipeline:
         if len(cases) < 5:
             return {'error': f'Not enough case data for risk modeling. Need at least 5 records, got {len(cases)}'}
         
-        # Merge cases and environment - handle duplicate columns
+        # Merge cases and environment
         cases = cases.copy()
         env = env.copy()
         
@@ -500,14 +584,13 @@ class AnalysisPipeline:
         merged = cases.merge(env, on='date', how='inner')
         
         if merged.empty:
-            logger.warning("  No overlapping dates found between cases and environment for risk modeling")
+            logger.warning("No overlapping dates found between cases and environment for risk modeling")
             return {'error': 'No overlapping data for risk modeling'}
         
         # Add vector data if available
         if vectors is not None and not vectors.empty:
             vectors = vectors.copy()
             vectors['date'] = pd.to_datetime(vectors['date'])
-            # Aggregate vector data by date
             if 'count' in vectors.columns:
                 vector_agg = vectors.groupby('date')['count'].sum().reset_index()
                 merged = merged.merge(vector_agg, on='date', how='left')
@@ -524,6 +607,10 @@ class AnalysisPipeline:
         if 'density_per_trap' in merged.columns:
             predictor_cols.append('density_per_trap')
         
+        # Use custom features if provided
+        if self.config.features:
+            predictor_cols = [col for col in self.config.features if col in merged.columns]
+        
         # Filter to available columns
         predictor_cols = [col for col in predictor_cols if col in merged.columns]
         
@@ -534,13 +621,17 @@ class AnalysisPipeline:
         if len(merged) < 10:
             return {'error': f'Not enough data for risk modeling. Need at least 10 samples, got {len(merged)}'}
         
+        # Call the module with correct argument order
         return self.modules.integrated_risk_model(
-            merged,
+            cases_df=merged,  # First arg: cases_df
+            env_df=merged,    # Second arg: env_df (use merged since we already combined)
+            vector_df=None,   # Vector already merged
             date_col='date',
             response_col='case_count',
             predictor_cols=predictor_cols
         )
-    
+
+
     def _generate_figures(self):
         """Generate all visualizations."""
         fig_dir = self.output_dir / "figures"
@@ -922,6 +1013,145 @@ class AnalysisPipeline:
             self.base.close()
 
 
+    def _analyze_vector_climate(self) -> Dict:
+        """
+        Run vector-climate relationship analysis.
+        """
+        vectors = self.data.get('vectors', pd.DataFrame())
+        env = self.data.get('environment', pd.DataFrame())
+        
+        if vectors.empty:
+            return {'error': 'No vector data available'}
+        
+        if env.empty:
+            return {'error': 'No environmental data available'}
+        
+        # Determine which columns to use
+        vector_col = 'count' if 'count' in vectors.columns else 'density_per_trap'
+        if vector_col not in vectors.columns:
+            return {'error': 'No vector abundance column found'}
+        
+        # Get climate variables
+        climate_vars = self.config.environmental_variables
+        
+        # Also include other numeric columns that might be climate data
+        numeric_cols = env.select_dtypes(include=[np.number]).columns.tolist()
+        for col in numeric_cols:
+            if col not in ['year', 'month'] and col not in climate_vars:
+                climate_vars.append(col)
+        
+        # Group by species if available
+        group_cols = []
+        if 'species_name' in vectors.columns:
+            group_cols.append('species_name')
+        
+        return self.modules.vector_climate_analysis(
+            vector_df=vectors,
+            climate_df=env,
+            date_col='date',
+            vector_col=vector_col,
+            group_cols=group_cols if group_cols else None,
+            climate_variables=climate_vars,
+            aggregation='monthly',
+            lag_months=self.config.max_lag_months
+        )
+
+
+    def _analyze_vector_disease(self) -> Dict:
+        """
+        Run vector-disease relationship analysis.
+        """
+        vectors = self.data.get('vectors', pd.DataFrame())
+        cases = self.data.get('cases', pd.DataFrame())
+        
+        if vectors.empty:
+            return {'error': 'No vector data available'}
+        
+        if cases.empty:
+            return {'error': 'No case data available'}
+        
+        vector_col = 'count' if 'count' in vectors.columns else 'density_per_trap'
+        if vector_col not in vectors.columns:
+            return {'error': 'No vector abundance column found'}
+        
+        # Only use group columns that actually exist and have meaningful data
+        group_cols = []
+        if 'species_name' in vectors.columns:
+            # Check if species_name has more than one unique value
+            if vectors['species_name'].nunique() > 1:
+                group_cols.append('species_name')
+        
+        return self.modules.vector_disease_analysis(
+            vector_df=vectors,
+            disease_df=cases,
+            date_col='date',
+            vector_col=vector_col,
+            disease_col='case_count',
+            group_cols=group_cols if group_cols else None,
+            aggregation='monthly',
+            lag_months=self.config.max_lag_months
+        )
+
+
+    def _analyze_vector_occurrence(self) -> Dict:
+        """
+        Run vector occurrence analysis.
+        """
+        vectors = self.data.get('vectors', pd.DataFrame())
+        
+        if vectors.empty:
+            return {'error': 'No vector data available'}
+        
+        vector_col = 'count' if 'count' in vectors.columns else 'density_per_trap'
+        if vector_col not in vectors.columns:
+            return {'error': 'No vector abundance column found'}
+        
+        group_cols = []
+        if 'species_name' in vectors.columns:
+            group_cols.append('species_name')
+        if 'location_id' in vectors.columns:
+            group_cols.append('location_id')
+        
+        return self.modules.vector_occurrence_analysis(
+            vector_df=vectors,
+            date_col='date',
+            vector_col=vector_col,
+            group_cols=group_cols if group_cols else None
+        )
+
+
+    def _analyze_vector_clustering(self) -> Dict:
+        """
+        Run vector abundance clustering analysis.
+        """
+        vectors = self.data.get('vectors', pd.DataFrame())
+        
+        if vectors.empty:
+            return {'error': 'No vector data available'}
+        
+        vector_col = 'count' if 'count' in vectors.columns else 'density_per_trap'
+        if vector_col not in vectors.columns:
+            return {'error': 'No vector abundance column found'}
+        
+        # Determine grouping columns
+        group_cols = []
+        if 'species_name' in vectors.columns:
+            group_cols.append('species_name')
+        if 'location_id' in vectors.columns:
+            group_cols.append('location_id')
+        
+        if not group_cols:
+            return {'error': 'No grouping columns available for clustering'}
+        
+        return self.modules.vector_abundance_clustering(
+            vector_df=vectors,
+            date_col='date',
+            vector_col=vector_col,
+            group_cols=group_cols,
+            n_clusters=min(4, vectors[group_cols[0]].nunique())
+        )
+
+
 # Convenience function
 def run_analysis(
     study_name: str,
@@ -930,6 +1160,8 @@ def run_analysis(
     start_year: int = None,
     end_year: int = None,
     output_dir: str = "outputs/analysis",
+    features: Optional[List[str]] = None,
+    target: Optional[str] = None,
     **kwargs
 ) -> Dict:
     """
@@ -942,6 +1174,8 @@ def run_analysis(
         start_year: Start year (default: get from data)
         end_year: End year (default: get from data)
         output_dir: Output directory (default: "outputs/analysis")
+        features: List of feature columns for risk model
+        target: Target column for risk model
         **kwargs: Additional analysis parameters
     
     Returns:
@@ -979,6 +1213,8 @@ def run_analysis(
         start_year=start_year,
         end_year=end_year,
         output_dir=output_dir,
+        features=features,
+        target=target,
         **kwargs
     )
     

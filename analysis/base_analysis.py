@@ -52,6 +52,10 @@ class AnalysisConfig:
     # Analysis types to run
     run_seasonal: bool = True
     run_climate_correlation: bool = True
+    run_vector_climate: bool = True 
+    run_vector_disease: bool = False
+    run_vector_occurrence: bool = True
+    run_vector_clustering: bool = True
     run_lag_analysis: bool = True
     run_intervention_impact: bool = True
     run_resistance_trends: bool = True
@@ -68,6 +72,10 @@ class AnalysisConfig:
     max_lag_months: int = 6
     seasonal_period: int = 12
     risk_threshold_percentile: float = 0.75
+
+    # Custom parameters for integrated_risk_model
+    features: Optional[List[str]] = None
+    target: Optional[str] = None
     
     # Data filters
     disease_code: Optional[str] = None
