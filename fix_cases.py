@@ -1,17 +1,12 @@
-# fix_cases.py
-"""
-Standalone script to expand disease burden data to daily case records.
-Run this after consolidation if case data is still only 366 records.
-
-Usage:
-    python fix_cases.py
-"""
+# fix_cases.py - Modified version with daily counts stored as a single row
 
 import sys
 import logging
+import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 import numpy as np
+import pandas as pd
 
 # Add project root to path
 project_root = Path(__file__).parent.absolute()
@@ -27,19 +22,231 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def expand_burden_to_daily():
+# ========================= CONFIGURATION =========================
+
+# Seasonal factors by month (tropical regions)
+SEASONAL_FACTORS = {
+    1: 0.55, 2: 0.50, 3: 0.65, 4: 1.35, 5: 1.50, 6: 1.40,
+    7: 1.30, 8: 1.10, 9: 0.85, 10: 0.65, 11: 0.55, 12: 0.50,
+}
+
+WEEKLY_PATTERNS = {
+    1: 0.95, 2: 1.00, 3: 1.05, 4: 1.10, 5: 1.10, 6: 0.90, 7: 0.85,
+}
+
+
+def get_seasonal_factor(month: int) -> float:
+    return SEASONAL_FACTORS.get(month, 1.0)
+
+
+def get_weekly_factor(date: datetime) -> float:
+    return WEEKLY_PATTERNS.get(date.isocalendar()[2], 1.0)
+
+
+def generate_daily_case_counts(
+    annual_cases: float,
+    year: int,
+    location_id: int,
+    base_variation: float = 0.25,
+    seed: int = None
+) -> pd.DataFrame:
     """
-    Expand yearly disease burden data (fact_disease_burden) to daily records.
-    Uses incidence_rate to estimate cases, or cases_mean if available.
+    Generate daily case counts with realistic variation.
+    Returns one row per day with the case count.
+    """
+    if seed is not None:
+        np.random.seed(seed + location_id + year)
+    
+    start_date = datetime(year, 1, 1)
+    end_date = datetime(year, 12, 31)
+    date_range = pd.date_range(start_date, end_date)
+    
+    daily_data = []
+    
+    # Pre-calculate all daily factors to normalize properly
+    daily_factors = []
+    for date in date_range:
+        month = date.month
+        
+        seasonal_factor = get_seasonal_factor(month)
+        weekly_factor = get_weekly_factor(date)
+        
+        day_in_month = date.day
+        days_in_month = (date.replace(month=month % 12 + 1, day=1) - 
+                        date.replace(day=1)).days
+        intra_month_phase = (day_in_month / days_in_month) * 2 * np.pi
+        intra_month_factor = 1.0 + 0.08 * np.sin(intra_month_phase + month * 0.5)
+        
+        noise = np.random.lognormal(0, base_variation * 0.7)
+        
+        holiday_factor = 1.0
+        if date.month == 12 and date.day in [25, 26]:
+            holiday_factor = 0.80
+        elif date.month == 1 and date.day == 1:
+            holiday_factor = 0.75
+        elif date.month in [4, 5]:
+            if date.month == 4 and 1 <= date.day <= 10:
+                holiday_factor = 0.85
+            elif date.month == 5 and date.day <= 5:
+                holiday_factor = 0.85
+        
+        spike_factor = 1.0
+        if np.random.random() < 0.005:
+            spike_factor = 1.0 + np.random.exponential(0.5)
+        
+        daily_factor = (
+            seasonal_factor * weekly_factor * intra_month_factor * 
+            noise * holiday_factor * spike_factor
+        )
+        daily_factors.append(daily_factor)
+    
+    # Normalize so sum of factors = number of days (so total = annual_cases)
+    total_factor = sum(daily_factors)
+    if total_factor > 0:
+        daily_factors = [f / total_factor * len(date_range) for f in daily_factors]
+    
+    # Generate daily case counts
+    for date, factor in zip(date_range, daily_factors):
+        daily_cases = annual_cases * factor
+        daily_cases = max(1, int(round(daily_cases)))
+        
+        daily_data.append({
+            'date_id': date.strftime('%Y-%m-%d'),
+            'year': year,
+            'month': date.month,
+            'case_count': daily_cases,
+            'location_id': location_id,
+        })
+    
+    return pd.DataFrame(daily_data)
+
+
+def get_population_for_location(session, location_id: int, default_population: int = 100000) -> int:
+    result = session.execute(text("""
+        SELECT indicator_value 
+        FROM fact_socioeconomic_condition 
+        WHERE location_id = :loc_id 
+          AND indicator_code = 'SP.POP.TOTL'
+        ORDER BY year DESC
+        LIMIT 1
+    """), {'loc_id': location_id}).first()
+    
+    if result and result[0] and result[0] > 0:
+        return int(result[0])
+    
+    result = session.execute(text("""
+        SELECT name FROM dim_location WHERE location_id = :loc_id
+    """), {'loc_id': location_id}).first()
+    
+    if result:
+        name = result[0].lower()
+        if 'county' in name or 'district' in name:
+            return 500000
+        elif 'sub-county' in name or 'ward' in name:
+            return 100000
+        elif 'village' in name:
+            return 5000
+    
+    return default_population
+
+
+def verify_case_data(session):
+    """Verify the case data after expansion."""
+    
+    # Check if case_count column exists
+    try:
+        # Try to get stats from case_count column
+        stats = session.execute(text("""
+            SELECT 
+                MIN(case_count) as min_cases,
+                MAX(case_count) as max_cases,
+                AVG(case_count) as avg_cases,
+                COUNT(*) as total_records
+            FROM fact_disease_case
+            WHERE identification_method_code = 'ESTIMATE'
+        """)).first()
+        
+        if stats and stats[0] is not None:
+            logger.info(f"Total estimate records: {stats[3]}")
+            logger.info(f"Case statistics: min={stats[0]:.0f}, max={stats[1]:.0f}, avg={stats[2]:.1f}")
+            
+            if stats[0] == stats[1]:
+                logger.warning("⚠️  WARNING: All case counts are identical! No variation in the data.")
+            else:
+                logger.info("✅ Variation detected in case counts!")
+            
+            # Show sample
+            sample = session.execute(text("""
+                SELECT date_id_onset, case_count
+                FROM fact_disease_case
+                WHERE identification_method_code = 'ESTIMATE'
+                ORDER BY date_id_onset
+                LIMIT 20
+            """)).fetchall()
+            
+            if sample:
+                logger.info("Sample of daily case counts (first 20 days):")
+                for date_id, count in sample[:10]:
+                    logger.info(f"  {date_id}: {count} cases")
+            
+            return
+    
+    except Exception as e:
+        logger.warning(f"Could not query case_count column: {e}")
+    
+    # Fallback: count rows per date
+    logger.info("Counting cases per date (fallback method)...")
+    daily_counts = session.execute(text("""
+        SELECT date_id_onset, COUNT(*) as case_count
+        FROM fact_disease_case
+        WHERE identification_method_code = 'ESTIMATE'
+        GROUP BY date_id_onset
+        ORDER BY date_id_onset
+        LIMIT 100
+    """)).fetchall()
+    
+    if daily_counts:
+        counts = [row[1] for row in daily_counts]
+        logger.info(f"Daily case counts (sample of 100 days):")
+        logger.info(f"  Min: {min(counts)}, Max: {max(counts)}, Avg: {sum(counts)/len(counts):.1f}")
+        
+        if min(counts) == max(counts):
+            logger.warning("⚠️  WARNING: All sampled daily counts are identical! No variation in the data.")
+        else:
+            logger.info("✅ Variation detected in daily case counts!")
+
+
+def expand_burden_to_daily(
+    dry_run: bool = False,
+    specific_location_id: int = None,
+    seed: int = 42,
+    base_variation: float = 0.25
+):
+    """
+    Expand yearly disease burden data to daily records.
+    Each day gets a single row with a case_count value.
     """
     logger.info("=" * 60)
-    logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
+    logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS (WITH VARIATION)")
     logger.info("=" * 60)
+    
+    if dry_run:
+        logger.info("*** DRY RUN - No data will be inserted ***")
     
     session = SessionLocal()
     
     try:
-        # First, check what's in the burden table
+        # Check if case_count column exists, if not add it
+        try:
+            # Check if column exists
+            session.execute(text("SELECT case_count FROM fact_disease_case LIMIT 1"))
+            logger.info("✓ case_count column exists")
+        except Exception:
+            logger.info("Adding case_count column to fact_disease_case...")
+            session.execute(text("ALTER TABLE fact_disease_case ADD COLUMN case_count INTEGER DEFAULT 1"))
+            session.commit()
+            logger.info("✓ Added case_count column")
+        
         total_burden = session.execute(text("SELECT COUNT(*) FROM fact_disease_burden")).scalar()
         logger.info(f"Total burden records: {total_burden}")
         
@@ -47,49 +254,18 @@ def expand_burden_to_daily():
             logger.info("No burden records found to expand")
             return
         
-        # Check sample burden records
-        sample = session.execute(text("""
-            SELECT burden_id, location_id, year, disease_code, 
-                   cases_mean, incidence_rate, prevalence_rate
-            FROM fact_disease_burden 
-            LIMIT 5
-        """)).fetchall()
-        logger.info(f"Sample burden records: {[(r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in sample]}")
-        
-        # Get population estimates for each location
-        logger.info("Estimating population for locations...")
-        
-        # Try to get population from socioeconomic data
-        pop_query = """
-            SELECT location_id, indicator_value 
-            FROM fact_socioeconomic_condition 
-            WHERE indicator_code = 'SP.POP.TOTL'
-        """
-        pop_results = session.execute(text(pop_query)).fetchall()
-        population_map = {r[0]: r[1] for r in pop_results}
-        
-        # Get all locations
-        loc_query = "SELECT location_id FROM dim_location"
-        loc_results = session.execute(text(loc_query)).fetchall()
-        all_location_ids = [r[0] for r in loc_results]
-        
-        # For locations without population data, use default
-        default_population = 1000000  # 1 million
-        for loc_id in all_location_ids:
-            if loc_id not in population_map or population_map[loc_id] is None or population_map[loc_id] <= 0:
-                population_map[loc_id] = default_population
-                logger.debug(f"  Using default population {default_population} for location_id {loc_id}")
-        
-        logger.info(f"Population map has {len(population_map)} locations")
-        
-        # Get all burden records with valid data
-        burden_records = session.execute(text("""
+        burden_query = """
             SELECT burden_id, location_id, year, disease_code, source_code, 
-                   incidence_rate, prevalence_rate, mortality_rate, cases_mean
+                   incidence_rate, cases_mean
             FROM fact_disease_burden
-            WHERE incidence_rate IS NOT NULL AND incidence_rate > 0
-               OR cases_mean IS NOT NULL AND cases_mean > 0
-        """)).fetchall()
+            WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0)
+               OR (cases_mean IS NOT NULL AND cases_mean > 0)
+        """
+        
+        if specific_location_id:
+            burden_query += f" AND location_id = {specific_location_id}"
+        
+        burden_records = session.execute(text(burden_query)).fetchall()
         
         if not burden_records:
             logger.warning("No burden records with valid data found.")
@@ -97,166 +273,149 @@ def expand_burden_to_daily():
         
         logger.info(f"Found {len(burden_records)} burden records to expand")
         
-        # Seasonal factors for malaria in Kenya (monthly distribution)
-        # Wet season (April-July) has higher malaria incidence
-        monthly_factors = {
-            1: 0.6, 2: 0.5, 3: 0.7, 4: 1.4, 5: 1.5, 6: 1.3,
-            7: 1.2, 8: 1.0, 9: 0.8, 10: 0.6, 11: 0.5, 12: 0.5
-        }
+        location_ids = set()
+        for record in burden_records:
+            location_ids.add(record[1])
         
-        # Normalize factors so sum = 12 (average of 1)
-        total_factor = sum(monthly_factors.values())
-        normalized_factors = {m: f * 12 / total_factor for m, f in monthly_factors.items()}
-        logger.info(f"Normalized monthly factors: {normalized_factors}")
+        logger.info(f"Processing {len(location_ids)} locations")
+        
+        population_map = {}
+        for loc_id in location_ids:
+            pop = get_population_for_location(session, loc_id)
+            population_map[loc_id] = pop
+            logger.debug(f"  Location {loc_id}: population = {pop}")
         
         inserted_count = 0
         skipped_count = 0
         error_count = 0
         
-        # Detect database type
-        is_sqlite = 'sqlite' in str(session.bind.url).lower()
-        logger.info(f"Database type: {'SQLite' if is_sqlite else 'PostgreSQL/Other'}")
-        
         for record in burden_records:
-            burden_id, location_id, year, disease_code, source_code, incidence_rate, prevalence_rate, mortality_rate, cases_mean = record
+            burden_id, location_id, year, disease_code, source_code, incidence_rate, cases_mean = record
             
-            # Get population for this location
-            population = population_map.get(location_id, default_population)
+            population = population_map.get(location_id, 100000)
             
-            # Calculate annual cases from incidence rate
-            # incidence_rate is per 100,000 population
             if incidence_rate is not None and incidence_rate > 0 and population > 0:
                 annual_cases = (incidence_rate / 100000) * population
             elif cases_mean is not None and cases_mean > 0:
                 annual_cases = cases_mean
             else:
-                logger.warning(f"  Skipping burden_id {burden_id}: no valid incidence_rate or cases_mean")
+                logger.warning(f"  Skipping burden_id {burden_id}: no valid data")
                 skipped_count += 1
                 continue
             
             annual_cases = max(annual_cases, 1)
             
-            logger.info(f"  Processing burden_id {burden_id}: location_id={location_id}, year={year}, "
+            logger.info(f"  Processing burden_id {burden_id}: "
+                       f"location={location_id}, year={year}, "
                        f"annual_cases={annual_cases:.0f}")
             
-            start_date = datetime(year, 1, 1)
-            end_date = datetime(year, 12, 31)
-            current_date = start_date
-            daily_cases_list = []
+            daily_df = generate_daily_case_counts(
+                annual_cases=annual_cases,
+                year=year,
+                location_id=location_id,
+                base_variation=base_variation,
+                seed=seed
+            )
             
-            while current_date <= end_date:
-                month = current_date.month
-                if month == 12:
-                    days_in_month = 31
-                else:
-                    next_month = datetime(year, month + 1, 1)
-                    days_in_month = (next_month - datetime(year, month, 1)).days
+            logger.info(f"    Generated {len(daily_df)} daily records")
+            logger.info(f"    Mean: {daily_df['case_count'].mean():.1f}, "
+                       f"Min: {daily_df['case_count'].min()}, "
+                       f"Max: {daily_df['case_count'].max()}, "
+                       f"Std: {daily_df['case_count'].std():.1f}")
+            
+            if dry_run:
+                sample = daily_df.head(10)[['date_id', 'case_count']]
+                logger.info(f"    Sample (first 10 days):\n{sample.to_string()}")
+                continue
+            
+            try:
+                start_date = f"{year}-01-01"
+                end_date = f"{year}-12-31"
                 
-                # Monthly total cases = annual cases * monthly factor
-                monthly_cases = annual_cases * normalized_factors[month]
-                
-                # Daily cases = monthly cases / days in month
-                daily_cases = monthly_cases / days_in_month
-                
-                # Add small random variation (±15%) for realism
-                variation = 0.85 + 0.3 * np.random.random()
-                daily_cases = daily_cases * variation
-                daily_cases = max(1, int(round(daily_cases)))
-                
-                daily_cases_list.append({
-                    'location_id': location_id,
-                    'date_id': current_date.strftime('%Y-%m-%d'),
-                    'disease_code': disease_code,
-                    'source_code': source_code
+                delete_result = session.execute(text("""
+                    DELETE FROM fact_disease_case
+                    WHERE location_id = :loc_id
+                      AND date_id_onset >= :start_date
+                      AND date_id_onset <= :end_date
+                      AND disease_code = :disease
+                      AND identification_method_code = 'ESTIMATE'
+                """), {
+                    'loc_id': location_id,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'disease': disease_code
                 })
-                current_date += timedelta(days=1)
-            
-            if daily_cases_list:
-                try:
-                    # Delete existing estimates for this location/year/disease
-                    delete_result = session.execute(text("""
-                        DELETE FROM fact_disease_case
-                        WHERE location_id = :loc_id
-                          AND date_id_onset >= :start_date
-                          AND date_id_onset <= :end_date
-                          AND disease_code = :disease
-                          AND identification_method_code = 'ESTIMATE'
-                    """), {
+                
+                if delete_result.rowcount > 0:
+                    logger.info(f"    Deleted {delete_result.rowcount} existing estimate records")
+                
+                # Insert daily records with case_count
+                batch_size = 5000
+                total_days = len(daily_df)
+                records_to_insert = []
+                
+                for idx, row in daily_df.iterrows():
+                    records_to_insert.append({
                         'loc_id': location_id,
-                        'start_date': start_date.strftime('%Y-%m-%d'),
-                        'end_date': end_date.strftime('%Y-%m-%d'),
-                        'disease': disease_code
+                        'date_id': row['date_id'],
+                        'disease': disease_code,
+                        'src_code': source_code,
+                        'case_count': int(row['case_count'])
                     })
                     
-                    if delete_result.rowcount > 0:
-                        logger.info(f"    Deleted {delete_result.rowcount} existing estimate records")
-                    
-                    # Insert new daily records
-                    for daily in daily_cases_list:
-                        session.execute(text("""
-                            INSERT INTO fact_disease_case (
-                                location_id, date_id_onset, date_id_reported, disease_code,
-                                identification_method_code, source_code, case_status,
-                                host_type, age_group, sex, outcome
-                            ) VALUES (
-                                :loc_id, :date_id, :date_id, :disease,
-                                'ESTIMATE', :src_code, 'confirmed', 'human',
-                                'all', 'unknown', 'unknown'
-                            )
-                        """), {
-                            'loc_id': daily['location_id'],
-                            'date_id': daily['date_id'],
-                            'disease': daily['disease_code'],
-                            'src_code': daily['source_code']
-                        })
-                    
-                    session.commit()
-                    inserted_count += len(daily_cases_list)
-                    logger.info(f"  Expanded burden_id {burden_id} ({year}) into {len(daily_cases_list)} daily records")
-                    
-                except Exception as e:
-                    logger.error(f"  Error expanding burden_id {burden_id}: {e}")
-                    session.rollback()
-                    error_count += 1
-                    continue
+                    if len(records_to_insert) >= batch_size or idx == total_days - 1:
+                        if 'postgresql' in str(session.bind.url):
+                            session.execute(text("""
+                                INSERT INTO fact_disease_case (
+                                    location_id, date_id_onset, date_id_reported, disease_code,
+                                    identification_method_code, source_code, case_status,
+                                    host_type, age_group, sex, outcome, case_count
+                                ) VALUES (
+                                    :loc_id, :date_id, :date_id, :disease,
+                                    'ESTIMATE', :src_code, 'confirmed', 'human',
+                                    'all', 'unknown', 'unknown', :case_count
+                                )
+                            """), records_to_insert)
+                        else:
+                            for rec in records_to_insert:
+                                session.execute(text("""
+                                    INSERT INTO fact_disease_case (
+                                        location_id, date_id_onset, date_id_reported, disease_code,
+                                        identification_method_code, source_code, case_status,
+                                        host_type, age_group, sex, outcome, case_count
+                                    ) VALUES (
+                                        :loc_id, :date_id, :date_id, :disease,
+                                        'ESTIMATE', :src_code, 'confirmed', 'human',
+                                        'all', 'unknown', 'unknown', :case_count
+                                    )
+                                """), rec)
+                        
+                        records_to_insert = []
+                
+                session.commit()
+                inserted_count += total_days
+                logger.info(f"  ✓ Expanded burden_id {burden_id} ({year}) into {total_days} daily records")
+                
+            except Exception as e:
+                logger.error(f"  ✗ Error expanding burden_id {burden_id}: {e}")
+                session.rollback()
+                error_count += 1
+                continue
         
-        logger.info("=" * 60)
-        logger.info(f"EXPANSION COMPLETE")
-        logger.info(f"  Inserted: {inserted_count} daily records")
-        logger.info(f"  Skipped: {skipped_count} records")
-        logger.info(f"  Errors: {error_count}")
-        logger.info("=" * 60)
-        
-        # Verify the results
-        logger.info("Verifying case data...")
-        case_count = session.execute(text("""
-            SELECT COUNT(*) FROM fact_disease_case
-            WHERE identification_method_code = 'ESTIMATE'
-        """)).scalar()
-        logger.info(f"Total estimate records in fact_disease_case: {case_count}")
-        
-        # Show date range
-        date_range = session.execute(text("""
-            SELECT MIN(date_id_onset), MAX(date_id_onset)
-            FROM fact_disease_case
-            WHERE identification_method_code = 'ESTIMATE'
-        """)).first()
-        if date_range and date_range[0] and date_range[1]:
-            logger.info(f"Date range: {date_range[0]} to {date_range[1]}")
-        
-        # Show distribution by year
-        year_dist = session.execute(text("""
-            SELECT SUBSTR(date_id_onset, 1, 4) as year, COUNT(*) as count
-            FROM fact_disease_case
-            WHERE identification_method_code = 'ESTIMATE'
-            GROUP BY year
-            ORDER BY year
-        """)).fetchall()
-        
-        if year_dist:
-            logger.info("Year distribution:")
-            for year, count in year_dist:
-                logger.info(f"  {year}: {count} records")
+        if not dry_run:
+            logger.info("=" * 60)
+            logger.info(f"EXPANSION COMPLETE")
+            logger.info(f"  Inserted: {inserted_count} daily records (1 per day with case_count)")
+            logger.info(f"  Skipped: {skipped_count} records")
+            logger.info(f"  Errors: {error_count}")
+            logger.info("=" * 60)
+            
+            logger.info("Verifying case data...")
+            verify_case_data(session)
+        else:
+            logger.info("=" * 60)
+            logger.info("DRY RUN COMPLETE - No data inserted")
+            logger.info("=" * 60)
         
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -266,5 +425,24 @@ def expand_burden_to_daily():
         session.close()
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Expand disease burden data to daily records with realistic variation"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Preview changes without inserting")
+    parser.add_argument("--location", type=int, help="Only process a specific location ID")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument("--variation", type=float, default=0.25, help="Base variation (0-1, default: 0.25)")
+    
+    args = parser.parse_args()
+    
+    expand_burden_to_daily(
+        dry_run=args.dry_run,
+        specific_location_id=args.location,
+        seed=args.seed,
+        base_variation=args.variation
+    )
+
+
 if __name__ == "__main__":
-    expand_burden_to_daily()
+    main()

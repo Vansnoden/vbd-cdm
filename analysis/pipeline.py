@@ -1014,9 +1014,6 @@ class AnalysisPipeline:
 
 
     def _analyze_vector_climate(self) -> Dict:
-        """
-        Run vector-climate relationship analysis.
-        """
         vectors = self.data.get('vectors', pd.DataFrame())
         env = self.data.get('environment', pd.DataFrame())
         
@@ -1026,24 +1023,19 @@ class AnalysisPipeline:
         if env.empty:
             return {'error': 'No environmental data available'}
         
-        # Determine which columns to use
         vector_col = 'count' if 'count' in vectors.columns else 'density_per_trap'
         if vector_col not in vectors.columns:
             return {'error': 'No vector abundance column found'}
         
-        # Get climate variables
         climate_vars = self.config.environmental_variables
         
-        # Also include other numeric columns that might be climate data
-        numeric_cols = env.select_dtypes(include=[np.number]).columns.tolist()
-        for col in numeric_cols:
-            if col not in ['year', 'month'] and col not in climate_vars:
-                climate_vars.append(col)
-        
-        # Group by species if available
+        # Only group by species if it exists and has >1 unique value
         group_cols = []
         if 'species_name' in vectors.columns:
-            group_cols.append('species_name')
+            # Don't add species_name as a group column if it's already in the DataFrame
+            # The analysis module will handle it
+            if vectors['species_name'].nunique() > 1:
+                group_cols.append('species_name')
         
         return self.modules.vector_climate_analysis(
             vector_df=vectors,
@@ -1058,9 +1050,6 @@ class AnalysisPipeline:
 
 
     def _analyze_vector_disease(self) -> Dict:
-        """
-        Run vector-disease relationship analysis.
-        """
         vectors = self.data.get('vectors', pd.DataFrame())
         cases = self.data.get('cases', pd.DataFrame())
         
@@ -1074,12 +1063,9 @@ class AnalysisPipeline:
         if vector_col not in vectors.columns:
             return {'error': 'No vector abundance column found'}
         
-        # Only use group columns that actually exist and have meaningful data
         group_cols = []
-        if 'species_name' in vectors.columns:
-            # Check if species_name has more than one unique value
-            if vectors['species_name'].nunique() > 1:
-                group_cols.append('species_name')
+        if 'species_name' in vectors.columns and vectors['species_name'].nunique() > 1:
+            group_cols.append('species_name')
         
         return self.modules.vector_disease_analysis(
             vector_df=vectors,
