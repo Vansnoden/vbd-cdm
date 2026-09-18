@@ -1,0 +1,58 @@
+---
+title: "VBD Analysis — `r cfg$study_name`"
+format:
+  html: { toc: true, code-fold: true }
+  docx: default
+params:
+  cfg: null
+  results: null
+---
+
+```{r}
+#| echo: false
+library(dplyr); library(ggplot2); library(glue)
+cfg <- params$cfg
+res <- params$results
+```
+
+## Data availability
+
+```{r}
+#| echo: false
+tibble::tibble(
+  dataset     = c("cases", "vectors", "environment",
+                  "interventions", "resistance"),
+  n_records   = c(nrow(res$cases), nrow(res$vectors),
+                  nrow(res$environment),
+                  nrow(res$interventions), nrow(res$resistance))
+) |> gt::gt()
+```
+
+## Seasonal pattern
+
+```{r}
+#| echo: false
+res$fig_seasonal
+```
+
+## Climate correlations
+
+```{r}
+#| echo: false
+res$climate_cor$table |> gt::gt()
+```
+
+## Negative binomial GLM
+
+```{r}
+#| echo: false
+res$glm_nb$coefficients |> gt::gt() |>
+  gt::fmt_number(columns = where(is.numeric), decimals = 3)
+```
+
+## Distributed lag non-linear model
+
+```{r}
+#| echo: false
+res$fig_dlnm_surface
+```

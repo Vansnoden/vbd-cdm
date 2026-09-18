@@ -26,6 +26,9 @@ from scipy.spatial.distance import pdist
 import warnings
 warnings.filterwarnings('ignore')
 import logging
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from dlnmpy import crossbasis, crosspred
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,104 @@ class AnalysisModules:
             return {'error': str(e)}
         
         return results
+
+
+    @staticmethod
+    def negative_binomial_glm(
+        df: pd.DataFrame,
+        response: str = "case_count",
+        predictors: Optional[List[str]] = None,
+        offset_col: Optional[str] = "log_population",
+        group_cols: Optional[List[str]] = None,
+    ) -> Dict:
+        """
+        Fit a negative binomial GLM with log link.
+
+        Parameters
+        ----------
+        df : DataFrame with one row per location-time unit.
+        response : count column (case_count).
+        predictors : list of covariate names.
+        offset_col : column with log(population); if None, no offset.
+        group_cols : if provided, fit separate models per group.
+
+        Returns
+        -------
+        dict with model summary, coefficients, dispersion, AIC, residuals.
+        """
+        if df is None or df.empty:
+            return {"error": "No data"}
+
+        df = df.copy()
+        if predictors is None:
+            predictors = [c for c in df.columns
+                        if c != response and df[c].dtype.kind in "if"]
+
+        if offset_col and offset_col not in df.columns:
+            return {"error": f"Offset column '{offset_col}' not found"}
+
+        results = {}
+
+        def _fit(sub):
+            formula = f"{response} ~ " + " + ".join(predictors)
+            kwargs = {"data": sub, "family": sm.families.NegativeBinomial()}
+            if offset_col:
+                kwargs["offset"] = sub[offset_col]
+            model = smf.glm(formula=formula, **kwargs).fit()
+            return {
+                "params": model.params.to_dict(),
+                "pvalues": model.pvalues.to_dict(),
+                "conf_int": model.conf_int().to_dict(),
+                "aic": model.aic,
+                "bic": model.bic,
+                "dispersion": model.scale,
+                "residual_deviance": model.deviance,
+                "fitted": model.fittedvalues.values,
+                "residuals": model.resid_deviance.values,
+            }
+
+        if group_cols:
+            for name, group in df.groupby(group_cols):
+                if len(group) < 30:
+                    continue
+                try:
+                    results[str(name)] = _fit(group)
+                except Exception as e:
+                    results[str(name)] = {"error": str(e)}
+        else:
+            try:
+                results = _fit(df)
+            except Exception as e:
+                return {"error": str(e)}
+
+        return results
+
+    
+    @staticmethod
+    def overdispersion_test(df, response="case_count", predictors=None):
+        """Compare Poisson vs NB via likelihood ratio / dispersion."""
+        import statsmodels.api as sm
+        import statsmodels.formula.api as smf
+
+        formula = f"{response} ~ " + " + ".join(predictors)
+        poisson = smf.glm(formula=formula, data=df,
+                        family=sm.families.Poisson()).fit()
+        nb = smf.glm(formula=formula, data=df,
+                    family=sm.families.NegativeBinomial()).fit()
+
+        # Pearson chi2 / df should be ~1 for Poisson if no overdispersion
+        pearson_chi2 = ((df[response] - poisson.fittedvalues) ** 2
+                        / poisson.fittedvalues).sum()
+        dispersion = pearson_chi2 / poisson.df_resid
+
+        return {
+            "poisson_dispersion": dispersion,
+            "poisson_aic": poisson.aic,
+            "nb_aic": nb.aic,
+            "nb_alpha": nb.params.get("alpha", None),
+            "conclusion": "Use NB" if dispersion > 1.5 else "Poisson adequate",
+        }
+
     
     # ========================= VECTOR-CLIMATE ANALYSIS =========================
     

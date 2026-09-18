@@ -193,9 +193,9 @@ data_sources:
 process:
   steps:
     # - ingest_data
-    # - consolidate
+    - consolidate
     # - generate_summary
-    - analyze
+    # - analyze
   analyze:
     # To use all data, comment out or remove the filter line
     # filter: "dim_location.country_code = 'KE'"

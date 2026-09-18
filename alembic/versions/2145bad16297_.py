@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: e3f581d3c585
+Revision ID: 2145bad16297
 Revises: 
-Create Date: 2026-07-13 22:44:24.127946
+Create Date: 2026-09-14 10:31:31.285797
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'e3f581d3c585'
+revision: str = '2145bad16297'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -121,7 +121,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['vector_code'], ['dim_vector.vector_code'], ),
-    sa.PrimaryKeyConstraint('bionomics_id')
+    sa.PrimaryKeyConstraint('bionomics_id'),
+    sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'source_code', name='uq_fact_bionomics_natural')
     )
     op.create_index('idx_fact_bionomics_date', 'fact_bionomics', ['date_id'], unique=False)
     op.create_index('idx_fact_bionomics_source', 'fact_bionomics', ['source_code'], unique=False)
@@ -160,13 +161,15 @@ def upgrade() -> None:
     sa.Column('age_group', sa.String(length=20), nullable=True),
     sa.Column('sex', sa.String(length=10), nullable=True),
     sa.Column('outcome', sa.String(length=20), nullable=True),
+    sa.Column('case_count', sa.Integer(), server_default='1', nullable=False),
     sa.ForeignKeyConstraint(['date_id_onset'], ['dim_time.date_id'], ),
     sa.ForeignKeyConstraint(['date_id_reported'], ['dim_time.date_id'], ),
     sa.ForeignKeyConstraint(['disease_code'], ['dim_disease.disease_code'], ),
     sa.ForeignKeyConstraint(['identification_method_code'], ['dim_identification_method.method_code'], ),
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
-    sa.PrimaryKeyConstraint('case_id')
+    sa.PrimaryKeyConstraint('case_id'),
+    sa.UniqueConstraint('location_id', 'date_id_onset', 'disease_code', 'identification_method_code', 'source_code', 'case_status', 'age_group', 'sex', name='uq_fact_case_natural')
     )
     op.create_index('idx_fact_case_disease', 'fact_disease_case', ['disease_code'], unique=False)
     op.create_index('idx_fact_case_location', 'fact_disease_case', ['location_id'], unique=False)
@@ -237,7 +240,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['test_type_code'], ['dim_resistance_test_type.test_type_code'], ),
     sa.ForeignKeyConstraint(['vector_code'], ['dim_vector.vector_code'], ),
-    sa.PrimaryKeyConstraint('resistance_id')
+    sa.PrimaryKeyConstraint('resistance_id'),
+    sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'insecticide_code', 'test_type_code', 'source_code', 'concentration', name='uq_fact_ir_natural')
     )
     op.create_index('idx_fact_resistance_date', 'fact_insecticide_resistance', ['date_id'], unique=False)
     op.create_index('idx_fact_resistance_insecticide', 'fact_insecticide_resistance', ['insecticide_code'], unique=False)
@@ -257,7 +261,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['target_disease_code'], ['dim_disease.disease_code'], ),
-    sa.PrimaryKeyConstraint('intervention_id')
+    sa.PrimaryKeyConstraint('intervention_id'),
+    sa.UniqueConstraint('location_id', 'date_start', 'target_disease_code', 'source_code', 'intervention_type', name='uq_fact_intervention_natural')
     )
     op.create_index('idx_fact_intervention_disease', 'fact_intervention', ['target_disease_code'], unique=False)
     op.create_index('idx_fact_intervention_location', 'fact_intervention', ['location_id'], unique=False)
@@ -298,7 +303,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.ForeignKeyConstraint(['vector_code'], ['dim_vector.vector_code'], ),
-    sa.PrimaryKeyConstraint('observation_id')
+    sa.PrimaryKeyConstraint('observation_id'),
+    sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'source_code', 'life_stage', 'sex', 'collection_method', name='uq_fact_vec_obs_natural')
     )
     op.create_index('idx_fact_vector_date', 'fact_vector_observation', ['date_id'], unique=False)
     op.create_index('idx_fact_vector_location', 'fact_vector_observation', ['location_id'], unique=False)

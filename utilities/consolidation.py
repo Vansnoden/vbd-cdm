@@ -169,24 +169,52 @@ def is_real_number_robust(value: str) -> bool:
 
 
 @lru_cache(maxsize=10000)
-def get_country_from_coords(lat: float, lon: float, max_distance_km: float = 200.0) -> Tuple[Optional[str], Optional[str]]:
-    """Get ISO country name and code from latitude and longitude coordinates."""
-    if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+def get_country_from_coords(
+    lat: float,
+    lon: float,
+    max_distance_km: float = 200.0,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get ISO country name and code from latitude and longitude coordinates.
+
+    Resolution order:
+        1. reverse_geocode (requires internet, most accurate)
+        2. Nearest coordinate in COUNTRY_LOOKUP (Haversine, offline)
+        3. Bounding-box fallback for well-known African regions
+
+    Returns (None, None) if the coordinates are missing, non-numeric,
+    out of range, or cannot be resolved by any method.
+    """
+    # 1. Null / NaN guard (covers None, float('nan'), pd.NA, np.nan)
+    try:
+        if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+            return None, None
+    except (TypeError, ValueError):
         return None, None
 
-    if is_real_number_robust(str(lat)) or is_real_number_robust(str(lon)):
+    # 2. Numeric guard — FIXED. Previously this condition was inverted,
+    #    so valid coordinates were rejected and invalid ones accepted.
+    if not is_real_number_robust(str(lat)) or not is_real_number_robust(str(lon)):
         return None, None
 
-    if not (float('-90') <= float(str(lat)) <= float(90)) or not (float('-180') <= float(str(lon)) <= float(180)):
+    # 3. Coerce to float once and reuse.
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
         return None, None
 
-    # Method 1: Try reverse_geocode
+    # 4. Bounds check.
+    if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0):
+        return None, None
+
+    # 5. Method 1: reverse_geocode (online).
     try:
         import reverse_geocode as rg
-        result = rg.search([(lat, lon)])
-        if result and len(result) > 0:
-            country_name = result[0].get('country')
-            country_code_raw = result[0].get('country_code')
+        result = rg.search([(lat_f, lon_f)])
+        if result:
+            country_name = result[0].get("country")
+            country_code_raw = result[0].get("country_code")
             if country_code_raw:
                 country_code = country_code_raw.upper()
                 if len(country_code) == 3:
@@ -196,19 +224,26 @@ def get_country_from_coords(lat: float, lon: float, max_distance_km: float = 200
                             break
                 elif len(country_code) != 2:
                     country_code = None
-                if country_code and country_code in ISO_COUNTRY_CODES:
-                    return ISO_TO_COUNTRY_NAME.get(country_code, country_name), country_code
-    except (ImportError, Exception):
-        pass
 
-    # Method 2: Nearest known coordinate lookup
-    country_name, country_code = _get_country_from_nearest(lat, lon, max_distance_km)
+                if country_code and country_code in ISO_COUNTRY_CODES:
+                    return (
+                        ISO_TO_COUNTRY_NAME.get(country_code, country_name),
+                        country_code,
+                    )
+    except ImportError:
+        # reverse_geocode not installed — fall through to offline methods.
+        pass
+    except Exception as exc:  # network / lookup error
+        logger.debug(f"reverse_geocode failed for ({lat_f}, {lon_f}): {exc}")
+
+    # 6. Method 2: nearest known coordinate.
+    country_name, country_code = _get_country_from_nearest(lat_f, lon_f, max_distance_km)
     if country_code:
         return country_name, country_code
 
-    # Method 3: Bounding box fallback
-    return _get_country_from_bounding_box(lat, lon)
-
+    # 7. Method 3: bounding box fallback.
+    return _get_country_from_bounding_box(lat_f, lon_f)
+    
 
 def _get_country_from_nearest(lat: float, lon: float, max_distance_km: float = 200.0) -> Tuple[Optional[str], Optional[str]]:
     """Find nearest country using the COUNTRY_LOOKUP table."""
@@ -802,21 +837,35 @@ class DataConsolidator:
         else:
             logger.warning("No resistance statuses found!")
 
-    # ===================== BURDEN EXPANSION =====================
 
-    def _expand_burden_to_daily(self):
-        """Expand yearly disease burden data to daily records."""
+    # ===================== BURDEN EXPANSION =====================
+    def _expand_burden_to_daily(self, force: bool = False):
+        """
+        Expand yearly disease burden data to daily records.
+
+        Each day gets one row in fact_disease_case with the daily case count
+        stored in the case_count column.
+
+        Parameters
+        ----------
+        force : bool
+            If True, delete and re-insert existing ESTIMATE rows for each
+            burden record. If False (default), skip burden records that
+            already have ESTIMATE rows, making the method idempotent.
+        """
         logger.info("=" * 60)
         logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
         logger.info("=" * 60)
 
-        total_burden = self.session.execute(text("SELECT COUNT(*) FROM fact_disease_burden")).scalar()
+        total_burden = self.session.execute(
+            text("SELECT COUNT(*) FROM fact_disease_burden")
+        ).scalar()
 
         if total_burden == 0:
             logger.info("No burden records found")
             return
 
-        # Get population estimates
+        # ---------------- Population map ----------------
         pop_results = self.session.execute(text("""
             SELECT location_id, indicator_value
             FROM fact_socioeconomic_condition
@@ -824,22 +873,25 @@ class DataConsolidator:
         """)).fetchall()
         population_map = {r[0]: r[1] for r in pop_results}
 
-        # Get all locations
-        loc_results = self.session.execute(text("SELECT location_id FROM dim_location")).fetchall()
+        loc_results = self.session.execute(
+            text("SELECT location_id FROM dim_location")
+        ).fetchall()
         all_location_ids = [r[0] for r in loc_results]
 
-        default_population = 1000000
+        default_population = 1_000_000
         for loc_id in all_location_ids:
-            if loc_id not in population_map or population_map[loc_id] is None or population_map[loc_id] <= 0:
+            if (loc_id not in population_map
+                    or population_map[loc_id] is None
+                    or population_map[loc_id] <= 0):
                 population_map[loc_id] = default_population
 
-        # Get burden records with valid data
+        # ---------------- Burden records ----------------
         burden_records = self.session.execute(text("""
             SELECT burden_id, location_id, year, disease_code, source_code,
-                   incidence_rate, cases_mean
+                incidence_rate, cases_mean
             FROM fact_disease_burden
-            WHERE incidence_rate IS NOT NULL AND incidence_rate > 0
-               OR cases_mean IS NOT NULL AND cases_mean > 0
+            WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0)
+            OR (cases_mean IS NOT NULL AND cases_mean > 0)
         """)).fetchall()
 
         if not burden_records:
@@ -848,132 +900,186 @@ class DataConsolidator:
 
         logger.info(f"Found {len(burden_records)} burden records to expand")
 
-        # Seasonal factors
+        # ---------------- Seasonal factors ----------------
+        # CHANGED (bug fix): the original formula multiplied by 12, which made the
+        # factors sum to 12 rather than 1. Because monthly_cases = annual_cases *
+        # normalized_factor[month] is then summed over the year, this inflated
+        # the yearly total by 12x. The correct normalisation divides by the total
+        # so that SUM(normalized_factors) == 1, which guarantees that the daily
+        # counts across the year sum to approximately annual_cases.
         monthly_factors = {
             1: 0.6, 2: 0.5, 3: 0.7, 4: 1.4, 5: 1.5, 6: 1.3,
-            7: 1.2, 8: 1.0, 9: 0.8, 10: 0.6, 11: 0.5, 12: 0.5
+            7: 1.2, 8: 1.0, 9: 0.8, 10: 0.6, 11: 0.5, 12: 0.5,
+        }
+        total_factor = sum(monthly_factors.values())
+        normalized_factors = {
+            m: f / total_factor for m, f in monthly_factors.items()
         }
 
-        total_factor = sum(monthly_factors.values())
-        normalized_factors = {m: f * 12 / total_factor for m, f in monthly_factors.items()}
-
-        inserted_count = 0
-        error_count = 0
         is_sqlite = 'sqlite' in str(self.session.bind.url).lower()
 
+        inserted_count = 0
+        skipped_count = 0
+        already_present_count = 0
+        error_count = 0
+
         for record in burden_records:
-            burden_id, location_id, year, disease_code, source_code, incidence_rate, cases_mean = record
+            (burden_id, location_id, year, disease_code,
+            source_code, incidence_rate, cases_mean) = record
 
             population = population_map.get(location_id, default_population)
 
             if incidence_rate is not None and incidence_rate > 0 and population > 0:
-                annual_cases = (incidence_rate / 100000) * population
+                annual_cases = (incidence_rate / 100_000) * population
             elif cases_mean is not None and cases_mean > 0:
                 annual_cases = cases_mean
             else:
+                skipped_count += 1
                 continue
 
             annual_cases = max(annual_cases, 1)
 
             start_date = datetime(year, 1, 1)
             end_date = datetime(year, 12, 31)
-            current_date = start_date
-            daily_cases_list = []
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
 
+            # ---------------- Idempotency guard ----------------
+            # CHANGED: check for existing ESTIMATE rows before doing any work.
+            existing = self.session.execute(text("""
+                SELECT COUNT(*) FROM fact_disease_case
+                WHERE location_id = :loc_id
+                AND date_id_onset >= :start_date
+                AND date_id_onset <= :end_date
+                AND disease_code = :disease
+                AND identification_method_code = 'ESTIMATE'
+            """), {
+                'loc_id': location_id,
+                'start_date': start_str,
+                'end_date': end_str,
+                'disease': disease_code,
+            }).scalar()
+
+            if existing and existing > 0 and not force:
+                logger.info(
+                    f"  Skipping burden_id {burden_id} "
+                    f"(location={location_id}, year={year}, disease={disease_code}): "
+                    f"{existing} ESTIMATE rows already exist."
+                )
+                already_present_count += 1
+                continue
+
+            # ---------------- Build the daily list ----------------
+            daily_cases_list = []
+            current_date = start_date
             while current_date <= end_date:
                 month = current_date.month
+                # CHANGED: correct days_in_month for December.
                 if month == 12:
-                    days_in_month = 31
+                    next_month = datetime(year + 1, 1, 1)
                 else:
                     next_month = datetime(year, month + 1, 1)
-                    days_in_month = (next_month - datetime(year, month, 1)).days
+                days_in_month = (next_month - datetime(year, month, 1)).days
 
                 monthly_cases = annual_cases * normalized_factors[month]
                 daily_cases = max(1, int(round(monthly_cases / days_in_month)))
 
                 daily_cases_list.append({
-                    'location_id': location_id,
+                    'loc_id': location_id,
                     'date_id': current_date.strftime('%Y-%m-%d'),
-                    'disease_code': disease_code,
-                    'source_code': source_code
+                    'disease': disease_code,
+                    'src_code': source_code,
+                    'case_count': daily_cases,     # CHANGED: keep the value
                 })
                 current_date += timedelta(days=1)
 
-            if daily_cases_list:
-                try:
+            if not daily_cases_list:
+                continue
+
+            try:
+                # Delete any existing ESTIMATE rows if we got here. When
+                # existing == 0 this is a harmless no-op; when force=True it
+                # clears the previous expansion.
+                if existing and existing > 0:
                     self.session.execute(text("""
                         DELETE FROM fact_disease_case
                         WHERE location_id = :loc_id
-                          AND date_id_onset >= :start_date
-                          AND date_id_onset <= :end_date
-                          AND disease_code = :disease
-                          AND identification_method_code = 'ESTIMATE'
+                        AND date_id_onset >= :start_date
+                        AND date_id_onset <= :end_date
+                        AND disease_code = :disease
+                        AND identification_method_code = 'ESTIMATE'
                     """), {
                         'loc_id': location_id,
-                        'start_date': start_date.strftime('%Y-%m-%d'),
-                        'end_date': end_date.strftime('%Y-%m-%d'),
-                        'disease': disease_code
+                        'start_date': start_str,
+                        'end_date': end_str,
+                        'disease': disease_code,
                     })
 
-                    batch_size = 5000
-                    for i in range(0, len(daily_cases_list), batch_size):
-                        batch = daily_cases_list[i:i+batch_size]
+                batch_size = 5000
+                for i in range(0, len(daily_cases_list), batch_size):
+                    batch = daily_cases_list[i:i + batch_size]
 
-                        if is_sqlite:
-                            for daily in batch:
-                                self.session.execute(text("""
-                                    INSERT INTO fact_disease_case (
-                                        location_id, date_id_onset, date_id_reported, disease_code,
-                                        identification_method_code, source_code, case_status,
-                                        host_type, age_group, sex, outcome
-                                    ) VALUES (
-                                        :loc_id, :date_id, :date_id, :disease,
-                                        'ESTIMATE', :src_code, 'confirmed', 'human',
-                                        'all', 'unknown', 'unknown'
-                                    )
-                                """), {
-                                    'loc_id': daily['location_id'],
-                                    'date_id': daily['date_id'],
-                                    'disease': daily['disease_code'],
-                                    'src_code': daily['source_code']
-                                })
-                        else:
-                            values = []
-                            for daily in batch:
-                                values.append({
-                                    'loc_id': daily['location_id'],
-                                    'date_id': daily['date_id'],
-                                    'disease': daily['disease_code'],
-                                    'src_code': daily['source_code']
-                                })
-
+                    if is_sqlite:
+                        # pysqlite does not reliably expand a list-of-dicts into
+                        # multiple rows via executemany on a text() clause, so
+                        # loop explicitly. Each row already carries :case_count.
+                        for row in batch:
                             self.session.execute(text("""
                                 INSERT INTO fact_disease_case (
-                                    location_id, date_id_onset, date_id_reported, disease_code,
-                                    identification_method_code, source_code, case_status,
-                                    host_type, age_group, sex, outcome
+                                    location_id, date_id_onset, date_id_reported,
+                                    disease_code, identification_method_code,
+                                    source_code, case_status, host_type,
+                                    age_group, sex, outcome, case_count
                                 ) VALUES (
-                                    :loc_id, :date_id, :date_id, :disease,
-                                    'ESTIMATE', :src_code, 'confirmed', 'human',
-                                    'all', 'unknown', 'unknown'
+                                    :loc_id, :date_id, :date_id,
+                                    :disease, 'ESTIMATE', :src_code,
+                                    'confirmed', 'human',
+                                    'all', 'unknown', 'unknown', :case_count
                                 )
-                            """), values)
+                            """), row)
+                    else:
+                        # PostgreSQL (psycopg2) handles executemany natively.
+                        # CHANGED: case_count is now included in the column list
+                        # and the VALUES clause. Previously it was omitted here
+                        # entirely, so PostgreSQL inserts silently defaulted to 1.
+                        self.session.execute(text("""
+                            INSERT INTO fact_disease_case (
+                                location_id, date_id_onset, date_id_reported,
+                                disease_code, identification_method_code,
+                                source_code, case_status, host_type,
+                                age_group, sex, outcome, case_count
+                            ) VALUES (
+                                :loc_id, :date_id, :date_id,
+                                :disease, 'ESTIMATE', :src_code,
+                                'confirmed', 'human',
+                                'all', 'unknown', 'unknown', :case_count
+                            )
+                        """), batch)
 
-                        self.session.commit()
+                self.session.commit()
+                inserted_count += len(daily_cases_list)
+                logger.info(
+                    f"  Expanded burden_id {burden_id} ({year}) into "
+                    f"{len(daily_cases_list)} daily records"
+                )
 
-                    inserted_count += len(daily_cases_list)
+            except Exception as e:
+                logger.error(f"Error expanding burden_id {burden_id}: {e}")
+                self.session.rollback()
+                error_count += 1
+                continue
 
-                except Exception as e:
-                    logger.error(f"Error expanding burden_id {burden_id}: {e}")
-                    self.session.rollback()
-                    error_count += 1
-                    continue
-
-        self.session.commit()
-        logger.info(f"Expanded {inserted_count} daily records, errors: {error_count}")
+        logger.info("=" * 60)
+        logger.info("BURDEN EXPANSION COMPLETE")
+        logger.info(f"  Inserted:          {inserted_count} daily records")
+        logger.info(f"  Already present:   {already_present_count} records "
+                    f"(use force=True to overwrite)")
+        logger.info(f"  Skipped (no data): {skipped_count} records")
+        logger.info(f"  Errors:            {error_count}")
+        logger.info("=" * 60)
+    
 
     # ===================== DUPLICATE RESOLUTION =====================
-
     def resolve_fact_table_duplicates(self):
         """Resolve duplicates across fact tables."""
         logger.info("Resolving fact table duplicates...")

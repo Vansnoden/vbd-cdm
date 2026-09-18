@@ -31,6 +31,7 @@ dask==2026.1.2
 debugpy==1.8.20
 decorator==5.2.1
 defusedxml==0.7.1
+dlnmpy==0.6.1
 docutils==0.22.4
 earthengine-api==1.7.14
 eccodes==2.45.0

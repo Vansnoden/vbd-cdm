@@ -219,97 +219,63 @@ class BaseAnalysis:
         
         return data
     
+    
     def _query_cases(self) -> pd.DataFrame:
-        """
-        Query disease case data with fallbacks.
-        
-        Tries in order:
-        1. Actual case data from fact_disease_case (includes ESTIMATE records from burden expansion)
-        2. Burden data from fact_disease_burden (annual, interpolated to monthly)
-        3. Vector abundance as a proxy
-        """
         try:
-            # First try to get case data - include ALL identification methods
             query = self.session.query(
-                DimTime.date,
-                DimTime.year,
-                DimTime.month,
-                DimTime.week,
-                DimTime.season,
-                FactDiseaseCase.disease_code,
-                FactDiseaseCase.case_status,
-                FactDiseaseCase.host_type,
-                FactDiseaseCase.age_group,
-                FactDiseaseCase.sex,
-                FactDiseaseCase.outcome,
-                FactDiseaseCase.case_id,
-                FactDiseaseCase.identification_method_code
-            ).select_from(
-                FactDiseaseCase
-            ).join(
+                DimTime.date.label("date"),
+                DimTime.year.label("year"),
+                DimTime.month.label("month"),
+                DimTime.week.label("week"),
+                DimTime.season.label("season"),
+                func.sum(
+                    func.coalesce(FactDiseaseCase.case_count, 1)
+                ).label("case_count"),
+            ).select_from(FactDiseaseCase).join(
                 DimTime, FactDiseaseCase.date_id_reported == DimTime.date_id
             )
-            
-            # Apply location filter if we have location IDs
+
             if self.location_ids:
                 query = query.filter(FactDiseaseCase.location_id.in_(self.location_ids))
-            
-            # Only add year filter if start_year and end_year are specified
+
             if self.config.start_year and self.config.end_year:
                 query = query.filter(
                     DimTime.year.between(self.config.start_year, self.config.end_year)
                 )
-            
+
             if self.config.disease_code:
                 query = query.filter(FactDiseaseCase.disease_code == self.config.disease_code)
-            
-            # Execute query
+
+            query = query.group_by(
+                DimTime.date, DimTime.year, DimTime.month, DimTime.week, DimTime.season
+            ).order_by(DimTime.date)
+
             df = pd.read_sql(query.statement, self.session.bind)
-            
-            # Check if we have data
+
             if not df.empty:
-                # Log identification method distribution
-                if 'identification_method_code' in df.columns:
-                    method_counts = df['identification_method_code'].value_counts()
-                    logger.info(f"  Case records by identification method: {dict(method_counts)}")
-                
-                # Aggregate counts by date
-                df = df.groupby([
-                    'date', 'year', 'month', 'week', 'season'
-                ]).size().reset_index(name='case_count')
-                
-                # Log date range
-                logger.info(f"  Found case data: {len(df)} records")
+                logger.info(f"  Found case data: {len(df)} days, "
+                            f"{int(df['case_count'].sum())} total cases")
                 logger.info(f"  Date range: {df['date'].min()} to {df['date'].max()}")
                 return df
-            
-            # If no case data, try burden data
+
+            # Fallback chain unchanged ...
             logger.info("  No case data found, trying burden data as fallback...")
             burden_df = self._query_burden_as_cases()
-            
             if not burden_df.empty:
-                logger.info(f"  Using burden data as cases: {len(burden_df)} records")
-                logger.info(f"  Date range: {burden_df['date'].min()} to {burden_df['date'].max()}")
                 return burden_df
-            
-            # If no burden data, try vector abundance
             logger.info("  No burden data found, trying vector abundance as proxy...")
             vector_df = self._query_vector_as_cases()
-            
             if not vector_df.empty:
-                logger.info(f"  Using vector abundance as proxy: {len(vector_df)} records")
                 return vector_df
-            
-            # If all else fails, return empty DataFrame
             logger.warning("  No case, burden, or vector data available")
-            return pd.DataFrame(columns=['date', 'year', 'month', 'week', 'season', 'case_count'])
-            
+            return pd.DataFrame(columns=['date','year','month','week','season','case_count'])
+
         except Exception as e:
             logger.error(f"Error querying cases: {e}")
-            import traceback
-            traceback.print_exc()
-            return pd.DataFrame(columns=['date', 'year', 'month', 'week', 'season', 'case_count'])
-    
+            import traceback; traceback.print_exc()
+            return pd.DataFrame(columns=['date','year','month','week','season','case_count'])
+
+
     def _query_burden_as_cases(self) -> pd.DataFrame:
         """Use disease burden data as a proxy for cases."""
         try:

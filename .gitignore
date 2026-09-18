@@ -11,3 +11,4 @@ python_bundle.txt
 logs/
 outputs/*
 outputs/analysis/*
+.Rproj.user

@@ -147,6 +147,11 @@ class FactVectorObservation(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
+        UniqueConstraint(
+            "location_id", "date_id", "vector_code", "source_code",
+            "life_stage", "sex", "collection_method",
+            name="uq_fact_vec_obs_natural",
+        ),
         Index("idx_fact_vector_location", "location_id"),
         Index("idx_fact_vector_date", "date_id"),
         Index("idx_fact_vector_vector", "vector_code"),
@@ -171,6 +176,7 @@ class FactDiseaseCase(Base):
     age_group = Column(String(20))
     sex = Column(String(10))
     outcome = Column(String(20))
+    case_count = Column(Integer, nullable=False, server_default="1")
 
     # Relationships
     location = relationship("DimLocation")
@@ -181,6 +187,12 @@ class FactDiseaseCase(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
+        UniqueConstraint(
+            "location_id", "date_id_onset", "disease_code",
+            "identification_method_code", "source_code",
+            "case_status", "age_group", "sex",
+            name="uq_fact_case_natural",
+        ),
         Index("idx_fact_case_location", "location_id"),
         Index("idx_fact_case_onset", "date_id_onset"),
         Index("idx_fact_case_reported", "date_id_reported"),
@@ -213,8 +225,6 @@ class FactInsecticideResistance(Base):
     vgsc995l_vgsc995s_n = Column(Integer)
     vgsc995s_vgsc995s_n = Column(Integer)
     vgsc995f_vgsc995s_n = Column(Integer)
-    vgsc995s_vgsc995s_n = Column(Integer)
-    vgsc_generation = Column(String)
     vgsc_generation = Column(String)
     mortality = Column(Float)
     resistance_status = Column(String(30))
@@ -228,6 +238,11 @@ class FactInsecticideResistance(Base):
     vector = relationship("DimVector")
 
     __table_args__ = (
+        UniqueConstraint(
+            "location_id", "date_id", "vector_code", "insecticide_code",
+            "test_type_code", "source_code", "concentration",
+            name="uq_fact_ir_natural",
+        ),
         Index("idx_fact_resistance_insecticide", "insecticide_code"),
         Index("idx_fact_resistance_source", "source_code"),
         Index("idx_fact_resistance_date", "date_id"),
@@ -257,6 +272,10 @@ class FactBionomics(Base):
     vector = relationship("DimVector")
 
     __table_args__ = (
+        UniqueConstraint(
+            "location_id", "date_id", "vector_code", "source_code",
+            name="uq_fact_bionomics_natural",
+        ),
         Index("idx_fact_bionomics_source", "source_code"),
         Index("idx_fact_bionomics_date", "date_id"),
         Index("idx_fact_bionomics_vector", "vector_code"),
@@ -284,6 +303,11 @@ class FactIntervention(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
+        UniqueConstraint(
+            "location_id", "date_start", "target_disease_code",
+            "source_code", "intervention_type",
+            name="uq_fact_intervention_natural",
+        ),
         Index("idx_fact_intervention_location", "location_id"),
         Index("idx_fact_intervention_start", "date_start"),
         Index("idx_fact_intervention_disease", "target_disease_code"),

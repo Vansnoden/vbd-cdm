@@ -220,80 +220,99 @@ def expand_burden_to_daily(
     dry_run: bool = False,
     specific_location_id: int = None,
     seed: int = 42,
-    base_variation: float = 0.25
+    base_variation: float = 0.25,
+    force: bool = False
 ):
     """
     Expand yearly disease burden data to daily records.
-    Each day gets a single row with a case_count value.
+
+    Each day gets a single row in fact_disease_case with the daily case count
+    stored in the case_count column.
+
+    Parameters
+    ----------
+    dry_run : bool
+        If True, generate data and log it, but don't write to the database.
+    specific_location_id : int, optional
+        If provided, only expand burden records for this location.
+    seed : int
+        Random seed used when generating daily variation.
+    base_variation : float
+        Base lognormal variation for the daily noise term (0-1, typical 0.2-0.4).
+    force : bool
+        If True, delete and re-insert existing ESTIMATE rows for a burden record.
+        If False (default), skip burden records that already have ESTIMATE rows.
     """
     logger.info("=" * 60)
     logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS (WITH VARIATION)")
     logger.info("=" * 60)
-    
+
     if dry_run:
         logger.info("*** DRY RUN - No data will be inserted ***")
-    
+
     session = SessionLocal()
-    
+
     try:
-        # Check if case_count column exists, if not add it
+        # CHANGED: Removed the ad-hoc ALTER TABLE block.
+        # The case_count column is now created by an Alembic migration
+        # (see alembic/versions/*_add_case_count_to_fact_disease_case.py).
+        # If the column is missing, fail loudly instead of silently patching.
         try:
-            # Check if column exists
             session.execute(text("SELECT case_count FROM fact_disease_case LIMIT 1"))
             logger.info("✓ case_count column exists")
-        except Exception:
-            logger.info("Adding case_count column to fact_disease_case...")
-            session.execute(text("ALTER TABLE fact_disease_case ADD COLUMN case_count INTEGER DEFAULT 1"))
-            session.commit()
-            logger.info("✓ Added case_count column")
-        
-        total_burden = session.execute(text("SELECT COUNT(*) FROM fact_disease_burden")).scalar()
+        except Exception as e:
+            logger.error(
+                "case_count column missing from fact_disease_case. "
+                "Run `alembic upgrade head` before running this script."
+            )
+            raise RuntimeError("Missing case_count column; run migrations first.") from e
+
+        total_burden = session.execute(
+            text("SELECT COUNT(*) FROM fact_disease_burden")
+        ).scalar()
         logger.info(f"Total burden records: {total_burden}")
-        
+
         if total_burden == 0:
             logger.info("No burden records found to expand")
             return
-        
+
         burden_query = """
-            SELECT burden_id, location_id, year, disease_code, source_code, 
+            SELECT burden_id, location_id, year, disease_code, source_code,
                    incidence_rate, cases_mean
             FROM fact_disease_burden
             WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0)
                OR (cases_mean IS NOT NULL AND cases_mean > 0)
         """
-        
         if specific_location_id:
-            burden_query += f" AND location_id = {specific_location_id}"
-        
+            burden_query += f" AND location_id = {int(specific_location_id)}"
+
         burden_records = session.execute(text(burden_query)).fetchall()
-        
+
         if not burden_records:
             logger.warning("No burden records with valid data found.")
             return
-        
+
         logger.info(f"Found {len(burden_records)} burden records to expand")
-        
-        location_ids = set()
-        for record in burden_records:
-            location_ids.add(record[1])
-        
+
+        # Pre-compute populations once (avoids N+1 lookups)
+        location_ids = {rec[1] for rec in burden_records}
         logger.info(f"Processing {len(location_ids)} locations")
-        
+
         population_map = {}
         for loc_id in location_ids:
-            pop = get_population_for_location(session, loc_id)
-            population_map[loc_id] = pop
-            logger.debug(f"  Location {loc_id}: population = {pop}")
-        
+            population_map[loc_id] = get_population_for_location(session, loc_id)
+
         inserted_count = 0
         skipped_count = 0
+        already_present_count = 0     # CHANGED: track idempotent skips separately
         error_count = 0
-        
+
         for record in burden_records:
-            burden_id, location_id, year, disease_code, source_code, incidence_rate, cases_mean = record
-            
+            (burden_id, location_id, year, disease_code,
+             source_code, incidence_rate, cases_mean) = record
+
             population = population_map.get(location_id, 100000)
-            
+
             if incidence_rate is not None and incidence_rate > 0 and population > 0:
                 annual_cases = (incidence_rate / 100000) * population
             elif cases_mean is not None and cases_mean > 0:
@@ -302,128 +321,171 @@ def expand_burden_to_daily(
                 logger.warning(f"  Skipping burden_id {burden_id}: no valid data")
                 skipped_count += 1
                 continue
-            
+
             annual_cases = max(annual_cases, 1)
-            
-            logger.info(f"  Processing burden_id {burden_id}: "
-                       f"location={location_id}, year={year}, "
-                       f"annual_cases={annual_cases:.0f}")
-            
+
+            start_date = f"{year}-01-01"
+            end_date = f"{year}-12-31"
+
+            # CHANGED: Idempotency guard. If ESTIMATE rows already exist for
+            # (location, year, disease) and force=False, skip entirely.
+            existing = session.execute(text("""
+                SELECT COUNT(*) FROM fact_disease_case
+                WHERE location_id = :loc_id
+                  AND date_id_onset >= :start_date
+                  AND date_id_onset <= :end_date
+                  AND disease_code = :disease
+                  AND identification_method_code = 'ESTIMATE'
+            """), {
+                'loc_id': location_id,
+                'start_date': start_date,
+                'end_date': end_date,
+                'disease': disease_code,
+            }).scalar()
+
+            if existing and existing > 0 and not force:
+                logger.info(
+                    f"  Skipping burden_id {burden_id} (location={location_id}, "
+                    f"year={year}, disease={disease_code}): "
+                    f"{existing} ESTIMATE rows already exist. "
+                    f"Use force=True to overwrite."
+                )
+                already_present_count += 1
+                continue
+
+            logger.info(
+                f"  Processing burden_id {burden_id}: "
+                f"location={location_id}, year={year}, "
+                f"annual_cases={annual_cases:.0f}"
+            )
+
             daily_df = generate_daily_case_counts(
                 annual_cases=annual_cases,
                 year=year,
                 location_id=location_id,
                 base_variation=base_variation,
-                seed=seed
+                seed=seed,
             )
-            
+
             logger.info(f"    Generated {len(daily_df)} daily records")
-            logger.info(f"    Mean: {daily_df['case_count'].mean():.1f}, "
-                       f"Min: {daily_df['case_count'].min()}, "
-                       f"Max: {daily_df['case_count'].max()}, "
-                       f"Std: {daily_df['case_count'].std():.1f}")
-            
+            logger.info(
+                f"    Mean: {daily_df['case_count'].mean():.1f}, "
+                f"Min: {daily_df['case_count'].min()}, "
+                f"Max: {daily_df['case_count'].max()}, "
+                f"Std: {daily_df['case_count'].std():.1f}"
+            )
+
             if dry_run:
                 sample = daily_df.head(10)[['date_id', 'case_count']]
                 logger.info(f"    Sample (first 10 days):\n{sample.to_string()}")
                 continue
-            
+
             try:
-                start_date = f"{year}-01-01"
-                end_date = f"{year}-12-31"
-                
-                delete_result = session.execute(text("""
-                    DELETE FROM fact_disease_case
-                    WHERE location_id = :loc_id
-                      AND date_id_onset >= :start_date
-                      AND date_id_onset <= :end_date
-                      AND disease_code = :disease
-                      AND identification_method_code = 'ESTIMATE'
-                """), {
-                    'loc_id': location_id,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'disease': disease_code
-                })
-                
-                if delete_result.rowcount > 0:
-                    logger.info(f"    Deleted {delete_result.rowcount} existing estimate records")
-                
-                # Insert daily records with case_count
+                # Delete existing ESTIMATE rows if force=True (or if they were
+                # partially present). If existing == 0, this is a no-op.
+                if existing and existing > 0:
+                    delete_result = session.execute(text("""
+                        DELETE FROM fact_disease_case
+                        WHERE location_id = :loc_id
+                          AND date_id_onset >= :start_date
+                          AND date_id_onset <= :end_date
+                          AND disease_code = :disease
+                          AND identification_method_code = 'ESTIMATE'
+                    """), {
+                        'loc_id': location_id,
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'disease': disease_code,
+                    })
+                    logger.info(f"    Deleted {delete_result.rowcount} existing ESTIMATE records")
+
+                # Insert daily records with case_count populated.
                 batch_size = 5000
                 total_days = len(daily_df)
                 records_to_insert = []
-                
+                is_postgres = 'postgresql' in str(session.bind.url)
+
                 for idx, row in daily_df.iterrows():
                     records_to_insert.append({
                         'loc_id': location_id,
                         'date_id': row['date_id'],
                         'disease': disease_code,
                         'src_code': source_code,
-                        'case_count': int(row['case_count'])
+                        'case_count': int(row['case_count']),   # CHANGED: explicit int
                     })
-                    
-                    if len(records_to_insert) >= batch_size or idx == total_days - 1:
-                        if 'postgresql' in str(session.bind.url):
+
+                    is_last = (idx == total_days - 1)
+                    if len(records_to_insert) >= batch_size or is_last:
+                        if is_postgres:
+                            # PostgreSQL: executemany-style with a list of dicts.
                             session.execute(text("""
                                 INSERT INTO fact_disease_case (
-                                    location_id, date_id_onset, date_id_reported, disease_code,
-                                    identification_method_code, source_code, case_status,
-                                    host_type, age_group, sex, outcome, case_count
+                                    location_id, date_id_onset, date_id_reported,
+                                    disease_code, identification_method_code,
+                                    source_code, case_status, host_type,
+                                    age_group, sex, outcome, case_count
                                 ) VALUES (
-                                    :loc_id, :date_id, :date_id, :disease,
-                                    'ESTIMATE', :src_code, 'confirmed', 'human',
+                                    :loc_id, :date_id, :date_id,
+                                    :disease, 'ESTIMATE',
+                                    :src_code, 'confirmed', 'human',
                                     'all', 'unknown', 'unknown', :case_count
                                 )
                             """), records_to_insert)
                         else:
+                            # SQLite: loop (SQLAlchemy will not expand the list
+                            # into multiple VALUES rows with this driver in the
+                            # same way).
                             for rec in records_to_insert:
                                 session.execute(text("""
                                     INSERT INTO fact_disease_case (
-                                        location_id, date_id_onset, date_id_reported, disease_code,
-                                        identification_method_code, source_code, case_status,
-                                        host_type, age_group, sex, outcome, case_count
+                                        location_id, date_id_onset, date_id_reported,
+                                        disease_code, identification_method_code,
+                                        source_code, case_status, host_type,
+                                        age_group, sex, outcome, case_count
                                     ) VALUES (
-                                        :loc_id, :date_id, :date_id, :disease,
-                                        'ESTIMATE', :src_code, 'confirmed', 'human',
+                                        :loc_id, :date_id, :date_id,
+                                        :disease, 'ESTIMATE',
+                                        :src_code, 'confirmed', 'human',
                                         'all', 'unknown', 'unknown', :case_count
                                     )
                                 """), rec)
-                        
                         records_to_insert = []
-                
+
                 session.commit()
                 inserted_count += total_days
-                logger.info(f"  ✓ Expanded burden_id {burden_id} ({year}) into {total_days} daily records")
-                
+                logger.info(
+                    f"  ✓ Expanded burden_id {burden_id} ({year}) "
+                    f"into {total_days} daily records"
+                )
+
             except Exception as e:
                 logger.error(f"  ✗ Error expanding burden_id {burden_id}: {e}")
                 session.rollback()
                 error_count += 1
                 continue
-        
+
         if not dry_run:
             logger.info("=" * 60)
-            logger.info(f"EXPANSION COMPLETE")
-            logger.info(f"  Inserted: {inserted_count} daily records (1 per day with case_count)")
-            logger.info(f"  Skipped: {skipped_count} records")
-            logger.info(f"  Errors: {error_count}")
+            logger.info("EXPANSION COMPLETE")
+            logger.info(f"  Inserted:        {inserted_count} daily records")
+            logger.info(f"  Already present: {already_present_count} burden records skipped (use force=True to overwrite)")
+            logger.info(f"  Skipped (no data): {skipped_count} records")
+            logger.info(f"  Errors:          {error_count}")
             logger.info("=" * 60)
-            
+
             logger.info("Verifying case data...")
             verify_case_data(session)
         else:
             logger.info("=" * 60)
             logger.info("DRY RUN COMPLETE - No data inserted")
             logger.info("=" * 60)
-        
+
     except Exception as e:
         logger.error(f"Error: {e}")
         session.rollback()
         raise
     finally:
         session.close()
-
 
 def main():
     parser = argparse.ArgumentParser(

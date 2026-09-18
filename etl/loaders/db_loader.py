@@ -16,6 +16,73 @@ from database import models
 logger = logging.getLogger(__name__)
 
 
+# -----------------------------------------------------------------------------
+# Natural-key configuration
+#
+# Each entry maps a table name to:
+#   'columns'   — the columns forming the conflict target (must match a unique
+#                 constraint in the DB).
+#   'sentinels' — values used to replace NULLs in nullable natural-key columns
+#                 before insert. PostgreSQL and SQLite treat NULL as distinct in
+#                 unique indexes, so without this the constraint would not bite.
+# -----------------------------------------------------------------------------
+NATURAL_KEY_CONFIG = {
+    # ---------- Dimensions ----------
+    'dim_location':                  {'columns': ['location_code'], 'sentinels': {}},
+    'dim_disease':                   {'columns': ['disease_code'],  'sentinels': {}},
+    'dim_vector':                    {'columns': ['vector_code'],   'sentinels': {}},
+    'dim_insecticide':               {'columns': ['insecticide_code'], 'sentinels': {}},
+    'dim_source':                    {'columns': ['source_code'],   'sentinels': {}},
+    'dim_identification_method':     {'columns': ['method_code'],   'sentinels': {}},
+    'dim_resistance_test_type':      {'columns': ['test_type_code'], 'sentinels': {}},
+    'dim_socioeconomic_indicator':   {'columns': ['indicator_code'], 'sentinels': {}},
+    'dim_time':                      {'columns': ['date_id'],       'sentinels': {}},
+
+    # ---------- Facts ----------
+    'fact_environment': {
+        'columns': ['location_id', 'date_id', 'variable'],
+        'sentinels': {},
+    },
+    'fact_disease_burden': {
+        'columns': ['location_id', 'year', 'disease_code'],
+        'sentinels': {},
+    },
+    'fact_socioeconomic_condition': {
+        'columns': ['location_id', 'year', 'indicator_code'],
+        'sentinels': {},
+    },
+    'fact_health_facility': {
+        'columns': ['facility_code'],
+        'sentinels': {},
+    },
+    'fact_vector_observation': {
+        'columns': ['location_id', 'date_id', 'vector_code', 'source_code',
+                    'life_stage', 'sex', 'collection_method'],
+        'sentinels': {'life_stage': '', 'sex': '', 'collection_method': ''},
+    },
+    'fact_insecticide_resistance': {
+        'columns': ['location_id', 'date_id', 'vector_code', 'insecticide_code',
+                    'test_type_code', 'source_code', 'concentration'],
+        'sentinels': {'concentration': -1.0},
+    },
+    'fact_bionomics': {
+        'columns': ['location_id', 'date_id', 'vector_code', 'source_code'],
+        'sentinels': {},
+    },
+    'fact_intervention': {
+        'columns': ['location_id', 'date_start', 'target_disease_code',
+                    'source_code', 'intervention_type'],
+        'sentinels': {'intervention_type': ''},
+    },
+    'fact_disease_case': {
+        'columns': ['location_id', 'date_id_onset', 'disease_code',
+                    'identification_method_code', 'source_code',
+                    'case_status', 'age_group', 'sex'],
+        'sentinels': {'case_status': '', 'age_group': '', 'sex': ''},
+    },
+}
+
+
 class DBLoader:
     """
     Loads DataFrames (from MappingTransformer) into the appropriate database tables.
@@ -71,18 +138,51 @@ class DBLoader:
 
     def _get_conflict_targets(self, table_name: str, pk_cols: list) -> list:
         """
-        Determine unique/primary columns used as conflict targets.
-        For dim_location, 'location_code' is the natural unique constraint.
+        Return the natural-key columns that form the ON CONFLICT target for a table.
+        Falls back to primary keys only if the table is not in NATURAL_KEY_CONFIG.
         """
-        if table_name == 'dim_location':
-            return ['location_code']
-        elif table_name == 'fact_environment':
-            return ['location_id', 'date_id', 'variable']
-        elif table_name == 'fact_disease_burden':
-            return ['location_id', 'year', 'disease_code']
-        elif table_name == 'fact_socioeconomic_condition':
-            return ['location_id', 'year', 'indicator_code']
+        config = NATURAL_KEY_CONFIG.get(table_name)
+        if config and config['columns']:
+            return list(config['columns'])
         return pk_cols
+
+    def _prepare_for_upsert(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+        """
+        Apply natural-key hygiene to a DataFrame before insert:
+            1. Replace NULLs in nullable natural-key columns with sentinels
+            (so the unique constraint catches duplicates reliably).
+            2. Drop duplicate rows within the batch, keeping the last occurrence
+            (PostgreSQL rejects multi-row ON CONFLICT that touches the same
+            target row twice within a single INSERT).
+        """
+        config = NATURAL_KEY_CONFIG.get(table_name)
+        if not config:
+            return df
+
+        df = df.copy()
+
+        # 1. Sentinels for nullable natural-key columns.
+        for col, sentinel in config['sentinels'].items():
+            if col in df.columns:
+                df[col] = df[col].where(df[col].notna(), sentinel)
+
+        # 2. Deduplicate within the batch by natural key.
+        natural_cols = [c for c in config['columns'] if c in df.columns]
+        if natural_cols and len(natural_cols) == len(config['columns']):
+            before = len(df)
+            df = df.drop_duplicates(subset=natural_cols, keep='last')
+            if len(df) < before:
+                logger.info(
+                    f"  Deduplicated {before - len(df)} rows within batch "
+                    f"for {table_name} by natural key"
+                )
+        elif natural_cols:
+            logger.warning(
+                f"  {table_name}: natural key columns {config['columns']} are not "
+                f"all present in the DataFrame; skipping in-batch deduplication."
+            )
+
+        return df
 
     # -------------------------------------------------------------------------
     # PostgreSQL COPY with staging table upsert (high performance for millions of rows)
@@ -266,47 +366,36 @@ class DBLoader:
     # Public methods
     # -------------------------------------------------------------------------
     def load_table(self, table_name: str, df: pd.DataFrame) -> int:
-        """
-        Load a single DataFrame into the database.
-
-        Args:
-            table_name: Target table name (must match SQLAlchemy model __tablename__).
-            df: DataFrame with columns matching the table schema.
-
-        Returns:
-            Number of rows inserted/upserted.
-
-        Raises:
-            ValueError: If table_name not found in models.
-            SQLAlchemyError: On database errors.
-        """
-
         if df.empty:
             logger.info(f"No data to load for table {table_name}")
             return 0
 
         if table_name not in self._table_models:
-            raise ValueError(f"Unknown table: {table_name}. Available: {list(self._table_models.keys())}")
+            raise ValueError(
+                f"Unknown table: {table_name}. Available: {list(self._table_models.keys())}"
+            )
 
         model = self._table_models[table_name]
         original_rows = len(df)
 
-        # Ensure column names match the model (drop extra columns, fill missing with None)
+        # Keep only model columns; add missing columns as NULL.
         model_columns = [c.name for c in model.__table__.columns]
-        df = df[[col for col in df.columns if col in model_columns]]
+        df = df[[col for col in df.columns if col in model_columns]].copy()
         for col in model_columns:
             if col not in df.columns:
-                df[col] = None  # add missing columns as NULL
+                df[col] = None
 
-        # Convert pandas datetime to Python date objects to avoid COPY issues
+        # Convert datetimes to date objects to keep COPY simple.
         for col in df.select_dtypes(include=['datetime64[ns]']).columns:
             df[col] = df[col].dt.date
+
+        # NEW: sentinel-fill and dedup by natural key before upsert.
+        df = self._prepare_for_upsert(df, table_name)
 
         try:
             if self.upsert:
                 if self._db_type == 'postgresql':
                     if self.use_copy and len(df) > self.batch_size * 2:
-                        # Use COPY for large DataFrames (> 2 batches)
                         self._copy_upsert_postgresql(df, table_name, model)
                     else:
                         self._upsert_postgresql(df, table_name, model)
@@ -323,6 +412,7 @@ class DBLoader:
         except SQLAlchemyError as e:
             logger.error(f"Failed to load table {table_name}: {e}")
             raise
+
 
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """
