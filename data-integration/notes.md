@@ -127,3 +127,44 @@ gdal_translate -co COMPRESS=LZW -co BIGTIFF=IF_SAFER Somali_Population_10m.vrt S
 
 ### Update documenation
 ```sphinx-build -b html docs _build/html```
+
+
+
+### Getting or refreshing vocabularies:
+
+cd ~/Documents/codes/vbd-cdm/data-integration
+mkdir -p vocabularies
+
+##### GADM 4.1 - Kenya administrative boundaries (also try gadm41_KEN.gpkg from gadm.org)
+######  Download page: https://gadm.org/download_country.html
+######   Direct:        https://geodata.ucdavis.edu/gadm/gadm4.1/gpkg/gadm41_KEN.gpkg
+
+
+```bash
+curl -L -o vocabularies/gadm41_KEN.gpkg \
+  https://geodata.ucdavis.edu/gadm/gadm4.1/gpkg/gadm41_KEN.gpkg
+```
+
+###### IDOMAL malaria ontology (OBO)
+```bash
+curl -L -o vocabularies/idomal.obo \
+  http://purl.obolibrary.org/obo/idomal.obo
+```  
+
+#### Build the three vocabularies
+
+# From data-integration/
+```bash
+python -m utilities.vocabulary.build \
+  --gadm vocabularies/gadm41_KEN.gpkg \
+  --idomal vocabularies/idomal.obo \
+  --out vocabularies/
+```
+
+which produces
+```text
+vocabularies/
+  gadm_locations.csv    (concept_code, concept_name, concept_class, parent_code, ...)
+  idomal_diseases.csv   (IDOMAL:xxxxxxxxx rows)
+  ncbi_vectors.csv      (species + subspecies under the vector genera)
+```
