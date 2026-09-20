@@ -1,9 +1,0 @@
-default:
-  study_name: "Siaya_County"
-  location: "Siaya"
-  country: "KE"
-  start_year: 2019
-  end_year: 2024
-  env_variables: ["t2m", "tp", "d2m"]
-  max_lag_months: 6
-  database: "../vbd_cdm.db"

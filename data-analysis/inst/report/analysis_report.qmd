@@ -1,0 +1,191 @@
+---
+title: "VBD Analysis — `r if (is.null(params$cfg$study_name)) 'VBD' else params$cfg$study_name`"
+format:
+  html:
+    toc: true
+    code-fold: true
+params:
+  cfg: null
+  results: null
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(glue)
+library(gt)
+
+cfg <- params$cfg
+res <- params$results
+
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
+# Return the error string if a result list carries one, otherwise NULL.
+err_of <- function(x) if (is.list(x) && !is.null(x$error)) x$error else NULL
+
+# Print a note instead of a table when data is missing or empty.
+note <- function(...) cat(paste0("_", paste0(..., collapse = ""), "_\n"))
+```
+
+## Scope
+
+This is a **vector-centred** analysis of the VBD CDM. Vectors
+(*Anopheles* spp.) are the study subject; environmental, resistance,
+bionomics, and case data are all interpreted in relation to them.
+
+## Data availability
+
+```{r}
+qa <- res$qa
+if (!is.null(qa) && is.data.frame(qa$tables) && nrow(qa$tables) > 0) {
+  qa$tables |> gt::gt() |> gt::tab_header(title = "Rows returned by each query")
+} else {
+  note("No data availability summary available.")
+}
+```
+
+```{r}
+if (!isTRUE(res$cases_available)) {
+  cat("> **Note:** `fact_disease_case` contains no observed case rows for this ",
+      "study area. Case-based analyses are reported as contextual only.\n")
+}
+```
+
+## Vector species composition and seasonality
+
+```{r}
+vs <- res$vector_seasonal
+if (!is.null(err_of(vs))) {
+  note("Vector seasonal analysis did not run: ", err_of(vs))
+} else if (is.data.frame(vs$composition) && nrow(vs$composition) > 0) {
+  vs$composition |> gt::gt() |> gt::tab_header(title = "Species composition")
+} else {
+  note("No species composition available.")
+}
+```
+
+```{r, fig.width=12, fig.height=10, fig.align='center', out.width='100%'}
+p <- res$fig_vector_seasonal
+if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No vector seasonal figure available.")
+}
+```
+
+## Vector–climate associations
+
+```{r}
+vc <- res$vector_climate
+if (!is.null(err_of(vc))) {
+  note("Vector–climate analysis did not run: ", err_of(vc))
+} else if (is.data.frame(vc$correlations) && nrow(vc$correlations) > 0) {
+  vc$correlations |> gt::gt() |>
+    gt::tab_header(title = "Pearson correlations (monthly)")
+} else {
+  note("No vector–climate correlations available.")
+}
+```
+
+```{r, fig.width=12, fig.height=4}
+fig_dir <- file.path(cfg$output_dir %||% "outputs/analysis", "figures")
+p <- file.path(fig_dir,
+               glue("{cfg$study_name}_vector_climate_correlations.png"))
+if (file.exists(p)) knitr::include_graphics(p)
+```
+
+```{r, fig.width=12, fig.height=10, fig.align='center', out.width='100%'}
+vc <- res$vector_climate
+if (!is.null(err_of(vc)) || is.null(vc$climate_variables)) {
+  note("No per-variable figures available.")
+} else {
+  for (v in vc$climate_variables) {
+    p <- file.path(fig_dir,
+                   glue("{cfg$study_name}_vector_climate_{v}.png"))
+    if (file.exists(p)) {
+      cat("\n\n### ", v, "\n\n")
+      knitr::include_graphics(p)
+    }
+  }
+}
+```
+
+## Insecticide resistance
+
+```{r}
+rs <- res$resistance_summary
+if (!is.null(err_of(rs))) {
+  note("Resistance analysis did not run: ", err_of(rs))
+} else if (is.data.frame(rs$status_by_class) && nrow(rs$status_by_class) > 0) {
+  rs$status_by_class |> gt::gt() |>
+    gt::tab_header(title = "Resistance status by chemical class")
+} else {
+  note("No classified resistance status available.")
+}
+```
+
+```{r, fig.width=12, fig.height=8, fig.align='center', out.width='100%'}
+p <- res$fig_resistance
+if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No resistance figure available.")
+}
+```
+
+## Vector bionomics
+
+```{r}
+bs <- res$bionomics_summary
+if (!is.null(err_of(bs))) {
+  note("Bionomics analysis did not run: ", err_of(bs))
+} else {
+  any_shown <- FALSE
+  for (nm in c("feeding", "biting_loc", "resting", "larval")) {
+    df <- bs[[nm]]
+    if (is.data.frame(df) && nrow(df) > 0) {
+      cat("\n\n**", nm, "**\n\n")
+      print(gt::gt(df))
+      any_shown <- TRUE
+    }
+  }
+  if (!any_shown) {
+    note("No bionomics distributions available.")
+  }
+}
+```
+
+```{r, fig.width=12, fig.height=8, fig.align='center', out.width='100%'}
+p <- res$fig_bionomics
+if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No bionomics figure available.")
+}
+```
+
+## Case data (context)
+
+```{r}
+if (!isTRUE(res$cases_available)) {
+  note("No observed case rows are present in the CDM for this study area.")
+} else {
+  cat("Observed case rows available:", res$cases_n, ".\n")
+  se <- res$seasonal
+  if (!is.null(err_of(se))) {
+    note("Case seasonality analysis did not run: ", err_of(se))
+  } else if (is.data.frame(se$monthly) && nrow(se$monthly) > 0) {
+    se$monthly |> gt::gt() |> gt::tab_header(title = "Case seasonality")
+  } else {
+    note("Case rows present but insufficient for seasonal summary.")
+  }
+}
+```
+
+```{r, fig.width=12, fig.height=5}
+p <- res$fig_seasonal
+if (isTRUE(res$cases_available) &&
+    is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+}
+```

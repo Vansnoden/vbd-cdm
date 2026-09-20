@@ -1,0 +1,126 @@
+---
+title: "VBD CDM — data availability"
+format:
+  html:
+    toc: true
+    code-fold: true
+params:
+  qa:  null
+  cfg: null
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(gt)
+
+qa  <- params$qa
+cfg <- params$cfg
+
+# Safe accessor: returns NULL instead of erroring when a field is missing
+# or its parent is not a list.
+`%||%` <- function(a, b) if (is.null(a)) b else a
+safe <- function(expr) tryCatch(expr, error = function(e) NULL)
+```
+
+## Configuration
+
+```{r}
+cfg_tbl <- tibble::tibble(
+  Setting = c(
+    "study_name", "location", "country",
+    "location_ids", "start_year", "end_year",
+    "disease_code", "include_estimated_cases",
+    "env_variables", "species_filter", "max_lag_months", "db_path"
+  ),
+  Value = c(
+    cfg$study_name %||% "(missing)",
+    cfg$location    %||% "(missing)",
+    cfg$country     %||% "(missing)",
+    if (length(cfg$location_ids)) paste(cfg$location_ids, collapse = ", ")
+      else "(name-based resolution)",
+    as.character(cfg$start_year %||% NA),
+    as.character(cfg$end_year   %||% NA),
+    if (is.null(cfg$disease_code)) "(none)" else cfg$disease_code,
+    as.character(isTRUE(cfg$include_estimated_cases)),
+    paste(cfg$env_variables %||% character(), collapse = ", "),
+    if (is.null(cfg$species_filter)) "(all)"
+      else paste(cfg$species_filter, collapse = ", "),
+    as.character(cfg$max_lag_months %||% NA),
+    cfg$db_path %||% "(not set)"
+  )
+)
+cfg_tbl |> gt::gt() |> gt::tab_header(title = "Analysis configuration")
+```
+
+## Table inventory
+
+```{r}
+if (is.data.frame(qa$tables) && nrow(qa$tables) > 0) {
+  qa$tables |> gt::gt() |> gt::tab_header(title = "Rows returned by each query")
+} else {
+  cat("_No table inventory available._")
+}
+```
+
+## Species present in vector query
+
+```{r}
+sp <- qa$species
+if (is.data.frame(sp) && nrow(sp) > 0) {
+  sp |> gt::gt() |> gt::tab_header(title = "Vector species present")
+} else {
+  cat("**No vector rows returned.** Verify `species_filter` and `location_ids`.")
+}
+```
+
+## Species filter coverage
+
+```{r}
+sp <- qa$species
+if (!is.null(cfg$species_filter) && is.data.frame(sp) && nrow(sp) > 0) {
+  present <- tolower(sp$species_name)
+  tibble::tibble(
+    filter_value = cfg$species_filter,
+    matched      = vapply(cfg$species_filter,
+                          \(v) any(grepl(tolower(v), present, fixed = TRUE)),
+                          logical(1))
+  ) |> gt::gt() |> gt::tab_header(title = "Species filter coverage")
+} else {
+  cat("_Species filter coverage not applicable._")
+}
+```
+
+## Environment variables
+
+```{r}
+ev <- qa$environment_vars
+if (is.data.frame(ev) && nrow(ev) > 0) {
+  ev |> gt::gt() |> gt::tab_header(
+    title = "Environment variables present in fact_environment"
+  )
+} else {
+  cat("_No environment variable summary available._")
+}
+```
+
+## Monthly case counts
+
+```{r, fig.width=10, fig.height=4}
+mc <- qa$monthly_cases
+if (is.data.frame(mc) && nrow(mc) > 0) {
+  library(ggplot2)
+  print(
+    ggplot(mc, aes(x = month_start, y = case_count)) +
+      geom_line(color = "#1E40AF") +
+      geom_point(color = "#1E40AF", size = 1) +
+      labs(x = NULL, y = "Cases / month",
+           title = "Monthly case counts (post-filter)") +
+      theme_minimal()
+  )
+} else {
+  cat("_No observed case rows present._ ",
+      "This is expected if the CDM carries vector, environment, ",
+      "resistance, and bionomics data only; case-based analyses are contextual.\n")
+}
+```

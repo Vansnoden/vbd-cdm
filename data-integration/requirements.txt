@@ -1,0 +1,55 @@
+# --- Core data ---
+pandas
+numpy
+pyyaml
+python-dotenv
+rapidfuzz
+pronto
+biopython
+
+# --- Database ---
+SQLAlchemy
+alembic
+psycopg2-binary
+
+# --- Validation ---
+pydantic
+
+# --- Geospatial / raster ---
+geopandas
+shapely
+pyogrio
+pyproj
+rasterio
+rioxarray
+xarray
+cfgrib
+netCDF4
+eccodes
+dask
+
+# --- Climate / vector helpers ---
+geopy
+reverse_geocode
+scikit-learn
+pyreadstat
+
+# --- ER diagram ---
+eralchemy
+pydot
+pygraphviz
+
+# --- Testing ---
+pytest
+
+# --- Docs ---
+sphinx
+furo
+docutils
+
+# --- Transitive pins ---
+scipy
+packaging
+typing_extensions
+pydantic_core
+Mako
