@@ -135,12 +135,12 @@ data-integration/clip_timeseries_data/
 # =============================================================================
 # Sphinx / docs build
 # =============================================================================
-docs/_build/
-**/docs/_build/
+# docs/_build/
+# **/docs/_build/
 
 # Generated Sphinx API stubs. Uncomment if you do not want to commit them.
 # data-integration/docs/generated/
-# **/docs/generated/
+**/docs/generated/
 
 # =============================================================================
 # Generated diagrams. Uncomment if you do not want to commit them.
