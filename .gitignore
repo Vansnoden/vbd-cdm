@@ -172,3 +172,4 @@ node_modules/
 .conda/
 **/.conda/
 ./data-integration/gadm41_KEN.gpkg
+./data-integration/exploration/*

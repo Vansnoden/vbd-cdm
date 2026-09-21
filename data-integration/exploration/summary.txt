@@ -1,0 +1,94 @@
+VBD CDM - exploratory summary
+============================================================
+Database source: project database.session
+Dialect:         sqlite
+
+Tables
+------------------------------------------------------------
+  fact_environment                         522,478
+  fact_disease_case                        298,112
+  fact_socioeconomic_condition              98,868
+  dim_time                                  46,386
+  dim_concept                                7,859
+  fact_concept_map                           1,904
+  dim_location                               1,623
+  dim_socioeconomic_indicator                1,498
+  fact_insecticide_resistance                1,468
+  fact_vector_observation                    1,451
+  fact_disease_burden                          948
+  fact_bionomics                               401
+  fact_health_facility                         334
+  dim_resistance_test_type                      66
+  dim_vector                                    20
+  dim_insecticide                               16
+  dim_source                                     7
+  dim_vocabulary                                 3
+  dim_identification_method                      1
+  dim_disease                                    1
+  fact_intervention                              1
+
+Locations
+------------------------------------------------------------
+  total:        1,623
+  with coords:  1,611 (99%)
+  countries:    33
+
+  top countries:
+    KE        1,095
+    BJ           77
+    NG           51
+    BF           43
+    SN           42
+    UG           32
+    CM           30
+    TZ           29
+    ML           25
+    GQ           24
+
+Vector species (top 15 by row count)
+------------------------------------------------------------
+  Gambiae Complex                               347 rows  count=     5,368
+  Anopheles arabiensis                          204 rows  count=     1,417
+  Anopheles gambiae                             167 rows  count=        99
+  gambiae complex                               140 rows  count=    28,756
+  arabiensis                                    120 rows  count=     2,125
+  funestus complex                               98 rows  count=     4,980
+  Anopheles coluzzii                             97 rows  count=         -
+  funestus                                       76 rows  count=     4,255
+  gambiae_s form_m form                          66 rows  count=       444
+  gambiae_s form                                 44 rows  count=     1,220
+  coustani                                       30 rows  count=     6,551
+  Anopheles coluzzii/gambiae                     20 rows  count=         -
+  Funestus Subgroup                              19 rows  count=       793
+  coustani complex                               15 rows  count=     1,230
+  Anopheles funestus                              4 rows  count=        95
+
+Environment variables
+------------------------------------------------------------
+  t2m                  n=   261,239  locations=  121  2019-01-01 → 2025-12-31
+  tp                   n=   261,239  locations=  121  2019-01-01 → 2025-12-31
+
+Resistance status
+------------------------------------------------------------
+  (null)                            1,468
+
+Cases by identification method
+------------------------------------------------------------
+  ESTIMATE                        298,112
+
+Foreign key integrity
+------------------------------------------------------------
+  fact_vector_observation        . location_id          → dim_location                    0 /      1,451  (0.00%)
+  fact_vector_observation        . vector_code          → dim_vector                      0 /      1,451  (0.00%)
+  fact_vector_observation        . source_code          → dim_source                      0 /      1,451  (0.00%)
+  fact_insecticide_resistance    . location_id          → dim_location                    0 /      1,468  (0.00%)
+  fact_insecticide_resistance    . insecticide_code     → dim_insecticide                 0 /      1,468  (0.00%)
+  fact_insecticide_resistance    . test_type_code       → dim_resistance_test_type        0 /      1,468  (0.00%)
+  fact_insecticide_resistance    . vector_code          → dim_vector                      0 /      1,468  (0.00%)
+  fact_bionomics                 . location_id          → dim_location                    0 /        401  (0.00%)
+  fact_bionomics                 . vector_code          → dim_vector                      0 /        401  (0.00%)
+  fact_environment               . location_id          → dim_location                    0 /    522,478  (0.00%)
+  fact_disease_case              . location_id          → dim_location                    0 /    298,112  (0.00%)
+  fact_disease_case              . disease_code         → dim_disease                     0 /    298,112  (0.00%)
+  fact_disease_burden            . location_id          → dim_location                    0 /        948  (0.00%)
+

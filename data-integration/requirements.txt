@@ -6,6 +6,7 @@ python-dotenv
 rapidfuzz
 pronto
 biopython
+matplotlib
 
 # --- Database ---
 SQLAlchemy
