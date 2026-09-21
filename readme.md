@@ -17,4 +17,4 @@ The project is composed of two components: data-integration, data-analysis
 
 
 Have Fun!
-Submit and Issue is identified.
+Submit an issue if identified.
