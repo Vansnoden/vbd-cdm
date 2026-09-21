@@ -1,0 +1,52 @@
+Package: vbdanalysis
+Title: Analysis pipeline for the VBD CDM
+Version: 0.1.0
+Authors@R:
+    person("Salvador", "Atagong", email = "you@example.com",
+           role = c("aut", "cre"))
+Description: Reproducible R pipeline for analysis of the vector-borne
+    disease Common Data Model. Reads directly from the CDM database
+    written by the Python ingestion pipeline.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends:
+    R (>= 4.3.0)
+Imports:
+    DBI,
+    RSQLite,
+    RPostgres,
+    dplyr,
+    tidyr,
+    purrr,
+    tibble,
+    readr,
+    lubridate,
+    ggplot2,
+    scales,
+    patchwork,
+    targets,
+    tarchetypes,
+    config,
+    here,
+    glue,
+    janitor,
+    cli,
+    rlang,
+    MASS,
+    mgcv,
+    glmmTMB,
+    dlnm,
+    splines,
+    tsModel,
+    sf,
+    spdep,
+    knitr,
+    rmarkdown,
+    quarto,
+    flextable,
+    gt
+Suggests:
+    testthat (>= 3.0.0),
+    withr,
+    mockery
+

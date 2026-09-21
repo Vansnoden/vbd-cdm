@@ -1,13 +1,175 @@
-venv/
-**/__pycache__/
-**/.env
-**/*.db
-.env
+
+# =============================================================================
+# OS / editor / IDE
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
 .idea/
+.vscode/
+data-integration/.idea/
+
+# =============================================================================
+# Python
+# =============================================================================
 __pycache__/
-.pytest_cache
-python_bundle.txt
-*_bundle.txt
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+.venv/
+venv/
+env/
+ENV/
+**/venv/
+**/.venv/
+**/env/
+**/ENV/
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# =============================================================================
+# R / RStudio / renv / targets
+# =============================================================================
+.Rproj.user/
+**/.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.Renviron
+
+# Keep .Rprofile - renv needs it if present.
+# .Rprofile
+
+*.Rcheck/
+*.tar.gz
+
+_targets/
+**/_targets/
+
+# renv: keep activate.R, settings.json, renv.lock.
+# Ignore only the library and transient state.
+**/renv/library/
+**/renv/staging/
+**/renv/local/
+**/renv/cache/
+**/renv/sandbox/
+
+# Quarto / R Markdown generated files
+.quarto/
+**/.quarto/
+_site/
+**/_site/
+*_files/
+**/*_files/
+*_cache/
+**/*_cache/
+
+# =============================================================================
+# Logs, outputs, bundles
+# =============================================================================
 logs/
-outputs/*
-outputs/analysis/*
+*.log
+**/logs/
+
+outputs/
+**/outputs/
+data-integration/outputs/
+data-analysis/outputs/
+
+*_bundle.txt
+project_bundle.txt
+python_bundle.txt
+**/*_bundle.txt
+**/project_bundle.txt
+**/python_bundle.txt
+
+# =============================================================================
+# Databases / local data
+# =============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+
+# Raw / interim / processed data should not be committed.
+# Keep data-integration/data/vocabulary.csv and mappings/*.csv.
+data-integration/data/raw/
+data-integration/data/processed/
+data-integration/data/interim/
+data-integration/data/external/
+data-integration/data/tmp/
+**/data/raw/
+**/data/processed/
+**/data/interim/
+**/data/external/
+**/data/tmp/
+
+# Generated clipping output
+data-integration/clip_timeseries_data/
+**/clip_timeseries_data/
+
+# =============================================================================
+# Sphinx / docs build
+# =============================================================================
+# docs/_build/
+# **/docs/_build/
+
+# Generated Sphinx API stubs. Uncomment if you do not want to commit them.
+# data-integration/docs/generated/
+**/docs/generated/
+
+# =============================================================================
+# Generated diagrams. Uncomment if you do not want to commit them.
+# =============================================================================
+# data-integration/er_diagram*.png
+# **/er_diagram*.png
+
+# =============================================================================
+# Environment / secrets
+# =============================================================================
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# =============================================================================
+# Node / JS (future-proofing)
+# =============================================================================
+node_modules/
+**/node_modules/
+
+# =============================================================================
+# Misc caches
+# =============================================================================
+.cache/
+**/.cache/
+.conda/
+**/.conda/
+./data-integration/gadm41_KEN.gpkg
+./data-integration/exploration/*
