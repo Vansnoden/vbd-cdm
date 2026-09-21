@@ -72,7 +72,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # -- Options for HTML output -------------------------------------------------
 # Use Furo theme for modern, sticky navigation
 html_theme = 'furo'
-html_static_path = ['_static']
+# html_static_path = ['_static']
 
 # Optional: Customize Furo theme
 html_theme_options = {
