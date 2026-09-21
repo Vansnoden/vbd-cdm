@@ -15,7 +15,7 @@ set -euo pipefail
 # ---------- defaults ---------------------------------------------------------
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 ROOT="$SCRIPT_DIR"
-OUTPUT="project_bundle.txt"
+OUTPUT="data_analysis_bundle.txt"
 EXTRA_EXTS=""
 
 usage() {

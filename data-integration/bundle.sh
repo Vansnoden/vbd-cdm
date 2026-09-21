@@ -17,7 +17,7 @@ set -euo pipefail
 # ---------- defaults ---------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 ROOT="$SCRIPT_DIR"
-OUTPUT="python_bundle.txt"
+OUTPUT="data_integration_bundle.txt"
 
 usage() {
   cat <<EOF

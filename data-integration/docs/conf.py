@@ -10,13 +10,35 @@ author = 'Salvador D. Atagong'
 
 # -- General configuration ---------------------------------------------------
 extensions = [
+    'sphinx_markdown_builder',
+    'myst_parser',
     'sphinx.ext.duration',
     'sphinx.ext.doctest',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
     'sphinx.ext.napoleon',  # Better docstring support
     'sphinx.ext.viewcode',  # Add links to source code
+    'sphinx.ext.intersphinx',
 ]
+
+myst_enable_extensions = [
+    "colon_fence",
+    "deflist",
+    "fieldlist",
+    "tasklist",
+]
+
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
+
+intersphinx_mapping = {
+    'python':    ('https://docs.python.org/3', None),
+    'sqlalchemy':('https://docs.sqlalchemy.org/en/20', None),
+    'pandas':    ('https://pandas.pydata.org/docs', None),
+    'pydantic':  ('https://docs.pydantic.dev/latest', None),
+}
 
 autosummary_generate = True
 autosummary_imported_members = True

@@ -47,6 +47,8 @@ pytest
 sphinx
 furo
 docutils
+myst-parser
+sphinx-markdown-builder
 
 # --- Transitive pins ---
 scipy
