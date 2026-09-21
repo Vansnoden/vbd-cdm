@@ -6,7 +6,7 @@ Data model
 Entity-relationship diagram
 ----------------------------
 
-.. figure:: ../../er_diagram.png
+.. figure:: ../../../er_diagram.png
    :align: center
    :width: 100%
 

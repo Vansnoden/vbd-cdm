@@ -4,7 +4,7 @@
 
 ## Entity-relationship diagram
 
-![image](../../er_diagram.png)
+![image](../../../er_diagram.png)
 
 ## Layout
 
