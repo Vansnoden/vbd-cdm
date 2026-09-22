@@ -4,10 +4,10 @@
 
 | Requirement | Version | Notes |
 |---|---|---|
-| R | ≥ 4.3 | `renv` will refuse older versions. |
+| R | >= 4.3 | `renv` will refuse older versions. |
 | The CDM database | any | Produced by `data-integration`. Must exist before the pipeline runs. |
-| `targets` | ≥ 1.5 | Installed automatically by `renv::restore()`. |
-| Quarto | ≥ 1.4 | Optional. Only needed to render the reports. |
+| `targets` | >= 1.5 | Installed automatically by `renv::restore()`. |
+| Quarto | >= 1.4 | Optional. Only needed to render the reports. |
 | Rtools / Xcode CLT / `build-essential` | latest | Required by `renv::restore()` for compiled packages (`RPostgres`, `RSQLite`, `glmmTMB`, `TMB`, `xml2`). |
 
 The R side is read-only: it never writes to `vbd_cdm.db`. If the
@@ -34,7 +34,7 @@ renv::restore()
 
 `renv::restore()` installs into a project-local library at
 `renv/library/`. Nothing is written to your system R library. The first
-run will take 10–30 minutes depending on what's already cached on your
+run will take 10-30 minutes depending on what's already cached on your
 machine.
 
 Verify the result:
@@ -45,7 +45,7 @@ renv::status()
 ```
 
 If `renv::restore()` fails, see
-[Troubleshooting → `renv::restore()` fails](troubleshooting.md#renvrestore-fails).
+[Troubleshooting -> `renv::restore()` fails](troubleshooting.md#renvrestore-fails).
 
 ### If `renv.lock` is missing or stale
 
@@ -86,7 +86,7 @@ DBI::dbDisconnect(con)
 If `cdm_connect()` errors with `Database not found at '...'`, the
 `database` key in `config.yml` is wrong. It is resolved relative to the
 project root via `here::here()`, **not** the working directory. See
-[Configuration → `database`](configuration.md#database).
+[Configuration -> `database`](configuration.md#database).
 
 ### Quick row-count sanity check
 
@@ -106,7 +106,7 @@ DBI::dbGetQuery(con, "
 DBI::dbDisconnect(con)
 ```
 
-`fact_disease_case` is allowed to be empty — the pipeline is
+`fact_disease_case` is allowed to be empty - the pipeline is
 vector-centred and will run anyway. The other four are **not** allowed
 to be empty; the pipeline aborts if `vectors` or `environment` return
 zero rows. See [Data access](data-access.md) for what each table holds.
@@ -120,7 +120,7 @@ targets::tar_make()
 ```
 
 The first run will take several minutes. Subsequent runs are incremental
-— `targets` hashes every input (code, config, cached values) and skips
+- `targets` hashes every input (code, config, cached values) and skips
 targets whose inputs haven't changed.
 
 ### Watch what's happening
@@ -217,38 +217,38 @@ After a successful run, `outputs/analysis/` contains:
 
 ```
 outputs/analysis/
-├── figures/
-│   ├── Pan_African_Anopheles_vector_seasonal.png
-│   ├── Pan_African_Anopheles_vector_climate_correlations.png
-│   ├── Pan_African_Anopheles_vector_climate_t2m.png
-│   ├── Pan_African_Anopheles_vector_climate_tp.png
-│   ├── Pan_African_Anopheles_vector_climate_by_group.png
-│   ├── Pan_African_Anopheles_resistance.png
-│   ├── Pan_African_Anopheles_bionomics.png
-│   └── Pan_African_Anopheles_seasonal.png
-├── reports/
-│   ├── qa_report.html
-│   └── analysis_report.html
-└── data/                     # reserved; currently unused
+|-- figures/
+|   |-- Pan_African_Anopheles_vector_seasonal.png
+|   |-- Pan_African_Anopheles_vector_climate_correlations.png
+|   |-- Pan_African_Anopheles_vector_climate_t2m.png
+|   |-- Pan_African_Anopheles_vector_climate_tp.png
+|   |-- Pan_African_Anopheles_vector_climate_by_group.png
+|   |-- Pan_African_Anopheles_resistance.png
+|   |-- Pan_African_Anopheles_bionomics.png
+|   `-- Pan_African_Anopheles_seasonal.png
+|-- reports/
+|   |-- qa_report.html
+|   `-- analysis_report.html
+`-- data/                     # reserved; currently unused
 ```
 
 The filenames are derived from `cfg$study_name`. If you change
 `study_name` in `config.yml`, the filenames change. See
-[Configuration → `study_name`](configuration.md#study_name).
+[Configuration -> `study_name`](configuration.md#study_name).
 
 ### Where the cache lives
 
-The `targets` cache is at **`data-analysis/_targets/`** — the project
+The `targets` cache is at **`data-analysis/_targets/`** - the project
 root, not under `outputs/`. This is `targets`' default and the current
 `_targets.R` does not override it.
 
 ```
 data-analysis/
-├── _targets/                 # the cache
-├── outputs/analysis/         # the figures and reports
-├── R/
-├── _targets.R
-└── config.yml
+|-- _targets/                 # the cache
+|-- outputs/analysis/         # the figures and reports
+|-- R/
+|-- _targets.R
+`-- config.yml
 ```
 
 The cache is safe to delete but expensive to rebuild. Use
@@ -260,7 +260,7 @@ targets::tar_make()            # rebuilds from scratch
 ```
 
 If you want the cache under `outputs/analysis/` instead, see
-[Pipeline → Cache location](pipeline.md#cache-location).
+[Pipeline -> Cache location](pipeline.md#cache-location).
 
 ---
 
@@ -268,9 +268,13 @@ If you want the cache under `outputs/analysis/` instead, see
 
 A successful first run should produce:
 
-1. **Eight PNG figures** under `outputs/analysis/figures/`. The exact
-   set depends on whether `plot_vector_climate` emitted a by-group
-   heatmap (it will, since `group_cols = c("species_name")` is set).
+1. **Between seven and eight PNG figures** under
+   `outputs/analysis/figures/`. The by-group heatmap is written
+   unconditionally given the current `_targets.R` (which sets
+   `group_cols = c("species_name")`). The seasonal figure is written
+   only when `fact_disease_case` contains rows; on a database with no
+   case data, `plot_seasonal` returns `invisible(NULL)` and no file is
+   written.
 2. **Two HTML reports** under `outputs/analysis/reports/`.
 3. **No errors** in `targets::tar_progress()`.
 
@@ -290,13 +294,13 @@ If any target errored, see [Troubleshooting](troubleshooting.md).
 
 ## Next steps
 
-| I want to… | Read |
+| I want to... | Read |
 |---|---|
 | Change the study area, year range, or species filter | [Configuration](configuration.md) |
 | Understand the pipeline structure | [Pipeline](pipeline.md) |
 | Understand a specific figure | [Analysis modules](analysis-modules.md) |
 | Query the database directly | [Data access](data-access.md) |
-| Add a new analysis | [Pipeline → extending](pipeline.md#extending) |
+| Add a new analysis | [Pipeline -> extending](pipeline.md#extending) |
 | Debug an error | [Troubleshooting](troubleshooting.md) |
 | Look up a term | [Glossary](glossary.md) |
 
