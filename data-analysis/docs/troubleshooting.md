@@ -32,7 +32,7 @@ you exactly where to look.
    Note that **`sf` is in `DESCRIPTION` Imports but never called by the
    pipeline code.** It is declared for future spatial analysis. If
    installing `sf` is the blocker, you can comment it out of
-   `DESCRIPTION` and remove it from `renv.lock` — but the analysis
+   `DESCRIPTION` and remove it from `renv.lock` - but the analysis
    pipeline doesn't need it, so this is safe. Do *not* remove
    `RPostgres` if you plan to point `DATABASE_URL` at a Postgres
    instance.
@@ -83,7 +83,7 @@ study_name, location, country, start_year, end_year,
 disease_code, env_variables, max_lag_months, database
 ```
 
-Each must be present in `config.yml`. Even `disease_code` — set it to
+Each must be present in `config.yml`. Even `disease_code` - set it to
 `null` if you don't want a disease filter.
 
 **Fix.** Add the missing key. To see what's currently in the file:
@@ -111,7 +111,7 @@ getwd()             # the current working directory
 
 **Fix.** Run from the project root, or ensure exactly one marker file
 exists at the top level. The project has `DESCRIPTION`, `renv.lock`,
-and `.Rbuildignore` — enough markers for `here` to work reliably as
+and `.Rbuildignore` - enough markers for `here` to work reliably as
 long as no subdirectory also has one.
 
 ### `tar_source()` fails
@@ -123,7 +123,7 @@ alphabetical order. If any file has a **syntax error** or a
 **top-level call to a function that doesn't exist yet**, sourcing
 aborts and no targets are created.
 
-Top-level code — outside a function definition — is a common cause.
+Top-level code - outside a function definition - is a common cause.
 For example:
 
 ```r
@@ -179,7 +179,7 @@ the database file to one of the two search locations.
 ### `Unsupported DATABASE_URL scheme`
 
 **Diagnose.** `DATABASE_URL` is set to something that isn't
-`sqlite:///…` or `postgresql://…`.
+`sqlite:///...` or `postgresql://...`.
 
 ```r
 Sys.getenv("DATABASE_URL")
@@ -208,7 +208,7 @@ If that fails, the compiler toolchain is the problem. See
 
 ### Postgres connection refused
 
-**Symptom.** `DATABASE_URL=postgresql://…` but `cdm_connect()` errors
+**Symptom.** `DATABASE_URL=postgresql://...` but `cdm_connect()` errors
 with a message about the connection being refused, or a
 password-authentication failure.
 
@@ -223,7 +223,7 @@ psql "$DATABASE_URL" -c 'SELECT 1'
 
 **Fix.** The URL is malformed, the credentials are wrong, or the
 database name doesn't exist. Note that `cdm_connect()` does **not**
-call `_postgres_url()` from `database/session.py` — that function
+call `_postgres_url()` from `database/session.py` - that function
 exists but is never invoked. The only path to Postgres is an explicit
 `DATABASE_URL`.
 
@@ -247,7 +247,7 @@ Common causes:
 
 1. `country` is an ISO alpha-3 code (`KEN`) instead of alpha-2 (`KE`).
 2. `location` has different capitalisation or a different spelling.
-3. `dim_location` is empty — the ETL hasn't run.
+3. `dim_location` is empty - the ETL hasn't run.
 4. `country_code` is `NULL` for the rows you expected. The ETL's
    country-code resolver failed.
 
@@ -423,7 +423,7 @@ DBI::dbGetQuery(con,
 If the only rows have `identification_method_code = 'ESTIMATE'` and
 `include_estimated_cases: false` in `config.yml`, the query returns zero
 rows by design. Set the flag to `true` if you want modelled case counts
-included — but read the warning in
+included - but read the warning in
 [Configuration](configuration.md#include_estimated_cases) first.
 
 ### A query returns far more rows than expected
@@ -459,13 +459,8 @@ DBI::dbGetQuery(con,
   "SELECT MIN(date), MAX(date), COUNT(*) FROM dim_time")
 ```
 
-**Fix.** Extend `dim_time` on the Python side:
-
-```r
-source("../data-integration/main.py")   # not applicable — see below
-```
-
-Actually, run the Python helper directly:
+**Fix.** Extend `dim_time` on the Python side. Run the Python helper
+directly:
 
 ```python
 from main import init_dim_time
@@ -479,7 +474,7 @@ init_dim_time(start_date="1900-01-01", end_date="2030-12-31")
 ### `analyze_*()` returns `list(error = "...")`
 
 Most `analyze_*` functions return an error list rather than raising when
-their input is empty or degenerate. This is **by design** — the report
+their input is empty or degenerate. This is **by design** - the report
 prints the error as an italic note and continues.
 
 To see the error and decide whether it's expected:
@@ -493,7 +488,7 @@ The error string tells you what happened:
 
 | Error text | Meaning |
 |---|---|
-| `"No vector data available."` | `vectors_validated` was empty — should not happen, because `vectors_validated` aborts first. |
+| `"No vector data available."` | `vectors_validated` was empty - should not happen, because `vectors_validated` aborts first. |
 | `"Not enough data for seasonal analysis."` | Fewer than two rows in the input. |
 | `"No resistance data available."` | `fact_insecticide_resistance` is empty for this study area. |
 | `"No bionomics data available."` | `fact_bionomics` is empty for this study area. |
@@ -594,11 +589,11 @@ vector_seasonal$monthly          # should have > 0 rows
 ```
 
 If the analysis result is empty, the plot function renders a blank
-theme-void placeholder. That's intentional — the report shows the
+theme-void placeholder. That's intentional - the report shows the
 placeholder alongside an explanatory note.
 
 If the analysis result is non-empty but the figure is blank, the issue
-is inside `ggplot2` — inspect interactively:
+is inside `ggplot2` - inspect interactively:
 
 ```r
 p <- plot_vector_seasonal(vector_seasonal, "test", tempdir())
@@ -625,8 +620,8 @@ activated, this bug is latent.
 
 ### `plot_seasonal` returns an empty character vector
 
-**Diagnose.** `plot_seasonal()` returns `invisible(NULL)` — not
-`invisible(character())` — when the result carries an error. It does
+**Diagnose.** `plot_seasonal()` returns `invisible(NULL)` - not
+`invisible(character())` - when the result carries an error. It does
 not warn.
 
 ```r
@@ -647,15 +642,15 @@ str(seasonal)   # check for $error
 **Symptom.** `tar_make()` errors on `qa_report` or `analysis_report`.
 
 **Diagnose.** `tar_quarto(quiet = FALSE)` prints Quarto's own output.
-Read it — the error is usually specific:
+Read it - the error is usually specific:
 
-- **"Object not found"** — the sanitised parameter is missing a field.
+- **"Object not found"** - the sanitised parameter is missing a field.
   Check whether the `.qmd` references `res$something` that isn't in
   `analysis_results`.
-- **"cannot open the connection"** — a figure path doesn't exist. This
+- **"cannot open the connection"** - a figure path doesn't exist. This
   happens when `plot_vector_climate` produced files under a different
   `study_name` than the report is looking for.
-- **"no such column"** — a table in `results$qa$tables` has fewer
+- **"no such column"** - a table in `results$qa$tables` has fewer
   columns than the report expects.
 
 **Fix.** Reproduce the render interactively:
@@ -682,7 +677,7 @@ The error message is clearer here than under `tar_make()`.
 **Diagnose.** Quarto's YAML 1.2 parameter round-trip cannot represent R
 `NA`. `sanitize_for_quarto()` replaces `NA` recursively, but if you
 added a new field to `analysis_results` that the sanitiser doesn't
-handle — a raw `call` object, a function, an S4 object — the
+handle - a raw `call` object, a function, an S4 object - the
 serialisation will fail.
 
 **Fix.** Simplify the object you pass. If it must contain a complex
@@ -701,7 +696,7 @@ reads) instead of passing it as a parameter.
   variable name.
 
 If a file is missing, the report prints an italic note instead of a
-broken link — *unless* the file exists at render time but was deleted
+broken link - *unless* the file exists at render time but was deleted
 before the browser loads it. That happens if you `tar_destroy()` after
 rendering.
 
@@ -734,7 +729,7 @@ targets::tar_make(names = "analysis_report")
 
 2. **The database changed but targets doesn't know.** `targets` does
    not hash the CDM file. If the underlying database was rewritten by
-   the Python ETL, the cached extraction targets are stale — but
+   the Python ETL, the cached extraction targets are stale - but
    `targets` has no way to detect this.
 
 **Fix.** For (1), remove the non-determinism. For (2), see
@@ -758,7 +753,7 @@ targets::tar_make()
 ```
 
 **Fix (automatic).** See
-[Pipeline → Database invalidation](pipeline.md#database-invalidation)
+[Pipeline -> Database invalidation](pipeline.md#database-invalidation)
 for the `db_hash` target pattern. It requires touching every query
 function, but once done it eliminates this class of bug.
 
@@ -811,7 +806,7 @@ The three scaffold modules (`analysis_glm.R`, `analysis_dlnm.R`,
 `analysis_inla.R`) are not wired into the pipeline and are not covered
 by the QA or analysis reports. Each has a known issue.
 
-### `analyze_inla`: two `f(month_id, …)` terms {#inla}
+### `analyze_inla`: two `f(month_id, ...)` terms {#inla}
 
 **Symptom.**
 
@@ -833,7 +828,7 @@ formula.
 
 **Fix.** Pick one temporal model. If you want both a smooth seasonal
 effect and an AR(1) residual, split the data into a seasonal term
-(`sin(2π·month/12)`, `cos(2π·month/12)`) and an AR(1) process on the
+(`sin(2*pi*month/12)`, `cos(2*pi*month/12)`) and an AR(1) process on the
 residual index:
 
 ```r
@@ -848,9 +843,9 @@ case_count ~ t2m + tp +
 **Symptom.** `result$dispersion` is very close to `1` for most fits.
 
 **Diagnose.** `summary(m_nb)$dispersion` on a `MASS::glm.nb` object is
-`1/theta`, not a separate dispersion estimate. As `theta → ∞`, the
-negative-binomial reduces to Poisson and `1/theta → 0`, but `summary()`
-clamps it.
+`1/theta`, not a separate dispersion estimate. As `theta` goes to
+infinity, the negative-binomial reduces to Poisson and `1/theta` goes to
+zero, but `summary()` clamps it.
 
 **Fix.** Use `m_nb$theta` directly (it's already returned as
 `result$theta`). Ignore `result$dispersion`.
@@ -932,7 +927,7 @@ browseURL("outputs/analysis/reports/qa_report.html")
 ```
 
 It shows row counts, species presence, filter coverage, environment
-variables present, and monthly case counts — the five things you need
+variables present, and monthly case counts - the five things you need
 to know before debugging an analysis.
 
 ### Ask for help
