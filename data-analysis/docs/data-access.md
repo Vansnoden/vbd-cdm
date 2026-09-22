@@ -2,8 +2,8 @@
 
 The data-access layer is two files:
 
-- `R/db.R` — connection handling and the generic query runner.
-- `R/db_queries.R` — every SQL statement in the project.
+- `R/db.R` - connection handling and the generic query runner.
+- `R/db_queries.R` - every SQL statement in the project.
 
 Nothing else in the R side should contain SQL. If you need a new query,
 add it to `db_queries.R` and call it from a `targets` extraction target.
@@ -46,8 +46,8 @@ An absolute `db_path` is used as-is.
 If `db_path` is `NULL` or empty and `DATABASE_URL` is unset,
 `cdm_connect()` looks for `SQL_LITE_DB_NAME` in two places:
 
-1. `<project_root>/<db_name>` — i.e. `data-analysis/vbd_cdm.db`
-2. `<project_root>/../<db_name>` — i.e. `<repo>/vbd_cdm.db`
+1. `<project_root>/<db_name>` - i.e. `data-analysis/vbd_cdm.db`
+2. `<project_root>/../<db_name>` - i.e. `<repo>/vbd_cdm.db`
 
 It aborts with a listed search path if neither exists.
 
@@ -55,8 +55,8 @@ It aborts with a listed search path if neither exists.
 
 `DATABASE_URL` accepts:
 
-- `sqlite:///absolute/path/to/vbd_cdm.db` — SQLite
-- `postgresql://user:password@host:port/dbname` — PostgreSQL
+- `sqlite:///absolute/path/to/vbd_cdm.db` - SQLite
+- `postgresql://user:password@host:port/dbname` - PostgreSQL
 
 Any other scheme aborts with `Unsupported DATABASE_URL scheme`.
 
@@ -68,7 +68,7 @@ Error: Database not found at '/path/to/vbd_cdm.db'.
 
 The `database` key in `config.yml` points somewhere that doesn't exist.
 Check the path, or run the Python ingestion pipeline first to create the
-database. See [Configuration → `database`](configuration.md#database).
+database. See [Configuration -> `database`](configuration.md#database).
 
 ---
 
@@ -164,7 +164,7 @@ Behaviour:
 
 With `location = "ALL"` and `country = "ALL"`, every row in
 `dim_location` is returned. This is a legitimate setting for a
-continent-wide study, but be aware that downstream vector–climate
+continent-wide study, but be aware that downstream vector-climate
 aggregation will produce a *continental mean* rather than a per-site
 series. See *What the queries don't do* below.
 
@@ -193,13 +193,13 @@ locations".
 
 `_targets.R` calls:
 
-- `resolve_location_ids` → `locations`
-- `query_vectors` → `vectors`
-- `query_environment` → `environment`
-- `query_resistance` → `resistance`
-- `query_bionomics` → `bionomics`
-- `query_cases` → `cases`
-- `query_burden` → `burden`
+- `resolve_location_ids` -> `locations`
+- `query_vectors` -> `vectors`
+- `query_environment` -> `environment`
+- `query_resistance` -> `resistance`
+- `query_bionomics` -> `bionomics`
+- `query_cases` -> `cases`
+- `query_burden` -> `burden`
 
 `query_interventions` and `query_socioeconomic` exist and are tested
 against the schema, but are not called. If you need them, add a target
@@ -230,7 +230,7 @@ database, not just the ones you asked for.
 
 The rationale (from the docstring) is that SQLite's
 `SQLITE_MAX_VARIABLE_NUMBER` varies between builds, and 900 is a safe
-ceiling. Semantically, "all locations" and "no filter" are identical —
+ceiling. Semantically, "all locations" and "no filter" are identical -
 but the caller may have intended a subset.
 
 **Practical consequence:** a study area with more than 900 grid cells
@@ -247,7 +247,7 @@ the QA report before trusting downstream figures.
 `query_environment()` aggregates across whatever `location_id`s match,
 via `dplyr::pivot_wider(values_fn = mean)`. When `location_ids` is
 `NULL`, or longer than 900 (see above), this becomes a **continental
-mean** — a placeholder series, not a physically meaningful per-site
+mean** - a placeholder series, not a physically meaningful per-site
 climate trace.
 
 The query returns **no `location_id` column**, so the aggregation is
@@ -270,7 +270,7 @@ different join key.
 
 `query_environment()` accepts `cfg` but only reads `cfg$env_variables`
 and `cfg$db_path`. Species filters are not applied, and are not
-applicable — `fact_environment` is species-agnostic.
+applicable - `fact_environment` is species-agnostic.
 
 ### No time-series decomposition or lagging
 
@@ -281,7 +281,7 @@ the queries simple and cacheable.
 ### No fallback for missing variables
 
 If `cfg$env_variables` contains a name that does not exist in
-`fact_environment`, the query returns zero rows for it — the pivot_wider
+`fact_environment`, the query returns zero rows for it - the pivot_wider
 then produces a column of all `NA`. The pipeline's validation target
 aborts when the environment result is empty, but a partial miss (some
 variables present, some not) is not caught.

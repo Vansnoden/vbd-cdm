@@ -1,8 +1,8 @@
 # Pipeline
 
 The pipeline is defined in `_targets.R` at the project root. It is a
-directed acyclic graph (DAG) of ~30 targets. `targets` runs only what
-needs running, in the right order, and caches the rest on disk.
+directed acyclic graph (DAG) of about 30 targets. `targets` runs only
+what needs running, in the right order, and caches the rest on disk.
 
 The pipeline is **vector-centred**: extraction and analysis of vectors,
 environment, resistance, and bionomics all run unconditionally; case
@@ -45,7 +45,7 @@ study_name, location, country, start_year, end_year,
 disease_code, env_variables, max_lag_months, database
 ```
 
-Even `disease_code` must be present — set it to `null` if you don't want
+Even `disease_code` must be present - set it to `null` if you don't want
 to filter. Only `location_ids`, `include_estimated_cases`,
 `species_filter`, and `output_dir` use the safer `cfg_get()` wrapper
 that returns a default on failure.
@@ -88,7 +88,7 @@ targets::tar_destroy()                               # wipe the cache
 - any upstream target's value changes,
 - any global that the target references changes (see *Config handling*
   below),
-- the packages listed in `tar_option_set(packages = …)` change.
+- the packages listed in `tar_option_set(packages = ...)` change.
 
 It does **not** detect changes to the SQLite database. See *Database
 invalidation* below.
@@ -97,99 +97,122 @@ invalidation* below.
 
 ## Target graph
 
+```mermaid
+flowchart TB
+    CFG["cfg<br/>(global, from config.yml)"]
+    LOC["locations"]
+
+    CFG --> LOC
+
+    subgraph extract["Extraction"]
+        V["vectors"]
+        E["environment"]
+        R["resistance"]
+        B["bionomics"]
+        C["cases"]
+        BU["burden"]
+    end
+
+    LOC --> V
+    LOC --> E
+    LOC --> R
+    LOC --> B
+    LOC --> C
+    LOC --> BU
+
+    subgraph validate["Validation"]
+        VV["vectors_validated"]
+        EV["environment_validated"]
+        CA["cases_available"]
+        CV["cases_validated"]
+    end
+
+    V --> VV
+    E --> EV
+    C --> CA
+    CA --> CV
+
+    subgraph analyses["Analysis"]
+        VS["vector_seasonal"]
+        VC["vector_climate"]
+        RS["resistance_summary"]
+        BS["bionomics_summary"]
+        SE["seasonal"]
+    end
+
+    VV --> VS
+    VV --> VC
+    EV --> VC
+    R --> RS
+    B --> BS
+    CV --> SE
+
+    QA["qa"]
+
+    VV --> QA
+    EV --> QA
+    CV --> QA
+    LOC --> QA
+    CFG --> QA
+
+    subgraph figs["Figures"]
+        FVS["fig_vector_seasonal"]
+        FVC["fig_vector_climate"]
+        FR["fig_resistance"]
+        FB["fig_bionomics"]
+        FS["fig_seasonal"]
+    end
+
+    VS --> FVS
+    VC --> FVC
+    RS --> FR
+    BS --> FB
+    SE --> FS
+
+    AR["analysis_results<br/>(list of all)"]
+
+    CFG --> AR
+    LOC --> AR
+    VV --> AR
+    EV --> AR
+    R --> AR
+    B --> AR
+    CV --> AR
+    BU --> AR
+    VS --> AR
+    VC --> AR
+    RS --> AR
+    BS --> AR
+    SE --> AR
+    QA --> AR
+    FVS --> AR
+    FVC --> AR
+    FR --> AR
+    FB --> AR
+    FS --> AR
+
+    subgraph sanitize["Sanitization"]
+        CS["cfg_sanitized"]
+        QS["qa_sanitized"]
+        RSAN["results_sanitized"]
+    end
+
+    CFG --> CS
+    QA --> QS
+    AR --> RSAN
+
+    QR["qa_report<br/>(.qmd)"]
+    ARPT["analysis_report<br/>(.qmd)"]
+
+    CS --> QR
+    QS --> QR
+    CS --> ARPT
+    RSAN --> ARPT
 ```
-   ┌──────────────────────────────────────────────────────────┐
-   │  cfg (global, from config.yml)                           │
-   └────────────────────────────┬─────────────────────────────┘
-                                │
-              ┌─────────────────┴─────────────────┐
-              │                                   │
-       ┌──────▼──────┐                            │
-       │  locations  │                            │
-       └──────┬──────┘                            │
-              │                                   │
-   ┌──────────┼──────────┬──────────┬──────────┐  │
-   │          │          │          │          │  │
-┌──▼───┐ ┌────▼────┐ ┌───▼────┐ ┌───▼─────┐ ┌──▼───┐
-│vectors│ │environ- │ │resist- │ │bionomics│ │cases │
-│      │ │ ment    │ │ ance   │ │         │ │      │
-└──┬───┘ └────┬────┘ └───┬────┘ └───┬─────┘ └──┬───┘
-   │          │          │          │          │
-   │          │          │          │     ┌────▼────┐
-   │          │          │          │     │ cases_  │
-   │          │          │          │     │ avail.  │
-   │          │          │          │     └────┬────┘
-   │          │          │          │          │
-   │          │          │          │     ┌────▼──────┐
-   │          │          │          │     │ cases_    │
-   │          │          │          │     │ validated │
-   │          │          │          │     └────┬──────┘
-   │          │          │          │          │
-   │          │          │          │          │
-┌──▼──────┐ ┌─▼───────┐ │          │          │
-│ vectors_│ │environ- │ │          │          │
-│validated│ │ment_val.│ │          │          │
-└──┬──────┘ └────┬────┘ │          │          │
-   │             │      │          │          │
-   │             │  ┌───▼─────┐    │          │
-   │             │  │resist-  │    │          │
-   │             │  │ance_summ│    │          │
-   │             │  └───┬─────┘    │          │
-   │             │      │          │          │
-   │             │      │      ┌───▼──────┐   │
-   │             │      │      │bionomics_│   │
-   │             │      │      │summary   │   │
-   │             │      │      └───┬──────┘   │
-   │             │      │          │          │
-┌──▼──────────┐  │      │          │          │
-│vector_      │  │      │          │          │
-│seasonal     │  │      │          │          │
-└──┬──────────┘  │      │          │          │
-   │             │      │          │          │
-   │  ┌──────────▼───┐  │          │          │
-   │  │vector_climate│  │          │          │
-   │  └──────┬───────┘  │          │          │
-   │         │          │          │          │
-   │         │          │          │   ┌──────▼────────┐
-   │         │          │          │   │   seasonal    │
-   │         │          │          │   └──────┬────────┘
-   │         │          │          │          │
-   │         │          │          │          │
-┌──▼─────────▼──────────▼──────────▼──────────▼─────────┐
-│                    qa                                 │
-│  (cases_validated, vectors_validated, environment_    │
-│   validated, locations, cfg)                          │
-└────────────────────────┬──────────────────────────────┘
-                         │
-   ┌─────────────────────┴─────────────────────────────┐
-   │              figures                              │
-   │  fig_vector_seasonal ◀── vector_seasonal, cfg     │
-   │  fig_vector_climate  ◀── vector_climate, cfg      │
-   │  fig_resistance      ◀── resistance_summary, cfg  │
-   │  fig_bionomics       ◀── bionomics_summary, cfg   │
-   │  fig_seasonal        ◀── seasonal, cfg            │
-   └──────────────────────┬────────────────────────────┘
-                          │
-                  ┌───────▼──────────┐
-                  │ analysis_results │
-                  │ (list of all)    │
-                  └───────┬──────────┘
-                          │
-   ┌──────────────────────┼──────────────────────────┐
-   │                      │                          │
-┌──▼─────────┐ ┌──────────▼────────┐ ┌───────────────▼──┐
-│cfg_        │ │qa_sanitized       │ │results_sanitized │
-│sanitized   │ │                   │ │                  │
-└──┬─────────┘ └────────┬──────────┘ └────────┬─────────┘
-   │                    │                     │
-   │                    │                     │
-   │            ┌───────▼───────┐    ┌────────▼────────┐
-   │            │  qa_report    │    │ analysis_report │
-   │            │  (.qmd)       │    │ (.qmd)          │
-   │            └───────────────┘    └─────────────────┘
-   │
-   └───────────────▶ analysis_report (also reads cfg_sanitized)
-```
+
+The exhaustive dependency graph is available interactively via
+`targets::tar_visnetwork()`. The diagram above shows the structure; the
+tool shows the exact edges.
 
 `cfg` is a **global**, not a `tar_target`. `targets` detects it as a
 dependency of every target that references it, and hashes its value. See
@@ -197,7 +220,7 @@ dependency of every target that references it, and hashes its value. See
 
 `fig_dir` is also a global (a plain string), and is passed as the
 `out_dir` argument to every plot function. Changing `cfg$output_dir`
-changes `fig_dir`, which changes the plot targets' commands — but only
+changes `fig_dir`, which changes the plot targets' commands - but only
 because `cfg` changed. If you edit `fig_dir` directly in `_targets.R`
 without changing `cfg`, `targets` will *not* invalidate the plot targets.
 
@@ -245,8 +268,9 @@ without changing `cfg`, `targets` will *not* invalidate the plot targets.
 Note that `resistance_summary` and `bionomics_summary` depend on the
 **unvalidated** extraction targets. There is no `resistance_validated` or
 `bionomics_validated`. This is intentional: an empty resistance dataset
-should produce a `list(error = "…")` from `analyze_resistance`, not abort
-the pipeline. The same applies to `seasonal` (via `cases_validated`).
+should produce a `list(error = "...")` from `analyze_resistance`, not
+abort the pipeline. The same applies to `seasonal` (via
+`cases_validated`).
 
 ### Figures
 
@@ -259,14 +283,14 @@ the pipeline. The same applies to `seasonal` (via `cases_validated`).
 | `fig_seasonal` | `plot_seasonal(seasonal, cfg$study_name, fig_dir)` |
 
 Each returns a character vector of written file paths (invisibly). On
-error, they warn and return `character()` — they never abort.
+error, they warn and return `character()` - they never abort.
 
 ### Bundling and sanitisation
 
 | Target | Purpose |
 |---|---|
 | `analysis_results` | A single list containing `cfg`, `locations`, all extraction outputs, all analysis results, all figure paths, `cases_available`, and `qa`. This is what the report consumes. |
-| `cfg_sanitized` | `sanitize_for_quarto(cfg)` — recursive `NA` replacement. |
+| `cfg_sanitized` | `sanitize_for_quarto(cfg)` - recursive `NA` replacement. |
 | `qa_sanitized` | `sanitize_for_quarto(qa)`. |
 | `results_sanitized` | `sanitize_for_quarto(analysis_results)`. |
 
@@ -278,7 +302,7 @@ error, they warn and return `character()` — they never abort.
 | `analysis_report` | `tar_quarto(path = "inst/report/analysis_report.qmd", quiet = FALSE, execute_params = list(cfg = cfg_sanitized, results = results_sanitized))` |
 
 Both use `quiet = FALSE`, so Quarto's own output is visible during
-`tar_make()`. This is deliberate — the render is the slowest single step,
+`tar_make()`. This is deliberate - the render is the slowest single step,
 and the progress lines are useful.
 
 ---
@@ -314,7 +338,7 @@ cfg <- new_analysis_config(
 `cfg` is a plain R object in `_targets.R`'s environment. It is **not** a
 `tar_target()`. However, `targets` detects it as a dependency of every
 target that references it, and hashes its value. So changing any key in
-`config.yml` invalidates every target that reads `cfg` — which is nearly
+`config.yml` invalidates every target that reads `cfg` - which is nearly
 all of them, including the extraction queries.
 
 The practical consequence: changing `study_name` invalidates
@@ -328,14 +352,14 @@ If this becomes a problem, the fix is to make `cfg` an explicit target:
 tar_target(cfg, new_analysis_config(...))
 ```
 
-…and then split it into per-consumer targets so `study_name` invalidates
-only the plot targets. Neither change is currently made.
+...and then split it into per-consumer targets so `study_name`
+invalidates only the plot targets. Neither change is currently made.
 
 ### Two config accessors
 
-- `config::get(key)` — errors if `key` is missing. Used for the nine
+- `config::get(key)` - errors if `key` is missing. Used for the nine
   required keys.
-- `cfg_get(key, default)` — `tryCatch`es and returns `default` on
+- `cfg_get(key, default)` - `tryCatch`es and returns `default` on
   failure. Used for the four optional keys.
 
 ### `normalize_list()`
@@ -387,7 +411,7 @@ normalize_list <- function(x) {
    tar_target(trend, analyze_trend(vectors_validated)),
    ```
 
-   …and in the figures section:
+   ...and in the figures section:
 
    ```r
    tar_target(fig_trend, plot_trend(trend, cfg$study_name, fig_dir)),
@@ -400,7 +424,7 @@ normalize_list <- function(x) {
    tar_target(
      analysis_results,
      list(
-       …,
+       ...,
        trend     = trend,
        fig_trend = fig_trend
      )

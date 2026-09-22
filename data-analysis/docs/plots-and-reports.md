@@ -40,13 +40,13 @@ A named list of hex strings and one named colour:
 
 ```r
 cdm_palette <- list(
-  primary    = "#1E40AF",   # deep blue   — main series
-  secondary  = "#3B82F6",   # mid blue    — comparison series
-  accent     = "#93C5FD",   # pale blue   — ribbons, fills
+  primary    = "#1E40AF",   # deep blue   - main series
+  secondary  = "#3B82F6",   # mid blue    - comparison series
+  accent     = "#93C5FD",   # pale blue   - ribbons, fills
   positive   = "#3B82F6",   # same as secondary
-  negative   = "#EF4444",   # red         — negative / resistant
-  neutral    = "#9CA3AF",   # grey        — "other", "(null)"
-  highlight  = "#F59E0B",   # amber       — "suspected resistance"
+  negative   = "#EF4444",   # red         - negative / resistant
+  neutral    = "#9CA3AF",   # grey        - "other", "(null)"
+  highlight  = "#F59E0B",   # amber       - "suspected resistance"
   grid       = "grey92"
 )
 ```
@@ -63,17 +63,17 @@ Which colour means what in the current figures:
 | `highlight` | "Suspected Resistance" fill in the status stack |
 
 Do not hard-code hex strings in new plot functions. Add a named entry to
-`cdm_palette` instead, even if it duplicates an existing colour — the
+`cdm_palette` instead, even if it duplicates an existing colour - the
 semantic name is the point.
 
 ### Helper functions
 
 | Function | Signature | Purpose |
 |---|---|---|
-| `significance_stars(p)` | p-value → `""`, `"*"`, `"**"`, `"***"`, `"ns"` | Vectorised. For annotating correlation tables and bar charts. |
-| `format_p(p)` | p-value → `"p < 0.001"`, `"p = 0.042"`, `"p = NA"` | Vectorised. For figure subtitles. |
+| `significance_stars(p)` | p-value -> `""`, `"*"`, `"**"`, `"***"`, `"ns"` | Vectorised. For annotating correlation tables and bar charts. |
+| `format_p(p)` | p-value -> `"p < 0.001"`, `"p = 0.042"`, `"p = NA"` | Vectorised. For figure subtitles. |
 | `ensure_dir(path)` | `fs::dir_create(path)` and returns `path` invisibly | Idempotent directory creation. |
-| `save_plot(plot, path, width = 8, height = 5)` | Wraps `ggsave` at 300 dpi with `bg = "white"` | Convenience wrapper. **Not used by the current plot functions** — see *Known inconsistencies* below. |
+| `save_plot(plot, path, width = 8, height = 5)` | Wraps `ggsave` at 300 dpi with `bg = "white"` | Convenience wrapper. **Not used by the current plot functions** - see *Known inconsistencies* below. |
 
 ---
 
@@ -91,24 +91,24 @@ Every figure written by a `plot_*` function follows the pattern:
 | Analysis | File name |
 |---|---|
 | Vector seasonality | `Pan_African_Anopheles_vector_seasonal.png` |
-| Vector–climate correlation bar chart | `Pan_African_Anopheles_vector_climate_correlations.png` |
-| Vector–climate per-variable (t2m) | `Pan_African_Anopheles_vector_climate_t2m.png` |
-| Vector–climate per-variable (tp) | `Pan_African_Anopheles_vector_climate_tp.png` |
-| Vector–climate by-group heatmap | `Pan_African_Anopheles_vector_climate_by_group.png` |
+| Vector-climate correlation bar chart | `Pan_African_Anopheles_vector_climate_correlations.png` |
+| Vector-climate per-variable (t2m) | `Pan_African_Anopheles_vector_climate_t2m.png` |
+| Vector-climate per-variable (tp) | `Pan_African_Anopheles_vector_climate_tp.png` |
+| Vector-climate by-group heatmap | `Pan_African_Anopheles_vector_climate_by_group.png` |
 | Insecticide resistance | `Pan_African_Anopheles_resistance.png` |
 | Vector bionomics | `Pan_African_Anopheles_bionomics.png` |
 | Case seasonality | `Pan_African_Anopheles_seasonal.png` |
 
 The by-group heatmap is written only when `group_cols` is non-empty in
 `analyze_vector_climate()`. The pipeline sets `group_cols =
-c("species_name")`, so it *is* written for every run — but only if at
+c("species_name")`, so it *is* written for every run - but only if at
 least one group has a non-empty correlation table.
 
 ### Why the convention matters
 
 The report loads some figures by **path convention** rather than from the
 `analysis_results` list. See *The analysis report* below. If you rename a
-plot function's output file, update the report's path expression too —
+plot function's output file, update the report's path expression too -
 they are not derived from each other.
 
 ### Dimensions
@@ -118,9 +118,9 @@ All figures are 300 dpi with a white background (`bg = "white"`). Sizes:
 | Figure | Width (in) | Height (in) |
 |---|---|---|
 | Vector seasonality | 12 | 10 |
-| Vector–climate correlation bar | 8 | 4 |
-| Vector–climate per-variable | 12 | 10 |
-| Vector–climate by-group heatmap | 8 | 6 |
+| Vector-climate correlation bar | 8 | 4 |
+| Vector-climate per-variable | 12 | 10 |
+| Vector-climate by-group heatmap | 8 | 6 |
 | Resistance | 12 | 8 |
 | Bionomics | 12 | 8 |
 | Case seasonality | 12 | 5 |
@@ -180,7 +180,7 @@ Data-availability inventory. Renders six sections:
 
 **Read this report first.** When a downstream figure looks wrong, the QA
 report tells you whether the data are missing, filtered out, or
-mis-joined — before you start debugging the analysis functions.
+mis-joined - before you start debugging the analysis functions.
 
 ### `analysis_report.qmd`
 
@@ -192,10 +192,10 @@ The narrative report. Renders seven sections in this order:
 
 | # | Section | Reads from `results` |
 |---|---|---|
-| 1 | Scope | — |
+| 1 | Scope | - |
 | 2 | Data availability | `qa$tables`, `cases_available` |
 | 3 | Vector species composition and seasonality | `vector_seasonal`, `fig_vector_seasonal` |
-| 4 | Vector–climate associations | `vector_climate`, plus figures by path |
+| 4 | Vector-climate associations | `vector_climate`, plus figures by path |
 | 5 | Insecticide resistance | `resistance_summary`, `fig_resistance` |
 | 6 | Vector bionomics | `bionomics_summary`, `fig_bionomics` |
 | 7 | Case data (context) | `cases_available`, `seasonal`, `fig_seasonal` |
@@ -231,11 +231,11 @@ note <- function(...) cat(paste0("_", paste0(..., collapse = ""), "_\n"))
 The pattern has three cases:
 
 1. **Result carries an error.** Print the error message as an italic
-   note. This is the `list(error = "…")` path returned by every
+   note. This is the `list(error = "...")` path returned by every
    `analyze_*` function when its input is empty.
 2. **Result has data.** Render the table or figure.
 3. **Result is empty but not an error.** Print a generic italic note.
-   This happens when the analysis ran but produced an empty tibble —
+   This happens when the analysis ran but produced an empty tibble -
    e.g. a bionomics column that was all-`NA`.
 
 The report never aborts. This is why the pipeline renders end-to-end
@@ -254,13 +254,13 @@ if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
 }
 ```
 
-Note `p[1]` — the report treats every `fig_*` as a character vector, even
-though most `plot_*` functions return a single string. `plot_vector_climate`
-returns a vector (one per variable plus the correlation bar and the
-optional heatmap), and the report uses only the first element when it
-renders the section header figure.
+Note `p[1]` - the report treats every `fig_*` as a character vector, even
+though most `plot_*` functions return a single string.
+`plot_vector_climate` returns a vector (one per variable plus the
+correlation bar and the optional heatmap), and the report uses only the
+first element when it renders the section header figure.
 
-Section 4 (vector–climate) takes a different approach. It **reconstructs
+Section 4 (vector-climate) takes a different approach. It **reconstructs
 paths by convention** rather than reading them from `results`:
 
 ```r
@@ -280,12 +280,12 @@ for (v in vc$climate_variables) {
 ```
 
 The reason for the divergence: `plot_vector_climate` returns a vector of
-paths in no guaranteed order (the correlation bar first, then per-variable
-figures in `result$climate_variables` order, then the optional heatmap).
-To label each per-variable figure with its variable name, the report has
-to know *which* file corresponds to *which* variable. Reconstructing from
-`cfg$study_name` and the variable name is the simplest way to get that
-mapping.
+paths in no guaranteed order (the correlation bar first, then
+per-variable figures in `result$climate_variables` order, then the
+optional heatmap). To label each per-variable figure with its variable
+name, the report has to know *which* file corresponds to *which*
+variable. Reconstructing from `cfg$study_name` and the variable name is
+the simplest way to get that mapping.
 
 **Consequence:** if you change the file-naming pattern inside
 `plot_vector_climate`, you must also change the two `glue()` expressions
@@ -325,7 +325,7 @@ quarto::quarto_render(
 
 Both reports write their HTML output next to the source `.qmd` by
 default. `tar_quarto` redirects the output to
-`outputs/analysis/reports/` via its `output_file` handling — check
+`outputs/analysis/reports/` via its `output_file` handling - check
 `targets::tar_meta(qa_report, fields = "path")` to see the exact
 destination after a run.
 
@@ -383,7 +383,7 @@ Three sanitised targets exist:
 
 - **Character `NA` and empty string become indistinguishable** in the
   report. The QA configuration table shows `"(missing)"` for absent
-  values because `cfg$study_name` etc. are never `NA` — they are
+  values because `cfg$study_name` etc. are never `NA` - they are
   guaranteed by `config::get()`. But `cfg$disease_code`, which *can* be
   `NULL`, is checked explicitly:
 
@@ -404,7 +404,7 @@ Three sanitised targets exist:
   over `is.na()` checks on parameter fields.
 
 If you need a value to survive as `NA` specifically, pass it outside the
-parameters — for example, as a file path the report reads, or as a
+parameters - for example, as a file path the report reads, or as a
 substitute in `knitr::knit_child()`. This is not currently done anywhere
 in the project.
 
@@ -415,7 +415,7 @@ in the project.
 ### Adding a section
 
 1. Write the analysis and plot functions. See
-   [Pipeline → extending](pipeline.md#extending).
+   [Pipeline -> extending](pipeline.md#extending).
 2. Add both to the `analysis_results` bundle in `_targets.R`.
 3. Add a section to `analysis_report.qmd`, following the three-way
    pattern:

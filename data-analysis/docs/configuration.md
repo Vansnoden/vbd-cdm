@@ -43,7 +43,7 @@ default:
 
 Every key shown above is passed to `new_analysis_config()` at the top of
 `_targets.R`. The function name of the config key is not always the same
-as the field name on `cfg` — see the notes below.
+as the field name on `cfg` - see the notes below.
 
 ---
 
@@ -88,16 +88,16 @@ where the `LIKE` pattern is `%<location>%`.
 
 **Abort conditions:**
 
-- Zero rows match → the pipeline aborts with a suggestion to set
+- Zero rows match -> the pipeline aborts with a suggestion to set
   `location_ids`.
-- More than 20 rows match → a warning is emitted. This usually means the
+- More than 20 rows match -> a warning is emitted. This usually means the
   ETL merged location labels and your substring now matches the whole
   continent. See [Troubleshooting](troubleshooting.md).
 
 ### `location_ids`
 
 An explicit list of integer `location_id` values. When non-empty, this
-takes priority over `location` and `country` — those fields are ignored
+takes priority over `location` and `country` - those fields are ignored
 entirely.
 
 **Behaviour:**
@@ -135,7 +135,7 @@ A `dim_disease.disease_code` value, or `null`. When non-null:
 - `query_burden()` filters `fact_disease_burden.disease_code = ?`.
 
 It does **not** affect vector, environment, resistance, or bionomics
-queries — those tables are disease-agnostic in the CDM.
+queries - those tables are disease-agnostic in the CDM.
 
 Set to `null` if you want the disease dimension to be ignored.
 
@@ -144,9 +144,9 @@ Set to `null` if you want the disease dimension to be ignored.
 Boolean. Controls whether `query_cases()` includes rows with
 `identification_method_code = 'ESTIMATE'`.
 
-- **`false` (default)** — the filter is `AND c.identification_method_code
+- **`false` (default)** - the filter is `AND c.identification_method_code
   <> 'ESTIMATE'`, so only observed cases are returned.
-- **`true`** — no filter; estimated rows are included.
+- **`true`** - no filter; estimated rows are included.
 
 The `'ESTIMATE'` rows are synthesised on the Python side by `fix_cases.py`
 and `consolidation._expand_burden_to_daily()` from yearly burden
@@ -177,7 +177,7 @@ potential_breeding_sites
 ```
 
 Adding a variable that exists in the database but is not in this list
-works fine on the R side — the query simply returns whatever is there.
+works fine on the R side - the query simply returns whatever is there.
 The list exists to document what the ETL is expected to write.
 
 To check what's actually in the database:
@@ -192,8 +192,9 @@ Adding a new variable end-to-end requires coordination:
 2. It is added to `SUPPORTED_ENV_VARIABLES` in `database/schemas.py` (for
    documentation and validation).
 3. It is added to `env_variables` in this file.
-4. Optionally, the analysis tolerates the new variable — `analyze_vector_climate()`
-   auto-detects numeric columns, so no code change is needed.
+4. Optionally, the analysis tolerates the new variable -
+   `analyze_vector_climate()` auto-detects numeric columns, so no code
+   change is needed.
 
 ### `species_filter`
 
@@ -211,7 +212,7 @@ are OR-ed together.
 - `"gambiae"` matches `"Anopheles gambiae"`, `"An. gambiae s.s."`, and
   any `vector_code` containing that substring.
 - Overly broad substrings (`"a"`, `"spp"`) will match nearly everything.
-- An empty list or `null` disables the filter entirely — all species are
+- An empty list or `null` disables the filter entirely - all species are
   returned.
 
 The QA report includes a **Species filter coverage** table showing which
@@ -221,12 +222,12 @@ unmatched, this table is how you find out.
 ### `max_lag_months`
 
 Integer. Passed to `analyze_vector_climate()` as `max_lag`, which caps
-the lag-correlation curve. Lag is measured in the aggregation unit — with
+the lag-correlation curve. Lag is measured in the aggregation unit - with
 the default `"monthly"` aggregation, `max_lag_months = 6` produces lag
 correlations at lags 0 through 6 months.
 
 Six months is a reasonable default for *Anopheles*: it covers the
-sporogonic cycle (roughly 10–14 days at tropical temperatures) plus
+sporogonic cycle (roughly 10-14 days at tropical temperatures) plus
 vector development and population dynamics. Larger values produce more
 lag points but fewer paired observations at the deepest lags, so the
 confidence intervals widen quickly.
@@ -243,13 +244,15 @@ The value is stored on `cfg` as `db_path`, not `database`. This is a
 naming mismatch inherited from the config layer; it's harmless but worth
 knowing if you inspect `cfg`.
 
-An absolute path also works. See [Environment variables](#environment-variables)
-for how `DATABASE_URL` interacts with this.
+An absolute path also works. See
+[Environment variables](#environment-variables) for how `DATABASE_URL`
+interacts with this.
 
 ### `output_dir`
 
 Where figures, data, and reports are written. Created by `_targets.R` if
-missing, along with the `figures/`, `data/`, and `reports/` subdirectories.
+missing, along with the `figures/`, `data/`, and `reports/`
+subdirectories.
 
 If omitted, `_targets.R` falls back to `"outputs/analysis"`.
 
@@ -294,7 +297,7 @@ is looked up in two places:
 2. The project's parent directory (`vbd_cdm.db`, i.e. the sibling of
    `data-analysis/`).
 
-The default is `vbd_cdm.db`. Note the misspelling — `SQL_LITE_DB_NAME`,
+The default is `vbd_cdm.db`. Note the misspelling - `SQL_LITE_DB_NAME`,
 not `SQLITE_DB_NAME`. The Python side uses the same spelling, so they
 agree, but the typo is easy to misremember.
 
@@ -342,11 +345,11 @@ Which targets reference `cfg`:
 | `locations` | yes |
 | `vectors`, `environment`, `resistance`, `bionomics`, `cases`, `burden` | yes (via `cfg` passed to the query functions) |
 | `qa` | yes |
-| `vector_seasonal` | no — depends only on `vectors_validated` |
-| `vector_climate` | yes — reads `cfg$env_variables` and `cfg$max_lag_months` |
+| `vector_seasonal` | no - depends only on `vectors_validated` |
+| `vector_climate` | yes - reads `cfg$env_variables` and `cfg$max_lag_months` |
 | `resistance_summary`, `bionomics_summary` | no |
 | `seasonal` | no |
-| All `fig_*` targets | yes — read `cfg$study_name` and `fig_dir` |
+| All `fig_*` targets | yes - read `cfg$study_name` and `fig_dir` |
 | `analysis_results` | yes |
 | Reports | yes (via sanitised `cfg`) |
 
@@ -357,7 +360,7 @@ shown above, including the extraction queries. Even though
 everything downstream re-runs.
 
 If this becomes a problem, the fix is to split `cfg` into per-consumer
-targets (`cfg_study_name`, `cfg_env_variables`, `cfg_db_path`, …) so
+targets (`cfg_study_name`, `cfg_env_variables`, `cfg_db_path`, ...) so
 that changing `study_name` invalidates only the targets that actually
 read it. This is not currently done.
 

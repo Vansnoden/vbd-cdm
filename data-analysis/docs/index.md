@@ -15,7 +15,7 @@ Python ingestion pipeline in `../data-integration/`.
 | Run the pipeline for the first time | [Getting started](getting-started.md) |
 | Change the study area or time window | [Configuration](configuration.md) |
 | Understand a figure in `outputs/analysis/` | [Analysis modules](analysis-modules.md) |
-| Add a new analysis | [Pipeline → extending](pipeline.md#extending) |
+| Add a new analysis | [Pipeline -> extending](pipeline.md#extending) |
 | Debug an error | [Troubleshooting](troubleshooting.md) |
 | Know what's in the database | [Data access](data-access.md) |
 

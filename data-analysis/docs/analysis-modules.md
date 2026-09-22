@@ -26,7 +26,7 @@ Species composition and seasonal patterns of vector abundance.
 
 The `value_col` is auto-detected in this order: `count`, then
 `density_per_trap`, then the first column of the input. The function
-returns `list(error = "…")` only when the input is `NULL` or empty; a
+returns `list(error = "...")` only when the input is `NULL` or empty; a
 missing `count` column is not an error, it just triggers the fallback.
 
 **Figure:** four-panel (composition bar, monthly climatology, monthly by
@@ -60,10 +60,10 @@ The most complex module. Computes:
 | Output | Description |
 |---|---|
 | `correlations` | Pearson r between vector abundance and each climate variable |
-| `lag_correlations` | r at lags 0…`max_lag`, with 95% CI |
+| `lag_correlations` | r at lags 0...`max_lag`, with 95% CI |
 | `optimal_lags` | the lag maximising r, per variable |
 | `seasonal` | monthly means normalised to [0, 1], both series |
-| `envelope` | mean ± SD vector abundance within deciles of each climate var |
+| `envelope` | mean +/- SD vector abundance within deciles of each climate var |
 | `by_group_correlations` | per-species correlations (if `group_cols` set) |
 | `by_group_lags` | per-species optimal lags |
 | `merged_data` | the aggregated, joined panel |
@@ -83,7 +83,7 @@ function auto-detects numeric columns in `environment`, excluding `date`,
 
 **FDR correction.** When `fdr_correct = TRUE` (default), a `p_adj` column
 is added to `correlations` and `lag_correlations` using the
-Benjamini–Hochberg method.
+Benjamini-Hochberg method.
 
 **Optimal lag selection.** `optimal_lags` picks the lag with the highest
 `r`, *not* the lag with the smallest p-value. These can differ when
@@ -96,18 +96,18 @@ per climate variable:
 1. Scatter with loess fit and `r` / `p` annotation.
 2. Lag correlation curve with 95% CI ribbon.
 3. Climate envelope (deciles of the climate variable vs. mean vector
-   abundance, ± 1 SD).
-4. Seasonal overlay — both series normalised to [0, 1].
+   abundance, +/- 1 SD).
+4. Seasonal overlay - both series normalised to [0, 1].
 
 If `group_cols` is set, a per-group heatmap of correlations is written as
 `<study_name>_vector_climate_by_group.png`.
 
 **Caveat.** When environment is aggregated across many grid cells
 (`location_ids = NULL`, or larger than the SQLite parameter budget), the
-result is a *continental mean* — a placeholder, not a physically
+result is a *continental mean* - a placeholder, not a physically
 meaningful series. Per-site climate requires `R/spatial_join.R` to map
 vector sites to their nearest grid cell first. See
-[Data access → What the queries don't do](data-access.md#what-the-queries-dont-do).
+[Data access -> What the queries don't do](data-access.md#what-the-queries-dont-do).
 
 ---
 
@@ -131,8 +131,8 @@ WHO-threshold classification of insecticide resistance tests.
 
 | Category | Threshold |
 |---|---|
-| Susceptible | ≥ 98% |
-| Suspected Resistance | 90–97.99% |
+| Susceptible | >= 98% |
+| Suspected Resistance | 90-97.99% |
 | Resistant | < 90% |
 
 The thresholds are applied by `fix_resistance_status.py` on the Python
@@ -161,8 +161,8 @@ Categorical distributions of four bionomic traits:
 | `larval` | `larval_site_type` |
 
 Each is a tibble with `value`, `n`, `share`. A missing column, or a
-column whose values are all `NA` or `""`, produces an empty tibble — not
-an error. The function returns `list(error = "…")` only when the input
+column whose values are all `NA` or `""`, produces an empty tibble - not
+an error. The function returns `list(error = "...")` only when the input
 is `NULL` or empty.
 
 **Figure:** four-panel bar chart. Panels with no data render as a blank
@@ -176,7 +176,7 @@ titled panel rather than aborting the figure.
 **Target:** `seasonal`
 **Figure:** `plot_seasonal(result, study_name, out_dir)`
 
-**Contextual analysis** — operates on case data, not vector data. Returns
+**Contextual analysis** - operates on case data, not vector data. Returns
 `list(error = "Not enough data for seasonal analysis.")` when fewer than
 two case rows are present.
 
@@ -202,7 +202,7 @@ second panel is an empty placeholder titled *"Year-over-year
 
 Three modules are scaffolded but **not wired into `_targets.R`**. They
 are documented here for completeness. To activate one, see
-[Pipeline → extending](pipeline.md#extending).
+[Pipeline -> extending](pipeline.md#extending).
 
 ### `analysis_glm.R::analyze_negbin_glm`
 
@@ -239,7 +239,7 @@ dlnm::plot.crosspred(dlnm_fit$pred_temp, "overall")
 dev.off()
 ```
 
-See [Troubleshooting → DLNM](troubleshooting.md#dlnm-plot-is-empty).
+See [Troubleshooting -> DLNM](troubleshooting.md#dlnm-plot-is-empty).
 
 ### `analysis_inla.R::analyze_inla`
 
@@ -250,12 +250,12 @@ analyze_inla(cases, locations, adjacency_file)
 Spatial BYM2 model via INLA. Fits a negative-binomial model with a
 `rw1` month effect and a `bym2` spatial random effect.
 
-**Known bug:** the formula declares two `f(month_id, …)` terms — one
-`rw1` and one `ar1` — on the same variable. INLA rejects this because a
+**Known bug:** the formula declares two `f(month_id, ...)` terms - one
+`rw1` and one `ar1` - on the same variable. INLA rejects this because a
 single variable can carry only one `f()` term per formula. Merge into a
 single term or use a different variable for the second effect.
 
-See [Troubleshooting → INLA](troubleshooting.md#inla).
+See [Troubleshooting -> INLA](troubleshooting.md#inla).
 
 ---
 
@@ -269,7 +269,7 @@ Every `analyze_*` function:
   output, never calls `set.seed()`.
 
 This contract is what makes the `targets` cache correct. If you break
-it — for example, by having an analysis read a CSV it "just needs" —
+it - for example, by having an analysis read a CSV it "just needs" -
 `targets` will cache a result that depends on something it cannot see,
 and the cache will go stale without warning. Every I/O operation belongs
 in `R/db_queries.R` (reads) or in the `plot_*` functions (writes).

@@ -2,19 +2,16 @@
 
 ## Data flow
 
-```
-┌────────────────────┐         ┌──────────────────┐         ┌──────────────────┐
-│  Python ETL        │  writes │  vbd_cdm.db      │  reads  │  R analysis      │
-│  (data-integration)│────────▶│  (SQLite or      │◀────────│  (data-analysis) │
-│                    │         │   PostgreSQL)    │         │                  │
-└────────────────────┘         └──────────────────┘         └────────┬─────────┘
-                                                                     │
-                                                                     ▼
-                                                             ┌──────────────────┐
-                                                             │  outputs/        │
-                                                             │    figures/      │
-                                                             │    reports/      │
-                                                             └──────────────────┘
+```mermaid
+flowchart LR
+    ETL["Python ETL<br/>(data-integration)"]
+    DB[("vbd_cdm.db<br/>SQLite or PostgreSQL")]
+    R["R analysis<br/>(data-analysis)"]
+    OUT["outputs/<br/>figures/<br/>reports/"]
+
+    ETL -- writes --> DB
+    DB -- reads --> R
+    R --> OUT
 ```
 
 The two projects share **only** the database. They have no shared code, no
@@ -30,30 +27,30 @@ the R analysis reads it. The R side never writes to `vbd_cdm.db`.
 
 ```
 data-analysis/
-├── _targets.R              pipeline definition (see pipeline.md)
-├── config.yml              study configuration (see configuration.md)
-├── DESCRIPTION             package metadata
-├── renv.lock               pinned dependencies
-├── R/
-│   ├── config.R            new_analysis_config()
-│   ├── db.R                cdm_connect(), cdm_query()
-│   ├── db_queries.R        all SQL — pure data access, no analysis
-│   ├── qa.R                summarize_available_data()
-│   ├── analysis_vector_seasonal.R    vector seasonality (primary)
-│   ├── analysis_vector_climate.R     vector–climate associations (primary)
-│   ├── analysis_resistance.R         insecticide resistance (primary)
-│   ├── analysis_bionomics.R          vector bionomics (primary)
-│   ├── analysis_seasonal.R           case seasonality (contextual)
-│   ├── analysis_glm.R                negative-binomial GLM (scaffold)
-│   ├── analysis_dlnm.R               distributed-lag model (scaffold)
-│   ├── analysis_inla.R               spatial BYM2 (scaffold)
-│   ├── spatial_join.R                grid-cell assignment
-│   └── plot_helpers.R                theme_cdm(), palette, save_plot()
-├── inst/report/
-│   ├── analysis_report.qmd           narrative report
-│   └── qa_report.qmd                 data-availability report
-├── outputs/analysis/       created by _targets.R at runtime
-└── docs/                   this documentation
+|-- _targets.R              pipeline definition (see pipeline.md)
+|-- config.yml              study configuration (see configuration.md)
+|-- DESCRIPTION             package metadata
+|-- renv.lock               pinned dependencies
+|-- R/
+|   |-- config.R            new_analysis_config()
+|   |-- db.R                cdm_connect(), cdm_query()
+|   |-- db_queries.R        all SQL - pure data access, no analysis
+|   |-- qa.R                summarize_available_data()
+|   |-- analysis_vector_seasonal.R    vector seasonality (primary)
+|   |-- analysis_vector_climate.R     vector-climate associations (primary)
+|   |-- analysis_resistance.R         insecticide resistance (primary)
+|   |-- analysis_bionomics.R          vector bionomics (primary)
+|   |-- analysis_seasonal.R           case seasonality (contextual)
+|   |-- analysis_glm.R                negative-binomial GLM (scaffold)
+|   |-- analysis_dlnm.R               distributed-lag model (scaffold)
+|   |-- analysis_inla.R               spatial BYM2 (scaffold)
+|   |-- spatial_join.R                grid-cell assignment
+|   `-- plot_helpers.R                theme_cdm(), palette, save_plot()
+|-- inst/report/
+|   |-- analysis_report.qmd           narrative report
+|   `-- qa_report.qmd                 data-availability report
+|-- outputs/analysis/       created by _targets.R at runtime
+`-- docs/                   this documentation
 ```
 
 ## Layering
@@ -61,31 +58,36 @@ data-analysis/
 The R side has **four layers**, each of which may only depend on the ones
 below it:
 
-```
-   ┌──────────────────────────────────────────┐
-   │ 4. Reports      inst/report/*.qmd        │
-   ├──────────────────────────────────────────┤
-   │ 3. Plots        plot_*(), plot_helpers.R │
-   ├──────────────────────────────────────────┤
-   │ 2. Analysis     analyze_*()              │
-   ├──────────────────────────────────────────┤
-   │ 1. Data access  db.R, db_queries.R       │
-   └──────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    L4["4. Reports<br/>inst/report/*.qmd"]
+    L3["3. Plots<br/>plot_*(), plot_helpers.R"]
+    L2["2. Analysis<br/>analyze_*()"]
+    L1["1. Data access<br/>db.R, db_queries.R"]
+
+    L4 --> L3
+    L3 --> L2
+    L2 --> L1
+
+    style L1 fill:#1E40AF,color:#fff
+    style L2 fill:#3B82F6,color:#fff
+    style L3 fill:#93C5FD,color:#000
+    style L4 fill:#DBEAFE,color:#000
 ```
 
 Each layer has a single responsibility:
 
-- **Layer 1 — Data access.** Knows SQL, knows the schema, knows how to
+- **Layer 1 - Data access.** Knows SQL, knows the schema, knows how to
   connect. Returns tibbles. Contains no statistics, no plotting, no file
   I/O beyond what the DB driver requires.
-- **Layer 2 — Analysis.** Pure functions: tibbles in, lists out. Contains
+- **Layer 2 - Analysis.** Pure functions: tibbles in, lists out. Contains
   no SQL, no file I/O, no plotting. This is the layer that makes the
-  `targets` cache correct — see *Purity* below.
-- **Layer 3 — Plots.** Takes an analysis result plus a study name and an
+  `targets` cache correct - see *Purity* below.
+- **Layer 3 - Plots.** Takes an analysis result plus a study name and an
   output directory, writes PNGs, returns the file paths. No analysis
   logic. No SQL. Uses `theme_cdm()` and `cdm_palette` for visual
   consistency.
-- **Layer 4 — Reports.** Quarto documents that render the analysis
+- **Layer 4 - Reports.** Quarto documents that render the analysis
   results and embed the figures. No SQL, no analysis, no plotting.
 
 Dependencies point strictly downward. A Layer 2 module that calls into
@@ -106,7 +108,7 @@ If you want to bring it into compliance, the refactor is small:
 2. Change `attach_grid_cells()` to take the centroids as an argument:
 
    ```r
-   attach_grid_cells <- function(vectors, centroids) { … }
+   attach_grid_cells <- function(vectors, centroids) { ... }
    ```
 
 3. Wire it in `_targets.R`:
@@ -122,14 +124,17 @@ exception to the purity rule. Do not add more.
 
 ## The `cfg` object
 
-Every layer above Layer 1 receives a `cfg` object — the result of
+Every layer above Layer 1 receives a `cfg` object - the result of
 `new_analysis_config()` in `R/config.R`. It is a plain list with class
 `"analysis_config"`. Its fields mirror `config.yml` plus a few normalised
 derived fields.
 
-`cfg` is passed by value; nothing mutates it. It is cached by `targets`
-as a single target. Changing any key in `config.yml` invalidates `cfg`
-and every target that reads it.
+`cfg` is passed by value; nothing mutates it. It is hashed by `targets`
+as a single object, so **any change to any key in `config.yml`
+invalidates every target that reads `cfg`** - which is nearly all of
+them, including the extraction queries. See
+[Configuration -> Config invalidation](configuration.md#config-invalidation)
+for the full picture.
 
 The distinction between `cfg` and the rest of the pipeline: `cfg` is
 *identity* (which study, which years, which database), not *data*. It
@@ -142,7 +147,7 @@ whether to skip a target by hashing:
 
 - the target's command (the R code),
 - the value of every other target it reads,
-- the value of any global option it depends on.
+- the value of any global object it references.
 
 It **cannot** see:
 
@@ -180,16 +185,14 @@ Four properties matter here:
    only the targets that call it, not the ones that don't. On a
    large-project rebuild, this is the difference between two minutes and
    two hours.
-2. **Content hashing.** Changing `config.yml` invalidates only the targets
-   that read the changed key. Because `cfg` is a single target, a change
-   to `study_name` invalidates every target that reads `cfg` — but a
-   change to a field that only the plot functions read invalidates only
-   the plot targets, if you split `cfg` accordingly. (This project does
-   not split `cfg`; the default behaviour is to invalidate everything
-   downstream of `cfg` when any key changes.)
+2. **Content hashing.** Every global that a target references is hashed
+   as part of that target's dependency set. Because `cfg` is a single
+   global, changing any key in `config.yml` invalidates every target
+   that reads `cfg`. To get finer invalidation you would need to split
+   `cfg` into per-consumer globals, which this project does not do.
 3. **Parallelism.** Independent branches (`vectors`, `environment`,
    `resistance`, `bionomics`, `cases`) can run concurrently if the DAG
-   allows it. In practice the four SQL extraction targets are
+   allows it. In practice the six SQL extraction targets are
    independent and run in parallel; everything downstream is
    sequential because it depends on the extraction results.
 4. **Reproducibility.** `targets::tar_manifest()` shows exactly what ran.
@@ -218,14 +221,14 @@ tar_option_set(
 )
 ```
 
-- **`packages`** — attached inside every target's process. Add any
+- **`packages`** - attached inside every target's process. Add any
   package a target calls. If you forget one, the target errors with a
   `could not find function` error that only appears when the target
   actually runs.
-- **`format = "qs"`** — the on-disk cache format. Fast, compressed,
+- **`format = "qs"`** - the on-disk cache format. Fast, compressed,
   schema-stable. Do not change this without invalidating the cache;
   `targets` will error on an unreadable cache.
-- **`memory = "transient"`** — targets are dropped from RAM after their
+- **`memory = "transient"`** - targets are dropped from RAM after their
   last downstream consumer finishes. This keeps peak memory bounded on
   large pipelines, at the cost of re-loading targets when multiple
   downstream targets need them. For this project the trade-off is
@@ -233,9 +236,9 @@ tar_option_set(
 
 ## Database invalidation
 
-`targets` does not hash the database. If the CDM changes — a new batch
+`targets` does not hash the database. If the CDM changes - a new batch
 of vector observations is ingested, the environment grid is re-cut, the
-resistance dataset is corrected — `targets` will happily reuse the
+resistance dataset is corrected - `targets` will happily reuse the
 cached extraction results and produce stale figures.
 
 Two ways to handle this:
@@ -255,12 +258,12 @@ tar_target(db_hash, tools::md5sum(cfg$db_path), format = "qs"),
 tar_target(vectors, query_vectors(cfg, locations$location_id, db_hash = db_hash)),
 ```
 
-…and add an unused `db_hash` argument to each `query_*` function so the
+...and add an unused `db_hash` argument to each `query_*` function so the
 hash is a dependency. When the DB changes, `db_hash` changes, and
 everything downstream invalidates automatically.
 
 The automatic approach is cleaner but requires touching every query
-function. If you adopt it, do it uniformly — a half-migrated pipeline is
+function. If you adopt it, do it uniformly - a half-migrated pipeline is
 worse than either extreme.
 
 ## Outputs and the cache
@@ -269,9 +272,9 @@ Two directories matter:
 
 ```
 outputs/analysis/
-├── figures/     PNG files written by plot_*() functions
-├── reports/     HTML files written by tar_quarto()
-└── (data/)      reserved; currently unused
+|-- figures/     PNG files written by plot_*() functions
+|-- reports/     HTML files written by tar_quarto()
+`-- (data/)      reserved; currently unused
 ```
 
 The `targets` cache lives at `_targets/` in the project root by default.
@@ -284,7 +287,7 @@ If you want the cache under `outputs/analysis/`, add to `_targets.R`:
 tar_option_set(store = file.path(cfg$output_dir, "_targets"))
 ```
 
-…but note this must happen *after* `cfg` is defined. The current
+...but note this must happen *after* `cfg` is defined. The current
 `_targets.R` calls `tar_option_set()` before building `cfg`, so moving
 the store requires reordering the file.
 
@@ -311,15 +314,15 @@ Follow the existing layout:
 6. Add a section to `inst/report/analysis_report.qmd`.
 7. Run `targets::tar_make()`. Only the new targets run.
 
-See [Pipeline → extending](pipeline.md#extending) for the concrete
+See [Pipeline -> extending](pipeline.md#extending) for the concrete
 walkthrough.
 
 ## What this architecture deliberately does not do
 
 - **No database writes from R.** The analysis side is read-only. All
-  mutations — deduplication, FK repair, vocabulary standardisation —
+  mutations - deduplication, FK repair, vocabulary standardisation -
   happen on the Python side, under explicit operator control.
-- **No R↔Python bridge.** No `reticulate`, no shared config file, no
+- **No R-to-Python bridge.** No `reticulate`, no shared config file, no
   shared library. The database is the interface. This means a Python
   upgrade cannot break the R side, and vice versa.
 - **No test suite for the R side (yet).** `DESCRIPTION` declares
