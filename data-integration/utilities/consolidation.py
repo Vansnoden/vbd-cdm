@@ -2543,6 +2543,9 @@ def enrich_location_dataframe(
     if df.empty:
         return df
 
+    if lat_col not in df.columns or lon_col not in df.columns:
+        return df
+
     df = df.copy()
 
     if country_code_col not in df.columns:

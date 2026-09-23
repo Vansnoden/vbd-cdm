@@ -164,11 +164,11 @@ def get_dimension_tables() -> List[str]:
 
 
 def transform_dimensions(df: pd.DataFrame, mapping_path: str) -> Dict[str, pd.DataFrame]:
-    """Transform source DataFrame to dimension tables only."""
     transformer = MappingTransformer(mapping_path)
-    all_tables = transformer.transform(df)
-    dim_tables = get_dimension_tables()
-    dim_dfs = {t: all_tables[t] for t in dim_tables if t in all_tables and not all_tables[t].empty}
+    dim_tables = set(get_dimension_tables())
+    all_tables  = transformer.transform(df, target_filter=dim_tables)
+    dim_dfs = {t: all_tables[t] for t in get_dimension_tables()
+               if t in all_tables and not all_tables[t].empty}
     return dim_dfs
 
 
@@ -211,11 +211,11 @@ def get_fact_tables() -> List[str]:
 
 
 def transform_facts(df: pd.DataFrame, mapping_path: str) -> Dict[str, pd.DataFrame]:
-    """Transform source DataFrame to fact tables only."""
     transformer = MappingTransformer(mapping_path)
-    all_tables = transformer.transform(df)
-    fact_tables = get_fact_tables()
-    fact_dfs = {t: all_tables[t] for t in fact_tables if t in all_tables and not all_tables[t].empty}
+    fact_tables = set(get_fact_tables())
+    all_tables  = transformer.transform(df, target_filter=fact_tables)
+    fact_dfs = {t: all_tables[t] for t in get_fact_tables()
+                if t in all_tables and not all_tables[t].empty}
     return fact_dfs
 
 
@@ -275,7 +275,8 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
         for file_path in file_paths:
             logger.info(f"Processing file: {file_path}")
             # Extract year from filename (if present)
-            year_match = re.search(r'(\d{4})', os.path.basename(file_path))
+            # year_match = re.search(r'(\d{4})(?=\.[^.]+$)', os.path.basename(file_path))
+            year_match = re.search(r'(\d{4})(?=[^.]*$)', os.path.basename(file_path))
             year = int(year_match.group(1)) if year_match else None
             
             # Step 4a: Extract data

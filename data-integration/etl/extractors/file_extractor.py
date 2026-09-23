@@ -67,10 +67,19 @@ class FileExtractor:
         if ext in ('cog', 'tif', 'tiff'):
             if self.extract_mode == 'chunked':
                 # Return a generator
-                window_size = reader_kwargs.pop('window_size', 512)
-                return tif_to_df_chunked(file_path, window_size=window_size)
+                window_size      = reader_kwargs.pop('window_size', 512)
+                band             = reader_kwargs.pop('band', 1)
+                nodata_threshold = reader_kwargs.pop('nodata_threshold', -9999.0)
+                return tif_to_df_chunked(
+                    file_path,
+                    window_size=window_size,
+                    band=band,
+                    nodata_threshold=nodata_threshold,
+                )
             else:
-                df = cog_to_df(file_path) if ext == 'cog' else tif_to_df(file_path)
+                band = reader_kwargs.pop('band', None)
+                df = cog_to_df(file_path, band=band) if ext == 'cog' \
+                    else tif_to_df(file_path, band=band)
                 
         elif ext in ('nc', 'nc4', 'grib', 'grib2'):
             if self.extract_mode == 'single':

@@ -6,62 +6,62 @@ Dialect:         sqlite
 Tables
 ------------------------------------------------------------
   fact_environment                         522,478
-  fact_disease_case                        298,112
   fact_socioeconomic_condition              98,868
   dim_time                                  46,386
   dim_concept                                7,859
-  fact_concept_map                           1,904
-  dim_location                               1,623
+  fact_insecticide_resistance                4,184
+  fact_vector_observation                    3,612
+  fact_concept_map                           2,242
   dim_socioeconomic_indicator                1,498
-  fact_insecticide_resistance                1,468
-  fact_vector_observation                    1,451
-  fact_disease_burden                          948
-  fact_bionomics                               401
+  fact_bionomics                             1,343
+  dim_location                               1,139
   fact_health_facility                         334
-  dim_resistance_test_type                      66
-  dim_vector                                    20
-  dim_insecticide                               16
-  dim_source                                     7
+  dim_resistance_test_type                      52
+  dim_vector                                    21
+  dim_insecticide                               19
+  dim_source                                     8
   dim_vocabulary                                 3
-  dim_identification_method                      1
   dim_disease                                    1
+  dim_identification_method                      1
   fact_intervention                              1
+  fact_disease_case                              0
+  fact_disease_burden                            0
 
 Locations
 ------------------------------------------------------------
-  total:        1,623
-  with coords:  1,611 (99%)
-  countries:    33
+  total:        1,139
+  with coords:  1,068 (94%)
+  countries:    28
 
   top countries:
-    KE        1,095
-    BJ           77
-    NG           51
-    BF           43
-    SN           42
-    UG           32
-    CM           30
-    TZ           29
-    ML           25
-    GQ           24
+    KE          839
+    UG           53
+    BJ           45
+    SN           32
+    TZ           25
+    NG           25
+    BF           16
+    GH           14
+    ML            9
+    ET            9
 
 Vector species (top 15 by row count)
 ------------------------------------------------------------
-  Gambiae Complex                               347 rows  count=     5,368
-  Anopheles arabiensis                          204 rows  count=     1,417
-  Anopheles gambiae                             167 rows  count=        99
-  gambiae complex                               140 rows  count=    28,756
-  arabiensis                                    120 rows  count=     2,125
-  funestus complex                               98 rows  count=     4,980
-  Anopheles coluzzii                             97 rows  count=         -
-  funestus                                       76 rows  count=     4,255
-  gambiae_s form_m form                          66 rows  count=       444
-  gambiae_s form                                 44 rows  count=     1,220
-  coustani                                       30 rows  count=     6,551
-  Anopheles coluzzii/gambiae                     20 rows  count=         -
-  Funestus Subgroup                              19 rows  count=       793
-  coustani complex                               15 rows  count=     1,230
-  Anopheles funestus                              4 rows  count=        95
+  Gambiae Complex                               940 rows  count=    65,390
+  Anopheles gambiae                             470 rows  count=    24,522
+  Anopheles arabiensis                          444 rows  count=    14,424
+  gambiae complex                               361 rows  count=    80,723
+  Anopheles coluzzii                            350 rows  count=    11,930
+  arabiensis                                    222 rows  count=     6,231
+  funestus complex                              218 rows  count=     8,359
+  funestus                                      190 rows  count=    13,530
+  gambiae_s form_m form                         142 rows  count=     1,848
+  gambiae_s form                                 95 rows  count=     1,590
+  coustani                                       55 rows  count=     6,712
+  Anopheles coluzzii/gambiae                     55 rows  count=     6,298
+  coustani complex                               31 rows  count=     1,744
+  Funestus Subgroup                              25 rows  count=       861
+  Anopheles funestus                              5 rows  count=       155
 
 Environment variables
 ------------------------------------------------------------
@@ -70,25 +70,25 @@ Environment variables
 
 Resistance status
 ------------------------------------------------------------
-  (null)                            1,468
+  (null)                            4,184
 
 Cases by identification method
 ------------------------------------------------------------
-  ESTIMATE                        298,112
+  (no case rows)
 
 Foreign key integrity
 ------------------------------------------------------------
-  fact_vector_observation        . location_id          → dim_location                    0 /      1,451  (0.00%)
-  fact_vector_observation        . vector_code          → dim_vector                      0 /      1,451  (0.00%)
-  fact_vector_observation        . source_code          → dim_source                      0 /      1,451  (0.00%)
-  fact_insecticide_resistance    . location_id          → dim_location                    0 /      1,468  (0.00%)
-  fact_insecticide_resistance    . insecticide_code     → dim_insecticide                 0 /      1,468  (0.00%)
-  fact_insecticide_resistance    . test_type_code       → dim_resistance_test_type        0 /      1,468  (0.00%)
-  fact_insecticide_resistance    . vector_code          → dim_vector                      0 /      1,468  (0.00%)
-  fact_bionomics                 . location_id          → dim_location                    0 /        401  (0.00%)
-  fact_bionomics                 . vector_code          → dim_vector                      0 /        401  (0.00%)
+  fact_vector_observation        . location_id          → dim_location                    0 /      3,612  (0.00%)
+  fact_vector_observation        . vector_code          → dim_vector                      0 /      3,612  (0.00%)
+  fact_vector_observation        . source_code          → dim_source                      0 /      3,612  (0.00%)
+  fact_insecticide_resistance    . location_id          → dim_location                    0 /      4,184  (0.00%)
+  fact_insecticide_resistance    . insecticide_code     → dim_insecticide                 0 /      4,184  (0.00%)
+  fact_insecticide_resistance    . test_type_code       → dim_resistance_test_type        0 /      4,184  (0.00%)
+  fact_insecticide_resistance    . vector_code          → dim_vector                      0 /      4,184  (0.00%)
+  fact_bionomics                 . location_id          → dim_location                    0 /      1,343  (0.00%)
+  fact_bionomics                 . vector_code          → dim_vector                      0 /      1,343  (0.00%)
   fact_environment               . location_id          → dim_location                    0 /    522,478  (0.00%)
-  fact_disease_case              . location_id          → dim_location                    0 /    298,112  (0.00%)
-  fact_disease_case              . disease_code         → dim_disease                     0 /    298,112  (0.00%)
-  fact_disease_burden            . location_id          → dim_location                    0 /        948  (0.00%)
+  fact_disease_case              . location_id          → dim_location                    0 /          0  (0.00%)
+  fact_disease_case              . disease_code         → dim_disease                     0 /          0  (0.00%)
+  fact_disease_burden            . location_id          → dim_location                    0 /          0  (0.00%)
 

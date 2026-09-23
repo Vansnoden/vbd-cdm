@@ -13,11 +13,11 @@ class DimVocabulary(Base):
     """Registry of external vocabularies used for standardization."""
     __tablename__ = "dim_vocabulary"
 
-    vocabulary_id   = Column(String(20), primary_key=True)   # 'GADM', 'IDOMAL', 'MIRO', 'NCBI'
-    vocabulary_name = Column(String(200), nullable=False)
-    source_url      = Column(String(500))
-    version         = Column(String(50))
-    description     = Column(String(500))
+    vocabulary_id   = Column(String(100), primary_key=True)   # 'GADM', 'IDOMAL', 'MIRO', 'NCBI'
+    vocabulary_name = Column(String(1000), nullable=False)
+    source_url      = Column(String(1000))
+    version         = Column(String(100))
+    description     = Column(String(1000))
     loaded_at       = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -26,11 +26,11 @@ class DimConcept(Base):
     __tablename__ = "dim_concept"
 
     concept_id    = Column(Integer, primary_key=True, autoincrement=True)
-    vocabulary_id = Column(String(20), ForeignKey("dim_vocabulary.vocabulary_id"), nullable=False)
+    vocabulary_id = Column(String(100), ForeignKey("dim_vocabulary.vocabulary_id"), nullable=False)
     concept_code  = Column(String(100), nullable=False)       # e.g. 'GID_2_KEN.3_1', 'IDOMAL:0000657'
     concept_name  = Column(String(300), nullable=False)       # preferred label
-    concept_class = Column(String(50))                         # 'admin2', 'species', 'disease', 'insecticide'
-    domain        = Column(String(50))                         # 'location', 'vector', 'disease', 'intervention'
+    concept_class = Column(String(100))                         # 'admin2', 'species', 'disease', 'insecticide'
+    domain        = Column(String(100))                         # 'location', 'vector', 'disease', 'intervention'
     parent_code   = Column(String(100))                        # hierarchy
     extra         = Column(Text)                               # JSON blob for synonyms, coordinates
 
@@ -51,7 +51,7 @@ class DimTime(Base):
     month = Column(Integer, nullable=False)
     week = Column(Integer)
     day_of_year = Column(Integer)
-    season = Column(String(20))
+    season = Column(String(100))
     is_holiday = Column(Boolean, default=False)
 
 
@@ -60,13 +60,13 @@ class DimLocation(Base):
     __tablename__ = "dim_location"
 
     location_id = Column(Integer,  primary_key=True, autoincrement=True)
-    name = Column(String(200), nullable=False)
+    name = Column(String(1000), nullable=False)
     location_code = Column(String, unique=True)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
     country_code = Column(String(10))
     country_name = Column(String(100))
-    admin_level = Column(String(50))
+    admin_level = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
@@ -75,12 +75,12 @@ class DimDisease(Base):
     """Disease vocabulary with standard alignment"""
     __tablename__ = "dim_disease"
 
-    disease_code = Column(String(20), primary_key=True)
+    disease_code = Column(String(100), primary_key=True)
     disease_name = Column(String(100), nullable=False)
-    description = Column(String(500))
+    description = Column(String(1000))
     source_standard = Column(String(100))
     pathogen = Column(String(100))
-    icd_code = Column(String(20))
+    icd_code = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
@@ -89,13 +89,13 @@ class DimVector(Base):
     """Vector species/subspecies vocabulary"""
     __tablename__ = "dim_vector"
 
-    vector_code = Column(String(20), primary_key=True)
+    vector_code = Column(String(100), primary_key=True)
     species_name = Column(String(100), nullable=False)
-    subspecies = Column(String(50))
-    description = Column(String(500))
+    subspecies = Column(String(100))
+    description = Column(String(1000))
     source_standard = Column(String(100))
-    genus = Column(String(50))
-    family = Column(String(50))
+    genus = Column(String(100))
+    family = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
@@ -104,12 +104,12 @@ class DimInsecticide(Base):
     """Insecticide vocabulary"""
     __tablename__ = "dim_insecticide"
 
-    insecticide_code = Column(String(20), primary_key=True)
+    insecticide_code = Column(String(100), primary_key=True)
     insecticide_name = Column(String(100), nullable=False)
-    chemical_class = Column(String(50))
-    description = Column(String(500))
+    chemical_class = Column(String(100))
+    description = Column(String(1000))
     source_standard = Column(String(100))
-    irac_group = Column(String(20))
+    irac_group = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
@@ -118,10 +118,10 @@ class DimIdentificationMethod(Base):
     """Diagnostic method vocabulary"""
     __tablename__ = "dim_identification_method"
 
-    method_code = Column(String(20), primary_key=True)
+    method_code = Column(String(100), primary_key=True)
     method_name = Column(String(100), nullable=False)
-    method_type = Column(String(50))
-    description = Column(String(500))
+    method_type = Column(String(100))
+    description = Column(String(1000))
     source_standard = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
@@ -131,10 +131,10 @@ class DimResistanceTestType(Base):
     """Resistance bioassay type vocabulary"""
     __tablename__ = "dim_resistance_test_type"
 
-    test_type_code = Column(String(20), primary_key=True)
+    test_type_code = Column(String(100), primary_key=True)
     test_type_name = Column(String(100), nullable=False)
-    exposure_time_unit = Column(String(20))
-    description = Column(String(500))
+    exposure_time_unit = Column(String(100))
+    description = Column(String(1000))
     source_standard = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
@@ -144,11 +144,11 @@ class DimSocioeconomicIndicator(Base):
     """Socioeconomic indicator vocabulary"""
     __tablename__ = "dim_socioeconomic_indicator"
 
-    indicator_code = Column(String(50), primary_key=True)
-    indicator_name = Column(String(200), nullable=False)
-    unit = Column(String(50))
-    source = Column(String(200))
-    description = Column(String(500))
+    indicator_code = Column(String(100), primary_key=True)
+    indicator_name = Column(String(1000), nullable=False)
+    unit = Column(String(100))
+    source = Column(String(1000))
+    description = Column(String(1000))
     source_standard = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
@@ -158,12 +158,12 @@ class DimSource(Base):
     """Data source provenance"""
     __tablename__ = "dim_source"
 
-    source_code = Column(String(20), primary_key=True)
-    source_name = Column(String(200), nullable=False)
-    source_description = Column(String(500))
+    source_code = Column(String(100), primary_key=True)
+    source_name = Column(String(1000), nullable=False)
+    source_description = Column(String(1000))
     source_standard = Column(String(100))
-    source_url = Column(String(500))
-    version = Column(String(50))
+    source_url = Column(String(1000))
+    version = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
@@ -176,10 +176,10 @@ class FactConceptMap(Base):
     __tablename__ = "fact_concept_map"
 
     map_id         = Column(Integer, primary_key=True, autoincrement=True)
-    source_table   = Column(String(50), nullable=False)       # 'dim_location', 'dim_vector', ...
-    source_column  = Column(String(50), nullable=False)       # 'name', 'species_name', ...
+    source_table   = Column(String(100), nullable=False)       # 'dim_location', 'dim_vector', ...
+    source_column  = Column(String(100), nullable=False)       # 'name', 'species_name', ...
     source_value   = Column(String(300), nullable=False)      # raw value from ingestion
-    vocabulary_id  = Column(String(20), ForeignKey("dim_vocabulary.vocabulary_id"))
+    vocabulary_id  = Column(String(100), ForeignKey("dim_vocabulary.vocabulary_id"))
     concept_code   = Column(String(100))                       # matched standard code
     match_method   = Column(String(30))                        # 'exact', 'normalized', 'fuzzy', 'manual'
     match_score    = Column(Float)                              # 0-1
@@ -200,16 +200,16 @@ class FactVectorObservation(Base):
     observation_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
-    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    vector_code = Column(String(100), ForeignKey("dim_vector.vector_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
-    life_stage = Column(String(50))
+    life_stage = Column(String(100))
     sex = Column(String(10))
     collection_method = Column(String(100))
     count = Column(Integer)
     density_per_trap = Column(Float)
     tested_for_pathogen = Column(String(100))
-    infection_status = Column(String(20))
+    infection_status = Column(String(100))
     infection_rate = Column(Float)
 
     # Relationships
@@ -238,16 +238,16 @@ class FactDiseaseCase(Base):
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id_onset = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     date_id_reported = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
-    disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
-    identification_method_code = Column(String(20), ForeignKey("dim_identification_method.method_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    disease_code = Column(String(100), ForeignKey("dim_disease.disease_code"), nullable=False)
+    identification_method_code = Column(String(100), ForeignKey("dim_identification_method.method_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
-    case_status = Column(String(20))
-    host_type = Column(String(20))
+    case_status = Column(String(100))
+    host_type = Column(String(100))
     age_years = Column(Integer)
-    age_group = Column(String(20))
+    age_group = Column(String(100))
     sex = Column(String(10))
-    outcome = Column(String(20))
+    outcome = Column(String(100))
     case_count = Column(Integer, nullable=False, server_default="1")
 
     # Relationships
@@ -279,10 +279,10 @@ class FactInsecticideResistance(Base):
     resistance_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
-    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
-    insecticide_code = Column(String(20), ForeignKey("dim_insecticide.insecticide_code"), nullable=False)
-    test_type_code = Column(String(20), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    vector_code = Column(String(100), ForeignKey("dim_vector.vector_code"), nullable=False)
+    insecticide_code = Column(String(100), ForeignKey("dim_insecticide.insecticide_code"), nullable=False)
+    test_type_code = Column(String(100), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     concentration = Column(Float)
     exposure_time = Column(Integer)
@@ -328,13 +328,13 @@ class FactBionomics(Base):
     bionomics_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
-    vector_code = Column(String(20), ForeignKey("dim_vector.vector_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    vector_code = Column(String(100), ForeignKey("dim_vector.vector_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     biting_rate = Column(Float)
-    feeding_preference = Column(String(20))
-    biting_location = Column(String(20))
-    resting_behavior = Column(String(50))
+    feeding_preference = Column(String(100))
+    biting_location = Column(String(100))
+    resting_behavior = Column(String(100))
     larval_site_type = Column(String(100))
 
     # Relationships
@@ -361,10 +361,10 @@ class FactIntervention(Base):
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_start = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     date_end = Column(String(10), ForeignKey("dim_time.date_id"))
-    target_disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    target_disease_code = Column(String(100), ForeignKey("dim_disease.disease_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
-    intervention_type = Column(String(50))
+    intervention_type = Column(String(100))
     coverage = Column(Float)
 
     # Relationships
@@ -393,8 +393,8 @@ class FactSocioeconomicCondition(Base):
     socio_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     year = Column(Integer, nullable=False)
-    indicator_code = Column(String(50), ForeignKey("dim_socioeconomic_indicator.indicator_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    indicator_code = Column(String(100), ForeignKey("dim_socioeconomic_indicator.indicator_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     indicator_value = Column(Float)
 
@@ -416,14 +416,14 @@ class FactHealthFacility(Base):
     __tablename__ = "fact_health_facility"
 
     facility_id = Column(Integer, primary_key=True, autoincrement=True)
-    facility_code = Column(String(50), unique=True, nullable=False)
+    facility_code = Column(String(100), unique=True, nullable=False)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
-    name = Column(String(200))
+    name = Column(String(1000))
     lat = Column(Float)
     lon = Column(Float)
-    type = Column(String(50))
+    type = Column(String(100))
     catchment_population = Column(Integer)
 
     # Relationships
@@ -442,8 +442,8 @@ class FactDiseaseBurden(Base):
     burden_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     year = Column(Integer, nullable=False)
-    disease_code = Column(String(20), ForeignKey("dim_disease.disease_code"), nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    disease_code = Column(String(100), ForeignKey("dim_disease.disease_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     incidence_rate = Column(Float)
     prevalence_rate = Column(Float)
@@ -471,9 +471,9 @@ class FactEnvironment(Base):
     fact_env_id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
-    variable = Column(String(50), nullable=False)   # e.g., 'temperature_mean', 'rainfall_total'
+    variable = Column(String(100), nullable=False)   # e.g., 'temperature_mean', 'rainfall_total'
     value = Column(Float, nullable=False)
-    source_code = Column(String(20), ForeignKey("dim_source.source_code"), nullable=False)
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     # Relationships
     location = relationship("DimLocation")

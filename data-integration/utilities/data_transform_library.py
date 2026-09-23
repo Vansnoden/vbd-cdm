@@ -67,10 +67,52 @@ def optimized_df_to_csv(df: pd.DataFrame, output_path: str, chunksize: int = 100
 
 # ========================= Raster / GeoTIFF / COG =========================
 
-def _raster_to_df(fp: str) -> pd.DataFrame:
-    """Internal: open any raster supported by rioxarray and return as DataFrame."""
+def _raster_to_df(
+    fp: str,
+    band: Optional[Union[int, List[int]]] = None,
+) -> pd.DataFrame:
+    """
+    Internal: open any raster supported by rioxarray and return as DataFrame.
+
+    Args:
+        fp:   Path to the raster file.
+        band: Band selection, using 1-based indexing (matching GDAL).
+              None    -> all bands (one row per pixel per band).
+              int     -> a single band, e.g. band=1 for the mean of a
+                         Mean/LCI/UCI triple.
+              list    -> multiple bands.
+
+    Returns:
+        Long-format DataFrame with at least x, y, value columns. When
+        `band` is None and the raster has more than one band, a `band`
+        column is also present.
+    """
     import rioxarray
     raster = rioxarray.open_rasterio(fp, chunks='auto')
+
+    n_bands = raster.sizes.get('band', 1)
+
+    if band is not None:
+        if isinstance(band, int):
+            if band < 1 or band > n_bands:
+                raise ValueError(
+                    f"band={band} out of range; file has {n_bands} band(s)"
+                )
+            # drop=True removes the scalar band coordinate so the resulting
+            # DataFrame has no `band` column.
+            raster = raster.sel(band=band, drop=True)
+        elif isinstance(band, (list, tuple)):
+            b = list(band)
+            if not all(isinstance(x, int) and 1 <= x <= n_bands for x in b):
+                raise ValueError(
+                    f"band list {b} out of range; file has {n_bands} band(s)"
+                )
+            raster = raster.sel(band=b)
+        else:
+            raise ValueError(
+                f"band must be int, list, or None; got {type(band).__name__}"
+            )
+
     df = raster.to_dataframe(name='value').reset_index()
     if hasattr(raster, '_file_obj') and raster._file_obj:
         raster._file_obj.close()
@@ -80,24 +122,43 @@ def _raster_to_df(fp: str) -> pd.DataFrame:
 
 
 @validate_extension('cog', 'tif', 'tiff')
-def cog_to_df(fp: str) -> pd.DataFrame:
+def cog_to_df(
+    fp: str,
+    band: Optional[Union[int, List[int]]] = None,
+) -> pd.DataFrame:
     """Convert Cloud Optimized GeoTIFF (COG) or regular GeoTIFF to DataFrame."""
-    return _raster_to_df(fp)
+    return _raster_to_df(fp, band=band)
 
 
 @validate_extension('cog', 'tif', 'tiff')
-def cog_to_csv(fp: str, csv_path: str, chunksize: int = 50000) -> bool:
+def cog_to_csv(
+    fp: str,
+    csv_path: str,
+    chunksize: int = 50000,
+    band: Optional[Union[int, List[int]]] = None,
+) -> bool:
     """Convert COG/TIFF directly to CSV."""
-    df = cog_to_df(fp)
+    df = cog_to_df(fp, band=band)
     return optimized_df_to_csv(df, csv_path, chunksize)
 
 
 @validate_extension('tif', 'tiff')
-def tif_to_df_chunked(fp: str, window_size: int = 512, nodata_threshold: float = -9999.0) -> Generator[pd.DataFrame, None, None]:
+def tif_to_df_chunked(
+    fp: str,
+    window_size: int = 512,
+    nodata_threshold: float = -9999.0,
+    band: int = 1,
+) -> Generator[pd.DataFrame, None, None]:
     """
     Generator that yields DataFrames for each block of a GeoTIFF.
     Filters out NoData values (<= nodata_threshold).
     Yields DataFrames with columns: 'x', 'y', 'value' (single band).
+
+    Args:
+        fp:               Path to the GeoTIFF.
+        window_size:      Window size in pixels.
+        nodata_threshold: Values <= this are dropped. Default -9999.
+        band:             1-based band index to read. Default 1.
     """
     import rasterio
     from rasterio.windows import Window
@@ -105,7 +166,11 @@ def tif_to_df_chunked(fp: str, window_size: int = 512, nodata_threshold: float =
     import pandas as pd
 
     with rasterio.open(fp) as src:
-        band = 1  # assume single band; adjust if multi-band
+        if band < 1 or band > src.count:
+            raise ValueError(
+                f"band={band} out of range; file has {src.count} band(s)"
+            )
+
         height, width = src.height, src.width
         nodata = src.nodata if src.nodata is not None else nodata_threshold
 
@@ -114,48 +179,49 @@ def tif_to_df_chunked(fp: str, window_size: int = 512, nodata_threshold: float =
                 win = Window(col_off, row_off,
                              min(window_size, width - col_off),
                              min(window_size, height - row_off))
-                data = src.read(band, window=win)  # 2D array (rows, cols)
+                data = src.read(band, window=win)  # 2D array
                 if data.size == 0:
                     continue
 
                 rows, cols = data.shape
-
-                # Get pixel center coordinates for the entire window
-                # Create meshgrid of column and row indices
                 col_indices = np.arange(cols)
                 row_indices = np.arange(rows)
                 xs, ys = src.transform * np.meshgrid(col_indices, row_indices)
-                # xs and ys are 2D arrays of shape (rows, cols)
 
-                # Flatten all arrays
-                flat_xs = xs.flatten()
-                flat_ys = ys.flatten()
+                flat_xs   = xs.flatten()
+                flat_ys   = ys.flatten()
                 flat_vals = data.flatten()
 
-                # Filter out NoData values (values <= threshold)
                 mask = flat_vals > nodata_threshold
                 if not np.any(mask):
                     continue
 
-                df = pd.DataFrame({
+                yield pd.DataFrame({
                     'x': flat_xs[mask],
                     'y': flat_ys[mask],
-                    'value': flat_vals[mask]
+                    'value': flat_vals[mask],
                 })
-                yield df
 
 
 @validate_extension('tif', 'tiff')
-def tif_to_df(fp: str) -> pd.DataFrame:
+def tif_to_df(
+    fp: str,
+    band: Optional[Union[int, List[int]]] = None,
+) -> pd.DataFrame:
     """Alias for cog_to_df."""
-    return cog_to_df(fp)
+    return cog_to_df(fp, band=band)
 
 
 @validate_extension('tif', 'tiff')
-def tif_to_csv(fp: str, csv_path: str, chunksize: int = 50000) -> bool:
+def tif_to_csv(
+    fp: str,
+    csv_path: str,
+    chunksize: int = 50000,
+    band: Optional[Union[int, List[int]]] = None,
+) -> bool:
     """Alias for cog_to_csv."""
-    return cog_to_csv(fp, csv_path, chunksize)
-
+    return cog_to_csv(fp, csv_path, chunksize, band=band)
+    
 
 # ========================= NetCDF (including .nc and .nc4) =========================
 
