@@ -72,9 +72,17 @@ class MappingTransformer:
                 logger.warning(f"Invalid ref format: {ref}. Expected 'table.field'")
                 return value
         else:
-            # Simple mapping (dict lookup)
             mapping = params or {}
-            return mapping.get(str(value), value)
+            # 'default' is an optional key inside params. When present, it
+            # is returned if no mapping entry matches. When absent, the
+            # input value passes through unchanged. This preserves the
+            # original behaviour for callers like itnuse_data that rely on
+            # the input surviving; callers like worldbank_indicator that
+            # want a fallback label can opt in explicitly.
+            default = mapping.get('default', value)
+            lookup = {k: v for k, v in mapping.items() if k != 'default'}
+            return lookup.get(str(value), default)
+    
     
     def _apply_date_parse_transform(
         self,
@@ -99,11 +107,94 @@ class MappingTransformer:
             logger.warning(f"Date parse failed for '{value}' with format '{fmt}': {e}")
             return None
                 
-    def _apply_cast_transform(
-        self, 
-        value: Any, 
-        params: Optional[Union[str, dict]]) -> Any:
+    
+    def _apply_derive_category_transform(self, value, params, extra_context=None) -> Any:
+        """
+        Derive a categorical label from one or more source columns.
+
+        Rules are evaluated top-to-bottom; the first whose conditions all
+        hold wins. If none match, `default` is returned.
+
+        Supported conditions:
+            Single-column:
+                {"col": "indoor_host_percent", "op": ">=", "value": 80}
+            Ratio of two columns, computed as a / (a + b):
+                {"cols": ["indoor_biting_total", "outdoor_biting_total"],
+                "op": "ratio_gte", "value": 0.8}
+
+        ops: >, >=, <, <=, ==, !=, ratio_gt, ratio_gte, ratio_lt, ratio_lte
+        """
+        if not params:
+            return None
+        if not extra_context:
+            return params.get("default")
+
+        null_tokens = {"", "NA", "N/A", "NONE", "NULL", "NAN", "NR", "-"}
+        extra_nulls = params.get("treat_as_null") or []
+        if isinstance(extra_nulls, str):
+            extra_nulls = [extra_nulls]
+        null_tokens.update(str(x).strip().upper() for x in extra_nulls)
+
+        def _num(v):
+            if v is None:
+                return None
+            if isinstance(v, float) and pd.isna(v):
+                return None
+            if isinstance(v, str):
+                s = v.strip()
+                if not s or s.upper() in null_tokens:
+                    return None
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def _check(cond) -> bool:
+            op = cond["op"]
+
+            # Ratio comparison a / (a + b)
+            if "cols" in cond:
+                a = _num(extra_context.get(cond["cols"][0]))
+                b = _num(extra_context.get(cond["cols"][1]))
+                if a is None or b is None or (a + b) <= 0:
+                    return False
+                ratio = a / (a + b)
+                v = float(cond["value"])
+                return {
+                    "ratio_gt":  ratio >  v,
+                    "ratio_gte": ratio >= v,
+                    "ratio_lt":  ratio <  v,
+                    "ratio_lte": ratio <= v,
+                }.get(op, False)
+
+            # Single-column comparison
+            x = _num(extra_context.get(cond["col"]))
+            if x is None:
+                return False
+            y = float(cond["value"])
+            return {
+                ">":  x >  y, ">=": x >= y,
+                "<":  x <  y, "<=": x <= y,
+                "==": x == y, "!=": x != y,
+            }.get(op, False)
+
+        for rule in params.get("rules", []):
+            if all(_check(c) for c in rule["when"]):
+                return rule["label"]
+
+        return params.get("default")
+
+
+    def _apply_cast_transform(self, value, params):
         target_type = params.get('type', 'str')
+        # Treat common "not reported" tokens as null regardless of target type.
+        null_tokens = {'NR', 'NF', 'ND', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NAN'}
+        if isinstance(value, str) and value.strip().upper() in null_tokens:
+            return None
         try:
             if target_type == 'int':
                 return int(float(value))
@@ -117,6 +208,7 @@ class MappingTransformer:
             logger.warning(f"Cast to {target_type} failed for value '{value}'")
             return None
         
+    
     def _apply_split_transform(
         self, 
         value: Any, 
@@ -470,7 +562,7 @@ class MappingTransformer:
         elif params is None:
             params = {}
         # For transforms that don't require a raw value, skip the None check.
-        if transform not in ('format_date', 'map', 'concat', 'coalesce'):
+        if transform not in ('format_date', 'map', 'concat', 'coalesce', 'derive_category'):
             if pd.isna(value) or value is None:
                 return None
         if transform == 'none':
@@ -489,6 +581,8 @@ class MappingTransformer:
             return self._apply_format_date_transform(value, params, extra_context)
         elif transform == 'coalesce':
             return self._apply_coalesce_transform(value, params, extra_context)
+        elif transform == 'derive_category':
+            return self._apply_derive_category_transform(value, params, extra_context)
         else:
             logger.warning(f"Unknown transform type: '{transform}'")
             return value

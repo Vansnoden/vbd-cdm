@@ -276,8 +276,11 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
             logger.info(f"Processing file: {file_path}")
             # Extract year from filename (if present)
             # year_match = re.search(r'(\d{4})(?=\.[^.]+$)', os.path.basename(file_path))
-            year_match = re.search(r'(\d{4})(?=[^.]*$)', os.path.basename(file_path))
-            year = int(year_match.group(1)) if year_match else None
+            # year_match = re.search(r'(\d{4})(?=[^.]*$)', os.path.basename(file_path))
+            # year = int(year_match.group(1)) if year_match else None
+            stem = os.path.splitext(os.path.basename(file_path))[0]
+            year_candidates = re.findall(r'(\d{4})', stem)
+            year = int(year_candidates[-1]) if year_candidates else None
             
             # Step 4a: Extract data
             extractor = FileExtractor(extract_mode=extract_mode, large_df_threshold=10_000_000)

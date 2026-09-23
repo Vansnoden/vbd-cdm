@@ -6,62 +6,59 @@ Dialect:         sqlite
 Tables
 ------------------------------------------------------------
   fact_environment                         522,478
+  fact_disease_case                        298,112
   fact_socioeconomic_condition              98,868
   dim_time                                  46,386
   dim_concept                                7,859
-  fact_insecticide_resistance                4,184
-  fact_vector_observation                    3,612
-  fact_concept_map                           2,242
+  fact_insecticide_resistance                3,095
+  fact_vector_observation                    2,767
   dim_socioeconomic_indicator                1,498
-  fact_bionomics                             1,343
-  dim_location                               1,139
+  fact_concept_map                           1,157
+  fact_disease_burden                          948
+  fact_bionomics                               677
+  dim_location                                 412
   fact_health_facility                         334
-  dim_resistance_test_type                      52
-  dim_vector                                    21
-  dim_insecticide                               19
+  dim_resistance_test_type                      50
+  dim_insecticide                               18
+  dim_vector                                    12
   dim_source                                     8
   dim_vocabulary                                 3
-  dim_disease                                    1
   dim_identification_method                      1
+  dim_disease                                    1
   fact_intervention                              1
-  fact_disease_case                              0
-  fact_disease_burden                            0
 
 Locations
 ------------------------------------------------------------
-  total:        1,139
-  with coords:  1,068 (94%)
-  countries:    28
+  total:        412
+  with coords:  340 (83%)
+  countries:    18
 
   top countries:
-    KE          839
-    UG           53
-    BJ           45
-    SN           32
-    TZ           25
-    NG           25
-    BF           16
-    GH           14
-    ML            9
-    ET            9
+    KE          264
+    (none)       58
+    BJ           24
+    UG           19
+    NG           10
+    GH            8
+    TZ            7
+    BF            4
+    ET            3
+    ML            3
 
 Vector species (top 15 by row count)
 ------------------------------------------------------------
-  Gambiae Complex                               940 rows  count=    65,390
-  Anopheles gambiae                             470 rows  count=    24,522
-  Anopheles arabiensis                          444 rows  count=    14,424
-  gambiae complex                               361 rows  count=    80,723
-  Anopheles coluzzii                            350 rows  count=    11,930
-  arabiensis                                    222 rows  count=     6,231
-  funestus complex                              218 rows  count=     8,359
-  funestus                                      190 rows  count=    13,530
-  gambiae_s form_m form                         142 rows  count=     1,848
-  gambiae_s form                                 95 rows  count=     1,590
-  coustani                                       55 rows  count=     6,712
-  Anopheles coluzzii/gambiae                     55 rows  count=     6,298
-  coustani complex                               31 rows  count=     1,744
-  Funestus Subgroup                              25 rows  count=       861
-  Anopheles funestus                              5 rows  count=       155
+  Anopheles gambiae                           1,361 rows  count=   285,961
+  Anopheles arabiensis                          482 rows  count=    33,426
+  Anopheles funestus                            407 rows  count=    51,381
+  Anopheles coluzzii                            371 rows  count=    15,418
+  coustani                                       72 rows  count=    10,094
+  Anopheles coluzzii/gambiae                     61 rows  count=     7,140
+  Anopheles rivulorum                             4 rows  count=       152
+  Anopheles melas                                 3 rows  count=        71
+  Anopheles stephensi                             2 rows  count=         -
+  Anopheles quadriannulatus                       2 rows  count=        33
+  culicifacies                                    1 rows  count=         8
+  coluzzii_gambiae_m form                         1 rows  count=        56
 
 Environment variables
 ------------------------------------------------------------
@@ -70,25 +67,28 @@ Environment variables
 
 Resistance status
 ------------------------------------------------------------
-  (null)                            4,184
+  (null)                            3,066
+  Resistant                            22
+  Suspected Resistance                  4
+  Susceptible                           3
 
 Cases by identification method
 ------------------------------------------------------------
-  (no case rows)
+  ESTIMATE                        298,112
 
 Foreign key integrity
 ------------------------------------------------------------
-  fact_vector_observation        . location_id          → dim_location                    0 /      3,612  (0.00%)
-  fact_vector_observation        . vector_code          → dim_vector                      0 /      3,612  (0.00%)
-  fact_vector_observation        . source_code          → dim_source                      0 /      3,612  (0.00%)
-  fact_insecticide_resistance    . location_id          → dim_location                    0 /      4,184  (0.00%)
-  fact_insecticide_resistance    . insecticide_code     → dim_insecticide                 0 /      4,184  (0.00%)
-  fact_insecticide_resistance    . test_type_code       → dim_resistance_test_type        0 /      4,184  (0.00%)
-  fact_insecticide_resistance    . vector_code          → dim_vector                      0 /      4,184  (0.00%)
-  fact_bionomics                 . location_id          → dim_location                    0 /      1,343  (0.00%)
-  fact_bionomics                 . vector_code          → dim_vector                      0 /      1,343  (0.00%)
+  fact_vector_observation        . location_id          → dim_location                    0 /      2,767  (0.00%)
+  fact_vector_observation        . vector_code          → dim_vector                      0 /      2,767  (0.00%)
+  fact_vector_observation        . source_code          → dim_source                      0 /      2,767  (0.00%)
+  fact_insecticide_resistance    . location_id          → dim_location                    0 /      3,095  (0.00%)
+  fact_insecticide_resistance    . insecticide_code     → dim_insecticide                 0 /      3,095  (0.00%)
+  fact_insecticide_resistance    . test_type_code       → dim_resistance_test_type        0 /      3,095  (0.00%)
+  fact_insecticide_resistance    . vector_code          → dim_vector                      0 /      3,095  (0.00%)
+  fact_bionomics                 . location_id          → dim_location                    0 /        677  (0.00%)
+  fact_bionomics                 . vector_code          → dim_vector                      0 /        677  (0.00%)
   fact_environment               . location_id          → dim_location                    0 /    522,478  (0.00%)
-  fact_disease_case              . location_id          → dim_location                    0 /          0  (0.00%)
-  fact_disease_case              . disease_code         → dim_disease                     0 /          0  (0.00%)
-  fact_disease_burden            . location_id          → dim_location                    0 /          0  (0.00%)
+  fact_disease_case              . location_id          → dim_location                    0 /    298,112  (0.00%)
+  fact_disease_case              . disease_code         → dim_disease                     0 /    298,112  (0.00%)
+  fact_disease_burden            . location_id          → dim_location                    0 /        948  (0.00%)
 

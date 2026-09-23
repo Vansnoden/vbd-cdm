@@ -5,7 +5,7 @@ Country,dim_location,country_code,none,,False,,,
 "Site name",dim_location,name,concat,"{""columns"": [""Country"", ""Site name""], ""separator"": ""/""}",True,,,
 Latitude,dim_location,centroid_lat,cast,"{""type"": ""float""}",False,,,
 Longitude,dim_location,centroid_lon,cast,"{""type"": ""float""}",False,,,
-"Admin level",dim_location,admin_level,cast,"{""type"": ""str""}",False,,,
+,dim_location,admin_level,none,,False,,site,
 ,dim_location,location_code,concat,"{""columns"": [""Country"", ""Latitude"", ""Longitude""], ""separator"": ""/""}",True,,,
 
 Species,dim_vector,species_name,none,,True,,,
