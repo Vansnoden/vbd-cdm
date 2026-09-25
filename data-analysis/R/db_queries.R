@@ -5,65 +5,47 @@
 #
 # Every query that accepts `location_ids` builds its location filter via
 # .loc_clause(). That helper returns an empty SQL fragment (and no bind
-# parameters) when the ID vector is NULL, empty, or larger than SQLite's
-# IN-clause parameter budget. Semantically, "all locations" and "no
-# location filter" are identical, so this changes nothing except that the
-# query succeeds instead of silently returning zero rows.
+# parameters) only when the ID vector is NULL or empty. It imposes no
+# upper bound on the number of IDs: the full set is passed as a single
+# JSON parameter and expanded server-side by the database's JSON array
+# function (json_each on SQLite, jsonb_array_elements_text on PostgreSQL).
 
 # ---------------------------------------------------------------------------
 # Location resolution
 # ---------------------------------------------------------------------------
 
-#' Resolve location IDs from a name / country code, or from an explicit list
+#' Resolve location IDs from country and location name filters.
 #'
-#' @param location     Location name, or "ALL".
-#' @param country      ISO alpha-2 code, or "ALL".
-#' @param db_path      Optional path to the SQLite database.
-#' @param explicit_ids Optional integer vector of location_ids. When
-#'                     non-empty, the name / country filters are ignored.
-#' @return A tibble with `location_id`, `name`, `country_code`,
-#'   `admin_level`.
+#' @param countries Character vector of ISO alpha-2 country codes, or NULL.
+#' @param locations Character vector of location names (matched exactly or
+#'                  as substrings), or NULL.
+#' @param db_path   Optional SQLite database path.
+#' @param db_url    Optional full connection URL.
+#' @return Tibble with `location_id`, `name`, `country_code`, `admin_level`.
 #' @export
-resolve_location_ids <- function(location, country, db_path = NULL,
-                                 explicit_ids = NULL) {
+resolve_location_ids <- function(countries = NULL, locations = NULL,
+                                 db_path = NULL, db_url = NULL) {
   
-  # Explicit IDs win.
-  if (!is.null(explicit_ids) && length(explicit_ids) > 0) {
-    id_ph <- .placeholders(length(explicit_ids))
-    sql <- paste0(
-      "SELECT location_id, name, country_code, admin_level ",
-      "FROM dim_location WHERE location_id IN (", id_ph, ") ",
-      "ORDER BY location_id"
-    )
-    df <- cdm_query(sql, as.list(as.integer(explicit_ids)), db_path = db_path)
-    if (nrow(df) == 0) {
-      cli::cli_abort(c(
-        "No locations matched `location_ids` in config.",
-        "i" = "IDs supplied: {.val {explicit_ids}}",
-        "i" = "Verify against `SELECT location_id, name FROM dim_location;`"
-      ))
-    }
-    missing_ids <- setdiff(as.integer(explicit_ids), df$location_id)
-    if (length(missing_ids) > 0) {
-      cli::cli_warn(c(
-        "Some `location_ids` from config.yml were not found in dim_location.",
-        "!" = "Missing: {.val {missing_ids}}"
-      ))
-    }
-    return(df)
-  }
+  countries <- normalize_all_list(countries)
+  if (!is.null(countries)) countries <- toupper(countries)
+  locations <- normalize_all_list(locations)
   
-  # Fall back to name + country matching.
   where  <- character()
   params <- list()
   
-  if (!identical(country, "ALL")) {
-    where  <- c(where, "country_code = ?")
-    params <- c(params, list(country))
+  if (length(countries) > 0) {
+    ph <- .placeholders(length(countries))
+    where  <- c(where, glue::glue("country_code IN ({ph})"))
+    params <- c(params, as.list(countries))
   }
-  if (!identical(location, "ALL")) {
-    where  <- c(where, "(name = ? OR name LIKE ?)")
-    params <- c(params, list(location, paste0("%", location, "%")))
+  
+  if (length(locations) > 0) {
+    loc_parts <- character()
+    for (loc in locations) {
+      loc_parts <- c(loc_parts, "(name = ? OR name LIKE ?)")
+      params <- c(params, list(loc, paste0("%", loc, "%")))
+    }
+    where <- c(where, paste0("(", paste(loc_parts, collapse = " OR "), ")"))
   }
   
   sql <- paste0(
@@ -71,23 +53,26 @@ resolve_location_ids <- function(location, country, db_path = NULL,
     if (length(where)) paste0(" WHERE ", paste(where, collapse = " AND ")) else "",
     " ORDER BY name"
   )
-  df <- cdm_query(sql, params, db_path = db_path)
+  df <- cdm_query(sql, params, db_path = db_path, db_url = db_url)
+  
   if (nrow(df) == 0) {
     cli::cli_abort(c(
-      "No locations matched the name filter.",
-      "i" = "location = {.val {location}}, country = {.val {country}}",
-      "i" = "Consider setting `location_ids:` in config.yml to pin the study area."
+      "No locations matched the configured filter.",
+      "i" = "countries = {.val {countries}}",
+      "i" = "locations = {.val {locations}}",
+      "i" = "Check `SELECT DISTINCT country_code FROM dim_location;` and " %+%
+        "`SELECT name FROM dim_location LIMIT 30;`"
     ))
   }
-  # Warn when the name filter matches a suspiciously large set. This usually
-  # means the ETL's location merge produced duplicate labels.
+  
   if (nrow(df) > 20) {
     cli::cli_warn(c(
-      "Location name filter matched {nrow(df)} rows in dim_location.",
-      "!" = "This is likely an ETL side-effect (merged labels).",
-      "i" = "Set `location_ids:` in config.yml to avoid silent fan-out."
+      "Location filter matched {nrow(df)} rows in dim_location.",
+      "i" = "If this is unexpected, narrow `locations` or `countries` " %+%
+        "in config.yml."
     ))
   }
+  
   df
 }
 
@@ -99,25 +84,35 @@ resolve_location_ids <- function(location, country, db_path = NULL,
 
 #' Build a location-filter SQL fragment.
 #'
-#' Returns list(sql = , params = ). When `location_ids` is NULL, empty, or
-#' longer than 900 entries, returns an empty fragment. SQLite's hard limit on
-#' IN-clause parameters (SQLITE_MAX_VARIABLE_NUMBER) varies between builds;
-#' 900 is a safe ceiling. Semantically "all locations" and "no filter" are
-#' identical.
+#' Returns list(sql = , params = ). When `location_ids` is NULL or empty,
+#' returns an empty fragment. There is no upper bound on the number of IDs:
+#' they are passed as a single JSON-encoded parameter and expanded
+#' server-side by the database's JSON array function.
 #'
 #' @noRd
-.loc_clause <- function(location_ids, alias = NULL, column = "location_id") {
+.loc_clause <- function(location_ids, alias = NULL, column = "location_id",
+                        backend = "sqlite") {
   if (is.null(location_ids) || length(location_ids) == 0) {
     return(list(sql = "", params = list()))
   }
-  if (length(location_ids) > 900) {
+  
+  location_ids <- location_ids[!is.na(location_ids)]
+  if (length(location_ids) == 0) {
     return(list(sql = "", params = list()))
   }
-  ph <- .placeholders(length(location_ids))
+  
   prefix <- if (is.null(alias)) column else paste0(alias, ".", column)
+  json   <- jsonlite::toJSON(as.integer(location_ids), auto_unbox = FALSE)
+  
+  inner <- switch(backend,
+                  sqlite     = "SELECT value      FROM json_each(?)",
+                  postgresql = "SELECT value::int FROM jsonb_array_elements_text(?::jsonb)",
+                  stop("Unsupported backend: ", backend)
+  )
+  
   list(
-    sql    = glue::glue("AND {prefix} IN ({ph})"),
-    params = as.list(location_ids)
+    sql    = glue::glue("AND {prefix} IN ({inner})"),
+    params = list(json)
   )
 }
 
@@ -131,6 +126,19 @@ resolve_location_ids <- function(location, country, db_path = NULL,
   )
 }
 
+#' Build a disease-code filter SQL fragment.
+#' @noRd
+.disease_filter <- function(cfg, alias = "c", column = "disease_code") {
+  if (length(cfg$diseases) == 0) {
+    return(list(sql = "", params = list()))
+  }
+  ph <- .placeholders(length(cfg$diseases))
+  list(
+    sql    = glue::glue("AND {alias}.{column} IN ({ph})"),
+    params = as.list(cfg$diseases)
+  )
+}
+
 # ---------------------------------------------------------------------------
 # Cases
 # ---------------------------------------------------------------------------
@@ -140,20 +148,14 @@ resolve_location_ids <- function(location, country, db_path = NULL,
 #' Excludes synthetic burden-expansion rows (identification_method_code =
 #' 'ESTIMATE') unless `cfg$include_estimated_cases` is TRUE.
 #'
-#' @param cfg          Analysis config.
-#' @param location_ids Integer vector of location IDs, or NULL for all.
-#' @return Tibble: date, year, month, week, season, case_count.
 #' @export
 query_cases <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "c")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "c", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "t")
-  params <- yf$params
+  df_ <- .disease_filter(cfg, alias = "c", column = "disease_code")
   
-  disease_filter <- ""
-  if (!is.null(cfg$disease_code)) {
-    disease_filter <- "AND c.disease_code = ?"
-    params <- c(params, list(cfg$disease_code))
-  }
+  params <- c(yf$params, df_$params)
   
   method_filter <- ""
   if (!isTRUE(cfg$include_estimated_cases)) {
@@ -172,12 +174,12 @@ query_cases <- function(cfg, location_ids = NULL) {
     WHERE 1=1
       {loc$sql}
       {yf$sql}
-      {disease_filter}
+      {df_$sql}
       {method_filter}
     GROUP BY t.date, t.year, t.month, t.week, t.season
     ORDER BY t.date
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
@@ -188,36 +190,43 @@ query_cases <- function(cfg, location_ids = NULL) {
 
 #' Vector observations aggregated by date and species
 #'
-#' Uses a LEFT JOIN on dim_vector so rows whose vector_code did not resolve
-#' to a dimension record are still returned (with the raw code as a fallback
-#' label). The species filter matches against both dim_vector.species_name
-#' and fact_vector_observation.vector_code.
+#' The species filter matches exactly (case-insensitive) against
+#' dim_vector.species_name. Unknown names abort with a list of what's
+#' actually available.
 #'
-#' @param cfg             Analysis config.
-#' @param location_ids    Integer vector of location IDs, or NULL for all.
-#' @param species_filter  Optional character vector of substrings (case-
-#'                        insensitive). NULL or empty means no filter.
-#' @return Tibble: date, year, month, species_name, vector_code, count,
-#'   density_per_trap, infection_rate.
 #' @export
 query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
-  loc <- .loc_clause(location_ids, alias = "o")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "o", backend = backend)
   
   species_sql    <- ""
   species_params <- list()
+  
   if (!is.null(species_filter) && length(species_filter) > 0) {
-    # Each OR clause consumes two bind params: one for species_name, one
-    # for vector_code. `rep(x, each = 2)` produces the right order.
-    clause <- paste0(
-      "(LOWER(COALESCE(v.species_name, '')) LIKE LOWER(?) ",
-      "OR LOWER(COALESCE(o.vector_code, '')) LIKE LOWER(?))"
+    catalogue <- cdm_query_cfg(
+      cfg,
+      "SELECT DISTINCT species_name FROM dim_vector WHERE species_name IS NOT NULL"
+    )$species_name
+    
+    canonical <- vapply(species_filter, function(want) {
+      hit <- catalogue[tolower(catalogue) == tolower(want)]
+      if (length(hit) == 0) NA_character_ else hit[1]
+    }, character(1))
+    
+    unknown <- species_filter[is.na(canonical)]
+    if (length(unknown) > 0) {
+      cli::cli_abort(c(
+        "species_filter contains names not present in dim_vector.species_name.",
+        "!" = "Unknown: {.val {unknown}}",
+        "i" = "Available: {.val {sort(catalogue)}}",
+        "i" = "Use `species_filter: [All]` to include every species."
+      ))
+    }
+    
+    species_sql    <- glue::glue(
+      "AND v.species_name IN ({.placeholders(length(canonical))})"
     )
-    species_sql <- paste0(
-      "AND (",
-      paste(rep(clause, length(species_filter)), collapse = " OR "),
-      ")"
-    )
-    species_params <- as.list(rep(paste0("%", species_filter, "%"), each = 2))
+    species_params <- as.list(canonical)
   }
   
   yf     <- .year_filter(cfg, list(), alias = "t")
@@ -241,7 +250,7 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
              COALESCE(v.species_name, o.vector_code), o.vector_code
     ORDER BY t.date
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
@@ -252,25 +261,18 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
 
 #' Environment: long format -> wide
 #'
-#' When `location_ids` is NULL or larger than the SQLite parameter budget,
-#' every environment row in the year window is returned. The pivot then
-#' takes a mean across whatever location_ids are present, which for the
-#' "all locations" case is a continental mean — useful as a placeholder,
-#' not as a physically meaningful series. Per-site climate requires
-#' preserving location_id through the query and joining vector sites to
-#' their nearest grid cell.
+#' The pivot collapses across whatever location_ids were matched. When
+#' location_ids is NULL, this is a mean over every environment row in the
+#' year window — a placeholder, not a per-site series.
 #'
 #' @export
 query_environment <- function(cfg, location_ids = NULL) {
-  loc    <- .loc_clause(location_ids, alias = "e")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc    <- .loc_clause(location_ids, alias = "e", backend = backend)
   var_ph <- .placeholders(length(cfg$env_variables))
   yf     <- .year_filter(cfg, list(), alias = "t")
   
-  params <- c(
-    loc$params,
-    as.list(cfg$env_variables),
-    yf$params
-  )
+  params <- c(loc$params, as.list(cfg$env_variables), yf$params)
   
   sql <- glue::glue("
     SELECT t.date, t.year, t.month, e.variable, e.value
@@ -281,7 +283,7 @@ query_environment <- function(cfg, location_ids = NULL) {
       AND e.variable IN ({var_ph})
       {yf$sql}
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   df$date <- as.Date(df$date)
   
   tidyr::pivot_wider(
@@ -297,11 +299,10 @@ query_environment <- function(cfg, location_ids = NULL) {
 # Interventions
 # ---------------------------------------------------------------------------
 
-#' Intervention records with start date resolved from dim_time
-#'
 #' @export
 query_interventions <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "i")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "i", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "t")
   params <- yf$params
   
@@ -322,7 +323,7 @@ query_interventions <- function(cfg, location_ids = NULL) {
       {yf$sql}
     ORDER BY t.date
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
@@ -331,15 +332,10 @@ query_interventions <- function(cfg, location_ids = NULL) {
 # Resistance
 # ---------------------------------------------------------------------------
 
-#' Insecticide resistance tests
-#'
-#' Uses LEFT JOINs on dim_vector / dim_insecticide / dim_resistance_test_type
-#' so tests whose FK codes were never resolved are still returned (with the
-#' raw code as a fallback label).
-#'
 #' @export
 query_resistance <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "r")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "r", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "t")
   params <- yf$params
   
@@ -364,15 +360,15 @@ query_resistance <- function(cfg, location_ids = NULL) {
            r.resistance_status
     FROM fact_insecticide_resistance r
     JOIN dim_time t ON r.date_id = t.date_id
-    LEFT JOIN dim_vector              v   ON r.vector_code       = v.vector_code
-    LEFT JOIN dim_insecticide         ins ON r.insecticide_code  = ins.insecticide_code
-    LEFT JOIN dim_resistance_test_type tt ON r.test_type_code    = tt.test_type_code
+    LEFT JOIN dim_vector              v   ON r.vector_code      = v.vector_code
+    LEFT JOIN dim_insecticide         ins ON r.insecticide_code = ins.insecticide_code
+    LEFT JOIN dim_resistance_test_type tt ON r.test_type_code   = tt.test_type_code
     WHERE 1=1
       {loc$sql}
       {yf$sql}
     ORDER BY t.date
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
@@ -381,14 +377,10 @@ query_resistance <- function(cfg, location_ids = NULL) {
 # Bionomics
 # ---------------------------------------------------------------------------
 
-#' Vector bionomics observations
-#'
-#' Uses LEFT JOIN on dim_vector so rows whose vector_code did not resolve are
-#' still returned.
-#'
 #' @export
 query_bionomics <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "b")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "b", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "t")
   params <- yf$params
   
@@ -411,7 +403,7 @@ query_bionomics <- function(cfg, location_ids = NULL) {
       {yf$sql}
     ORDER BY t.date
   ")
-  df <- cdm_query(sql, params, db_path = cfg$db_path)
+  df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
@@ -420,19 +412,14 @@ query_bionomics <- function(cfg, location_ids = NULL) {
 # Burden
 # ---------------------------------------------------------------------------
 
-#' Annual disease burden estimates
-#'
 #' @export
 query_burden <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "b")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "b", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "b")
-  params <- yf$params
+  df_ <- .disease_filter(cfg, alias = "b", column = "disease_code")
   
-  disease_filter <- ""
-  if (!is.null(cfg$disease_code)) {
-    disease_filter <- "AND b.disease_code = ?"
-    params <- c(params, list(cfg$disease_code))
-  }
+  params <- c(yf$params, df_$params)
   
   sql <- glue::glue("
     SELECT b.year,
@@ -449,21 +436,20 @@ query_burden <- function(cfg, location_ids = NULL) {
     WHERE 1=1
       {loc$sql}
       {yf$sql}
-      {disease_filter}
+      {df_$sql}
     ORDER BY b.year
   ")
-  cdm_query(sql, params, db_path = cfg$db_path)
+  cdm_query_cfg(cfg, sql, params)
 }
 
 # ---------------------------------------------------------------------------
 # Socioeconomic
 # ---------------------------------------------------------------------------
 
-#' Yearly socioeconomic indicators
-#'
 #' @export
 query_socioeconomic <- function(cfg, location_ids = NULL) {
-  loc <- .loc_clause(location_ids, alias = "s")
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc <- .loc_clause(location_ids, alias = "s", backend = backend)
   yf  <- .year_filter(cfg, loc$params, alias = "s")
   params <- yf$params
   
@@ -483,5 +469,5 @@ query_socioeconomic <- function(cfg, location_ids = NULL) {
       {yf$sql}
     ORDER BY s.year
   ")
-  cdm_query(sql, params, db_path = cfg$db_path)
+  cdm_query_cfg(cfg, sql, params)
 }

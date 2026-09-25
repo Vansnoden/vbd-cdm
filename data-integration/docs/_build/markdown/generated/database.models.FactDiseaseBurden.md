@@ -22,21 +22,22 @@ for example, any mapped columns or relationships.
 
 ### Attributes
 
-| [`burden_id`](#database.models.FactDiseaseBurden.burden_id)             |    |
-|-------------------------------------------------------------------------|----|
-| [`cases_mean`](#database.models.FactDiseaseBurden.cases_mean)           |    |
-| [`disease`](#database.models.FactDiseaseBurden.disease)                 |    |
-| [`disease_code`](#database.models.FactDiseaseBurden.disease_code)       |    |
-| [`incidence_rate`](#database.models.FactDiseaseBurden.incidence_rate)   |    |
-| [`location`](#database.models.FactDiseaseBurden.location)               |    |
-| [`location_id`](#database.models.FactDiseaseBurden.location_id)         |    |
-| `metadata`                                                              |    |
-| [`mortality_rate`](#database.models.FactDiseaseBurden.mortality_rate)   |    |
-| [`prevalence_rate`](#database.models.FactDiseaseBurden.prevalence_rate) |    |
-| `registry`                                                              |    |
-| [`source`](#database.models.FactDiseaseBurden.source)                   |    |
-| [`source_code`](#database.models.FactDiseaseBurden.source_code)         |    |
-| [`year`](#database.models.FactDiseaseBurden.year)                       |    |
+| [`burden_id`](#database.models.FactDiseaseBurden.burden_id)               |    |
+|---------------------------------------------------------------------------|----|
+| [`cases_mean`](#database.models.FactDiseaseBurden.cases_mean)             |    |
+| [`disease`](#database.models.FactDiseaseBurden.disease)                   |    |
+| [`disease_code`](#database.models.FactDiseaseBurden.disease_code)         |    |
+| [`incidence_rate`](#database.models.FactDiseaseBurden.incidence_rate)     |    |
+| [`location`](#database.models.FactDiseaseBurden.location)                 |    |
+| [`location_id`](#database.models.FactDiseaseBurden.location_id)           |    |
+| `metadata`                                                                |    |
+| [`mortality_rate`](#database.models.FactDiseaseBurden.mortality_rate)     |    |
+| [`pathogen_species`](#database.models.FactDiseaseBurden.pathogen_species) |    |
+| [`prevalence_rate`](#database.models.FactDiseaseBurden.prevalence_rate)   |    |
+| `registry`                                                                |    |
+| [`source`](#database.models.FactDiseaseBurden.source)                     |    |
+| [`source_code`](#database.models.FactDiseaseBurden.source_code)           |    |
+| [`year`](#database.models.FactDiseaseBurden.year)                         |    |
 
 #### burden_id
 
@@ -45,6 +46,8 @@ for example, any mapped columns or relationships.
 #### year
 
 #### disease_code
+
+#### pathogen_species
 
 #### source_code
 

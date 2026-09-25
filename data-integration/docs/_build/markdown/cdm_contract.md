@@ -40,14 +40,14 @@ All timestamps are UTC. All dates are stored twice:
 | `fact_insecticide_resistance`  | (location, day, species, insecticide, test_type, source, concentration) |
 | `fact_bionomics`               | (location, day, species, source)                                        |
 | `fact_disease_case`            | (location, onset_date, disease, method, source, status, age_group, sex) |
-| `fact_disease_burden`          | (location, year, disease)                                               |
+| `fact_disease_burden`          | (location, year, disease, pathogen_species)                             |
 | `fact_intervention`            | (location, start_date, disease, source, type)                           |
 | `fact_socioeconomic_condition` | (location, year, indicator)                                             |
 | `fact_health_facility`         | `facility_code`                                                         |
 
 ## 4. Nullable natural-key columns
 
-SQL treats `NULL` as **distinct** in unique indexes. Five fact tables have
+SQL treats `NULL` as **distinct** in unique indexes. Four fact tables have
 nullable columns in their natural key. The ETL loader replaces these with
 *empty-string sentinels* before insert:
 
@@ -60,6 +60,9 @@ nullable columns in their natural key. The ETL loader replaces these with
 
 If you query these tables directly, treat `''` and `-1.0` as synonyms for
 NULL. `data-analysis/R/db_queries.R` already does this.
+
+`fact_environment` and `fact_disease_burden` have no nullable columns in
+their natural keys, so no sentinel applies.
 
 ## 5. Reserved identifiers
 
@@ -87,15 +90,57 @@ NULL. `data-analysis/R/db_queries.R` already does this.
 
 ### `fact_environment.variable`
 
-Free text, but the R analysis pipeline only knows about variables in
-`SUPPORTED_ENV_VARIABLES` (see `database/schemas.py`). Adding a new variable
-requires:
+Free text. The R analysis pipeline only knows about variables registered in
+`SUPPORTED_ENV_VARIABLES` (see `database/schemas.py`). As of the current
+schema, that list is:
+
+```default
+2t, t2m, tp, d2m, rh, ndvi, evi, lst_day, lst_night,
+temperature_mean, temperature_min, temperature_max,
+rainfall_total, relative_humidity, aridity_index,
+potential_breeding_sites
+```
+
+**The ERA5 short name is preserved verbatim.** Temperature from ERA5-Land
+files is stored as `2t`, not renamed to `t2m`. Both `2t` and `t2m` are
+listed because different ingestion paths (raw ERA5 `.nc`, clipped files
+with `--rename-t2m`) can produce either. Downstream code must treat them as
+the same physical quantity.
+
+Adding a new variable requires:
 
 1. Registering it in `SUPPORTED_ENV_VARIABLES`.
 2. Adding it to `config.yml` `env_variables` on the R side.
 3. Optionally extending `data-analysis/R/db_queries.R::query_environment`.
 
-## 7. What the contract does *not* guarantee
+## 7. Upsert semantics — the loader is a *partial* update
+
+This is a property of the ETL, not of the schema, but it is easy to get
+wrong when you reason about the database, so it belongs here.
+
+When a source upserts at a natural key that already exists, **only the
+columns that source actually populates are updated.** Columns the source
+does not touch are left at their existing values.
+
+Concretely: the six MAP burden sources (`map_pf_*`, `map_pv_*`) share the
+same natural key `(location_id, year, disease_code, pathogen_species)`.
+Each writes exactly one value column — `cases_mean`, `incidence_rate`, or
+`prevalence_rate`. Before the loader fix, the last source to run would wipe
+the other two columns to NULL. After the fix, each source touches only its
+own column, so all three coexist for the same `(location, year, disease, pathogen)`.
+
+The rule the loader applies is: a column participates in the `ON CONFLICT DO UPDATE SET` clause only if the incoming batch has at least one non-null
+value for it. If a source is entirely null in a column for a given batch,
+that column is left alone.
+
+**Consequence for contract authors.** A new source that legitimately needs
+to write NULL into an existing column (to clear it) cannot do so through
+the normal upsert path. That is a known limitation; if it ever becomes
+necessary, add a per-mapping flag (e.g. `null_authoritative`) and extend
+`_upsert_sqlite` / `_upsert_postgresql` / `_copy_upsert_postgresql` to
+include such columns unconditionally.
+
+## 8. What the contract does *not* guarantee
 
 - **Location coverage.** A `location_id` present in `dim_location` is not
   guaranteed to have rows in every fact table.
@@ -103,8 +148,11 @@ requires:
   case rows. See `data-analysis/docs/troubleshooting.md`.
 - **Non-null `concept_id`.** Vocabulary standardisation is optional; the FK
   is nullable.
+- **Populated `fact_disease_burden` value columns.** When a MAP raster is
+  entirely nodata over the study area, the ingest still produces grid-cell
+  rows with all three value columns NULL. Filter on `> 0` before using.
 
-## 8. Change procedure
+## 9. Change procedure
 
 1. Edit `database/models.py`.
 2. `alembic revision --autogenerate -m "..."`.

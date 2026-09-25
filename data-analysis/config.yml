@@ -1,24 +1,57 @@
-default:
-  study_name: "Pan_African_Anopheles"
-  location: "ALL"
-  country: "ALL"
-  location_ids: []
+# config.yml
+#
+# Analysis configuration for the VBD CDM.
+#
+# Two top-level blocks:
+#   vbd-cdm-analysis : what to analyse
+#   database         : where the CDM lives
+#
+# The `config` package reads the first block on request; the second is
+# read directly by yaml::read_yaml(). Do not nest `database:` inside
+# `vbd-cdm-analysis:`.
+
+vbd-cdm-analysis:
+  study_name: "Case Study"
+
+  # countries: ["ALL"]            # every country in dim_location
+  # countries: ["Kenya"]          # ISO alpha-2, or full country name
+  # countries: ["KE", "TZ", "UG"] # multiple
+  countries: ["KE"]
+
+  # locations: ["ALL"]                  # every location inside the country filter
+  # locations: ["Siaya County"]         # exact or substring match on dim_location.name
+  # locations: ["Siaya", "Mombasa"]     # multiple; OR-ed together
+  locations: ["ALL"]
 
   start_year: 2019
-  end_year: 2025
-  disease_code: null
-  include_estimated_cases: false
+  end_year:   2025
+
+  # diseases: ["ALL"]                     # no disease filter
+  # diseases: ["MAL"]                     # one code
+  # diseases: ["MAL", "DENGUE"]           # multiple; OR-ed
+  diseases: ["MAL", "DENGUE"]
+
+  include_estimated_cases: true
 
   env_variables: ["t2m", "tp"]
 
-  species_filter:
-    - "gambiae"
-    - "coluzzii"
-    - "arabiensis"
-    - "funestus"
-    - "melas"
-    - "quadriannulatus"
+  # species_filter: ["All"]                                  # every species
+  # species_filter: ["Anopheles gambiae", "Anopheles funestus"]
+  species_filter: ["Anopheles gambiae", "Anopheles funestus"]
 
   max_lag_months: 6
-  database: "../data-integration/vbd_cdm.db"
   output_dir: "outputs/analysis"
+
+
+database:
+  # Uncomment to use PostgreSQL. If both blocks are present, postgres wins.
+  # postgres:
+  #   host:     "db-host"
+  #   port:     "5432"
+  #   username: "your-username"
+  #   password: "your-password"
+  #   dbname:   "vbd_cdm"
+
+  sqlite:
+    db_path: "../data-integration/vbd_cdm.db"
+

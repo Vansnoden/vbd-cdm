@@ -180,3 +180,9 @@ vocabularies/
 ```bash
 cdo griddes /mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_2019.nc | head -20
 ```
+
+##### building the DOC
+```bash
+rm -rf docs/_build
+sphinx-build -b markdown docs docs/_build/markdown
+```

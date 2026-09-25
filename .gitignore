@@ -92,7 +92,9 @@ logs/
 
 outputs/
 **/outputs/
+**/exploration/
 data-integration/outputs/
+data-integration/exploration/
 data-analysis/outputs/
 
 *_bundle.txt
