@@ -443,6 +443,7 @@ class FactDiseaseBurden(Base):
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     year = Column(Integer, nullable=False)
     disease_code = Column(String(100), ForeignKey("dim_disease.disease_code"), nullable=False)
+    pathogen_species = Column(String(50), nullable=True)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
 
     incidence_rate = Column(Float)
@@ -456,7 +457,10 @@ class FactDiseaseBurden(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        UniqueConstraint("location_id", "year", "disease_code", name="uq_burden_loc_year_disease"),
+        UniqueConstraint(
+            "location_id", "year", "disease_code", "pathogen_species",
+            name="uq_burden_loc_year_disease_pathogen",
+        ),
         Index("idx_fact_burden_location", "location_id"),
         Index("idx_fact_burden_year", "year"),
         Index("idx_fact_burden_disease", "disease_code"),

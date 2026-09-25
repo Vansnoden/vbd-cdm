@@ -327,7 +327,17 @@ def timeseries_to_df_chunked(
     ds = xr.open_dataset(fp, engine=engine, chunks={'time': time_chunk_size})
     
     if variables is None:
-        variables = list(ds.data_vars.keys())
+        # Skip auxiliary variables that xarray reports as data_vars
+        # but are not geophysical fields: crs, spatial_ref, expver,
+        # time_bnds, lat_bnds, lon_bnds, height, number, surface, depth.
+        # The `ndim >= 2` clause catches anything else that isn't a
+        # lat/lon field regardless of its name.
+        _AUX = {"crs", "spatial_ref", "expver", "number", "surface",
+                "height", "depth", "time_bnds", "lat_bnds", "lon_bnds"}
+        variables = [
+            v for v in ds.data_vars
+            if v.lower() not in _AUX and ds[v].ndim >= 2
+        ]
     
     time_dim = _get_time_dim(ds)
     if time_dim is None:
@@ -419,7 +429,17 @@ def timeseries_to_df(
     
     try:
         if variables is None:
-            variables = list(ds.data_vars.keys())
+            # Skip auxiliary variables that xarray reports as data_vars
+            # but are not geophysical fields: crs, spatial_ref, expver,
+            # time_bnds, lat_bnds, lon_bnds, height, number, surface, depth.
+            # The `ndim >= 2` clause catches anything else that isn't a
+            # lat/lon field regardless of its name.
+            _AUX = {"crs", "spatial_ref", "expver", "number", "surface",
+                    "height", "depth", "time_bnds", "lat_bnds", "lon_bnds"}
+            variables = [
+                v for v in ds.data_vars
+                if v.lower() not in _AUX and ds[v].ndim >= 2
+            ]
         # Estimate size
         time_dim = _get_time_dim(ds)
         n_time = ds.dims[time_dim] if time_dim else 1
@@ -605,18 +625,18 @@ def tsv_to_csv(fp: str, csv_path: str, chunksize: int = 50000, **kwargs) -> bool
 def xlsx_to_df(fp: str, sheet_name: Union[str, int] = 0, chunksize: int = 50000) -> pd.DataFrame:
     """
     Convert Excel file to DataFrame.
-    Uses 'calamine' engine if available (fast), otherwise falls back to 'openpyxl'.
+
+    pandas.read_excel() has no chunksize parameter, unlike read_csv. The
+    whole sheet is read in one call. The `chunksize` argument is retained
+    in the signature for API symmetry with the other readers; it is not
+    passed to pandas and has no effect on the return.
+
+    Uses 'calamine' engine if available (fast), otherwise 'openpyxl'.
     """
     try:
-        reader = pd.read_excel(fp, sheet_name=sheet_name, engine='calamine',
-                               chunksize=chunksize)
+        return pd.read_excel(fp, sheet_name=sheet_name, engine='calamine')
     except ImportError:
-        reader = pd.read_excel(fp, sheet_name=sheet_name, engine='openpyxl',
-                               chunksize=chunksize)
-    chunks = []
-    for chunk in reader:
-        chunks.append(chunk)
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+        return pd.read_excel(fp, sheet_name=sheet_name, engine='openpyxl')
 
 
 @validate_extension('xlsx', 'xls')

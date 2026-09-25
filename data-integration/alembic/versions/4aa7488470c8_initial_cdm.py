@@ -1,8 +1,8 @@
-"""Initial CDM
+"""initial CDM
 
-Revision ID: 996e22f1b5b8
+Revision ID: 4aa7488470c8
 Revises: 
-Create Date: 2026-09-23 05:57:39.057989
+Create Date: 2026-09-24 12:49:42.581709
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '996e22f1b5b8'
+revision: str = '4aa7488470c8'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -197,6 +197,7 @@ def upgrade() -> None:
     sa.Column('location_id', sa.Integer(), nullable=False),
     sa.Column('year', sa.Integer(), nullable=False),
     sa.Column('disease_code', sa.String(length=100), nullable=False),
+    sa.Column('pathogen_species', sa.String(length=50), nullable=True),
     sa.Column('source_code', sa.String(length=100), nullable=False),
     sa.Column('incidence_rate', sa.Float(), nullable=True),
     sa.Column('prevalence_rate', sa.Float(), nullable=True),
@@ -206,7 +207,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('burden_id'),
-    sa.UniqueConstraint('location_id', 'year', 'disease_code', name='uq_burden_loc_year_disease')
+    sa.UniqueConstraint('location_id', 'year', 'disease_code', 'pathogen_species', name='uq_burden_loc_year_disease_pathogen')
     )
     op.create_index('idx_fact_burden_disease', 'fact_disease_burden', ['disease_code'], unique=False)
     op.create_index('idx_fact_burden_location', 'fact_disease_burden', ['location_id'], unique=False)

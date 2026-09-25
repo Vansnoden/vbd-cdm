@@ -1,0 +1,21 @@
+source_column,target_table,target_column,transform,transform_params,required,default_value,static_value,source_data_type
+
+x,dim_location,centroid_lon,none,,False,,,
+y,dim_location,centroid_lat,none,,False,,,
+,dim_location,location_code,concat,"{""columns"":[""x"",""y""],""separator"":""/""}",False,,,
+,dim_location,name,concat,"{""columns"":[""x"",""y""],""separator"":""/""}",False,,,
+,dim_location,country_name,none,,False,,Kenya,
+,dim_location,country_code,none,,False,,KE,
+,dim_location,admin_level,none,,False,,grid,
+
+,dim_source,source_code,none,,False,,MAP,
+,dim_source,source_name,none,,False,,Malaria Atlas Project,
+,dim_source,source_url,none,,False,,https://malariaatlas.org/,
+
+,fact_intervention,location_id,map,"{""ref"":""dim_location.location_code"",""columns"":[""x"",""y""],""separator"":""/""}",True,,,
+,fact_intervention,intervention_type,none,,True,,itn_access,
+,fact_intervention,date_start,format_date,"{""columns"":[""year""],""default"":""2000-01-01"",""month_default"":1,""day_default"":1}",True,,,
+,fact_intervention,date_end,format_date,"{""columns"":[""year""],""default"":""2000-12-31"",""month_default"":12,""day_default"":31}",False,,,
+,fact_intervention,target_disease_code,none,,True,,MAL,
+,fact_intervention,source_code,none,,True,,MAP,
+value,fact_intervention,coverage,cast,"{""type"":""float""}",True,,,

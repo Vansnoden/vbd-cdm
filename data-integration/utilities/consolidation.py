@@ -126,7 +126,7 @@ _FACT_AGGREGATION_SPEC = {
     },
     "fact_disease_burden": {
         # Unique constraint: (location_id, year, disease_code) — NO source_code.
-        "natural_key": ["location_id", "year", "disease_code"],
+        "natural_key": ["location_id", "year", "disease_code", 'pathogen_species'],
         "sums":  ["cases_mean"],
         "means": ["incidence_rate", "prevalence_rate", "mortality_rate"],
         "first": ["source_code"],
@@ -1330,97 +1330,133 @@ class DataConsolidator:
               vgsc_generation, and resistance_status.
             - fact_disease_case lost case_count (reset to 1).
         Both are fixed here by enumerating every column explicitly.
+
+        Additionally, every block now guards its DELETE-then-INSERT
+        rebuild with an explicit duplicate-count check. On a clean
+        database, no table is touched at all. This eliminates the
+        failure mode where an empty or partially-populated temp table
+        combined with an unconditional DELETE would silently wipe an
+        entire fact table.
         """
         logger.info("Resolving fact table duplicates...")
 
         # ---- fact_environment -------------------------------------------
+        # Unique constraint: (location_id, date_id, variable).
         try:
-            self.session.execute(text("""
-                CREATE TEMP TABLE temp_env_dedup AS
-                SELECT
-                    location_id, date_id, variable,
-                    AVG(value) AS value,
-                    MIN(source_code) AS source_code
-                FROM fact_environment
-                GROUP BY location_id, date_id, variable
-            """))
-            self.session.execute(text("DELETE FROM fact_environment"))
-            self.session.execute(text("""
-                INSERT INTO fact_environment
-                    (location_id, date_id, variable, value, source_code)
-                SELECT location_id, date_id, variable, value, source_code
-                FROM temp_env_dedup
-            """))
-            self.session.execute(text("DROP TABLE temp_env_dedup"))
-            self.session.commit()
-            logger.info("  Deduplicated fact_environment")
+            dup_count = self.session.execute(text("""
+                SELECT COUNT(*) FROM (
+                    SELECT location_id, date_id, variable
+                    FROM fact_environment
+                    GROUP BY location_id, date_id, variable
+                    HAVING COUNT(*) > 1
+                )
+            """)).scalar() or 0
+
+            if dup_count > 0:
+                self.session.execute(text("""
+                    CREATE TEMP TABLE temp_env_dedup AS
+                    SELECT
+                        location_id, date_id, variable,
+                        AVG(value) AS value,
+                        MIN(source_code) AS source_code
+                    FROM fact_environment
+                    GROUP BY location_id, date_id, variable
+                """))
+                self.session.execute(text("DELETE FROM fact_environment"))
+                self.session.execute(text("""
+                    INSERT INTO fact_environment
+                        (location_id, date_id, variable, value, source_code)
+                    SELECT location_id, date_id, variable, value, source_code
+                    FROM temp_env_dedup
+                """))
+                self.session.execute(text("DROP TABLE temp_env_dedup"))
+                self.session.commit()
+                logger.info(f"  Deduplicated {dup_count} environment-key groups")
+            else:
+                logger.info("  No environment duplicates; fact_environment untouched")
         except Exception as e:
             self.session.rollback()
             logger.error(f"Failed to deduplicate fact_environment: {e}")
 
         # ---- fact_insecticide_resistance ----------------------------------
+        # Unique constraint: (location_id, date_id, vector_code,
+        # insecticide_code, test_type_code, source_code, concentration).
         # Full column list preserved. resistance_status deliberately left
         # NULL here; _compute_resistance_status() runs after this method.
         try:
-            self.session.execute(text("""
-                CREATE TEMP TABLE temp_ir_dedup AS
-                SELECT
-                    location_id, date_id, vector_code, insecticide_code,
-                    test_type_code, source_code, concentration,
-                    MIN(exposure_time)        AS exposure_time,
-                    SUM(n_insect_tested)      AS n_insect_tested,
-                    SUM(n_insect_susceptible) AS n_insect_susceptible,
-                    SUM(n_insect_resistant)   AS n_insect_resistant,
-                    SUM(n_insect_dead)        AS n_insect_dead,
-                    SUM(vgsc_n_insect_tested) AS vgsc_n_insect_tested,
-                    SUM(vgsc995l_vgsc995l_n)  AS vgsc995l_vgsc995l_n,
-                    SUM(vgsc995l_vgsc995f_n)  AS vgsc995l_vgsc995f_n,
-                    SUM(vgsc995f_vgsc995f_n)  AS vgsc995f_vgsc995f_n,
-                    SUM(vgsc995l_vgsc995s_n)  AS vgsc995l_vgsc995s_n,
-                    SUM(vgsc995s_vgsc995s_n)  AS vgsc995s_vgsc995s_n,
-                    SUM(vgsc995f_vgsc995s_n)  AS vgsc995f_vgsc995s_n,
-                    MIN(vgsc_generation)      AS vgsc_generation,
-                    CASE
-                        WHEN SUM(n_insect_tested) > 0
-                        THEN ROUND(
-                            (CAST(SUM(n_insect_dead) AS FLOAT)
-                             / SUM(n_insect_tested)) * 100, 2)
-                        ELSE NULL
-                    END AS mortality
-                FROM fact_insecticide_resistance
-                GROUP BY location_id, date_id, vector_code, insecticide_code,
-                         test_type_code, source_code, concentration
-            """))
-            self.session.execute(text("DELETE FROM fact_insecticide_resistance"))
-            self.session.execute(text("""
-                INSERT INTO fact_insecticide_resistance (
-                    location_id, date_id, vector_code, insecticide_code,
-                    test_type_code, source_code, concentration,
-                    exposure_time,
-                    n_insect_tested, n_insect_susceptible, n_insect_resistant,
-                    n_insect_dead,
-                    vgsc_n_insect_tested,
-                    vgsc995l_vgsc995l_n, vgsc995l_vgsc995f_n,
-                    vgsc995f_vgsc995f_n, vgsc995l_vgsc995s_n,
-                    vgsc995s_vgsc995s_n, vgsc995f_vgsc995s_n,
-                    vgsc_generation, mortality
+            dup_count = self.session.execute(text("""
+                SELECT COUNT(*) FROM (
+                    SELECT location_id, date_id, vector_code, insecticide_code,
+                           test_type_code, source_code, concentration
+                    FROM fact_insecticide_resistance
+                    GROUP BY location_id, date_id, vector_code, insecticide_code,
+                             test_type_code, source_code, concentration
+                    HAVING COUNT(*) > 1
                 )
-                SELECT
-                    location_id, date_id, vector_code, insecticide_code,
-                    test_type_code, source_code, concentration,
-                    exposure_time,
-                    n_insect_tested, n_insect_susceptible, n_insect_resistant,
-                    n_insect_dead,
-                    vgsc_n_insect_tested,
-                    vgsc995l_vgsc995l_n, vgsc995l_vgsc995f_n,
-                    vgsc995f_vgsc995f_n, vgsc995l_vgsc995s_n,
-                    vgsc995s_vgsc995s_n, vgsc995f_vgsc995s_n,
-                    vgsc_generation, mortality
-                FROM temp_ir_dedup
-            """))
-            self.session.execute(text("DROP TABLE temp_ir_dedup"))
-            self.session.commit()
-            logger.info("  Deduplicated fact_insecticide_resistance")
+            """)).scalar() or 0
+
+            if dup_count > 0:
+                self.session.execute(text("""
+                    CREATE TEMP TABLE temp_ir_dedup AS
+                    SELECT
+                        location_id, date_id, vector_code, insecticide_code,
+                        test_type_code, source_code, concentration,
+                        MIN(exposure_time)        AS exposure_time,
+                        SUM(n_insect_tested)      AS n_insect_tested,
+                        SUM(n_insect_susceptible) AS n_insect_susceptible,
+                        SUM(n_insect_resistant)   AS n_insect_resistant,
+                        SUM(n_insect_dead)        AS n_insect_dead,
+                        SUM(vgsc_n_insect_tested) AS vgsc_n_insect_tested,
+                        SUM(vgsc995l_vgsc995l_n)  AS vgsc995l_vgsc995l_n,
+                        SUM(vgsc995l_vgsc995f_n)  AS vgsc995l_vgsc995f_n,
+                        SUM(vgsc995f_vgsc995f_n)  AS vgsc995f_vgsc995f_n,
+                        SUM(vgsc995l_vgsc995s_n)  AS vgsc995l_vgsc995s_n,
+                        SUM(vgsc995s_vgsc995s_n)  AS vgsc995s_vgsc995s_n,
+                        SUM(vgsc995f_vgsc995s_n)  AS vgsc995f_vgsc995s_n,
+                        MIN(vgsc_generation)      AS vgsc_generation,
+                        CASE
+                            WHEN SUM(n_insect_tested) > 0
+                            THEN ROUND(
+                                (CAST(SUM(n_insect_dead) AS FLOAT)
+                                 / SUM(n_insect_tested)) * 100, 2)
+                            ELSE NULL
+                        END AS mortality
+                    FROM fact_insecticide_resistance
+                    GROUP BY location_id, date_id, vector_code, insecticide_code,
+                             test_type_code, source_code, concentration
+                """))
+                self.session.execute(text("DELETE FROM fact_insecticide_resistance"))
+                self.session.execute(text("""
+                    INSERT INTO fact_insecticide_resistance (
+                        location_id, date_id, vector_code, insecticide_code,
+                        test_type_code, source_code, concentration,
+                        exposure_time,
+                        n_insect_tested, n_insect_susceptible, n_insect_resistant,
+                        n_insect_dead,
+                        vgsc_n_insect_tested,
+                        vgsc995l_vgsc995l_n, vgsc995l_vgsc995f_n,
+                        vgsc995f_vgsc995f_n, vgsc995l_vgsc995s_n,
+                        vgsc995s_vgsc995s_n, vgsc995f_vgsc995s_n,
+                        vgsc_generation, mortality
+                    )
+                    SELECT
+                        location_id, date_id, vector_code, insecticide_code,
+                        test_type_code, source_code, concentration,
+                        exposure_time,
+                        n_insect_tested, n_insect_susceptible, n_insect_resistant,
+                        n_insect_dead,
+                        vgsc_n_insect_tested,
+                        vgsc995l_vgsc995l_n, vgsc995l_vgsc995f_n,
+                        vgsc995f_vgsc995f_n, vgsc995l_vgsc995s_n,
+                        vgsc995s_vgsc995s_n, vgsc995f_vgsc995s_n,
+                        vgsc_generation, mortality
+                    FROM temp_ir_dedup
+                """))
+                self.session.execute(text("DROP TABLE temp_ir_dedup"))
+                self.session.commit()
+                logger.info(f"  Deduplicated {dup_count} resistance-key groups")
+            else:
+                logger.info("  No resistance duplicates; fact_insecticide_resistance untouched")
         except Exception as e:
             self.session.rollback()
             logger.error(f"Failed to deduplicate fact_insecticide_resistance: {e}")
