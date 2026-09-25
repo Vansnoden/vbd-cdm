@@ -11,7 +11,7 @@ the one that applies to the code in `data-analysis/` and
 
 | Term | Meaning |
 |---|---|
-| **CDM** | Common Data Model. The SQLite/PostgreSQL schema described in the [CDM contract](../../data-integration/docs/cdm_contract.md). |
+| **CDM** | Common Data Model. The SQLite/PostgreSQL schema produced by the Python ETL. |
 | **ETL** | Extract, Transform, Load. The Python ingestion pipeline in `data-integration/`. |
 | **VBD** | Vector-Borne Disease. |
 | **WHO** | World Health Organization. Source of the insecticide-resistance mortality thresholds. |
@@ -93,12 +93,13 @@ the one that applies to the code in `data-analysis/` and
 
 | Term | Meaning |
 |---|---|
-| `cdm_connect(db_path)` | Opens a `DBIConnection` to the CDM. Priority: argument -> `DATABASE_URL` -> `SQL_LITE_DB_NAME`. |
-| `cdm_query(sql, params, con, db_path)` | Runs a SQL string, returns a tibble. `list()` is treated as `NULL`. |
-| `resolve_location_ids(location, country, db_path, explicit_ids)` | Turns a name or country code into a vector of `location_id`s. Aborts on zero matches. |
+| `cdm_connect(db_path, db_url)` | Opens a `DBIConnection` to the CDM. Priority: `db_url` → `db_path` → `DATABASE_URL` → `SQL_LITE_DB_NAME`. |
+| `cdm_query(sql, params, con, db_path, db_url)` | Runs a SQL string, returns a tibble. `list()` is treated as `NULL`. |
+| `cdm_backend(db_path, db_url)` | Detects the SQL dialect. Returns `"sqlite"` or `"postgresql"`. Used by `.loc_clause()` to pick the right JSON-array function. |
+| `resolve_location_ids(countries, locations, db_path, db_url)` | Turns country codes and/or name substrings into a tibble of `location_id`s. Aborts on zero matches. |
 | `query_*()` | One function per fact table in `R/db_queries.R`. All take `cfg` and a vector of location IDs. |
-| `db_path` | The `cfg` field holding the resolved path to the SQLite file. Config key is `database`; field name is `db_path`. |
-| **The 900-ID limit** | `.loc_clause()` silently drops the location filter when more than 900 IDs are passed. The query then returns *all* locations. |
+| `cfg$db_path` | The `cfg` field holding the SQLite file path when `resolve_database()` chose the `sqlite:` block. `NULL` otherwise. |
+| `cfg$db_url` | The `cfg` field holding a full Postgres/SQLite URL when `resolve_database()` chose `postgres:` or `DATABASE_URL`. `NULL` otherwise. |
 | **Grid-cell gap** | `query_vectors()` does not return `location_id`, so `attach_grid_cells()` cannot be composed with it as currently written. Known limitation. |
 
 ---
@@ -147,8 +148,25 @@ the one that applies to the code in `data-analysis/` and
 | **`cfg`** | The single configuration object passed to nearly every target. Built once from `config.yml`. |
 | **`sanitize_for_quarto()`** | Recursively replaces `NA` with `NaN` / `""` so parameter objects can survive Quarto's YAML round-trip. |
 | **`analysis_results`** | The bundled list of every analysis output and figure path. Consumed by `analysis_report.qmd`. |
+| **`qa_rds`, `results_rds`** | File targets that serialise the sanitised bundles to `outputs/analysis/data/`. Their paths are passed to `tar_quarto()` as `execute_params`. |
+| **`*_report_published`** | File targets that copy the rendered HTML into `outputs/analysis/reports/`. |
 | **`fig_dir`, `data_dir`, `rep_dir`** | Output directories derived from `cfg$output_dir`, created by `_targets.R`. |
 | **`*_validated`** | A guard target that aborts the pipeline if its input is empty. Used for `vectors_validated`, `environment_validated`, `cases_validated`. |
+
+---
+
+## Configuration (R side)
+
+| Term | Meaning |
+|---|---|
+| `config.yml` | The single source of truth. Two top-level blocks: `vbd-cdm-analysis:` and `database:`. |
+| `read_cfg(key)` | Reads a required key from the analysis block. Aborts with `cli::cli_abort()` if missing. |
+| `read_cfg_opt(key, default)` | Reads an optional key. Returns `default` on failure. |
+| `read_db_block()` | Returns the whole `database:` block. |
+| `resolve_database(db_block)` | Turns the `database:` block into `list(db_path, db_url)`. Handles `postgres:` (preferred), then `sqlite:`, then `DATABASE_URL`. |
+| `normalize_all_list(x)` | Collapses `[]`, `["ALL"]`, `["*"]` etc. to `NULL`, meaning "no filter". Errors if `"ALL"` is mixed with explicit values. |
+| `new_analysis_config(...)` | Builds the `cfg` list. Class `"analysis_config"`. |
+| **Config invalidation** | Because `cfg` is a single global, changing any key invalidates every target that reads `cfg`, including the extraction queries. |
 
 ---
 
@@ -160,11 +178,12 @@ the one that applies to the code in `data-analysis/` and
 | **Transformer** | Turns a source DataFrame into per-table DataFrames using a mapping CSV. `MappingTransformer`. |
 | **Loader** | Upserts DataFrames into the CDM. `DBLoader`. |
 | **Consolidator** | Post-load cleanup: FK repair, deduplication, vocabulary matching. `DataConsolidator`. |
-| **Mapping CSV** | Declares how source columns become CDM columns. Nine columns; see [mapping.rst](../../data-integration/docs/mapping.rst). |
-| **Transform** | A named operation on a value. `none`, `map`, `cast`, `date_parse`, `format_date`, `split`, `unit_convert`, `concat`. |
+| **Mapping CSV** | Declares how source columns become CDM columns. |
+| **Transform** | A named operation on a value. `none`, `map`, `cast`, `date_parse`, `format_date`, `split`, `unit_convert`, `coalesce`, `derive_category`, `concat`. |
 | **`ref`** | A transform parameter that triggers a dimension FK lookup: `{"ref": "dim_location.name"}`. |
 | **Orphan** | A fact row whose foreign key does not exist in the referenced dimension. Detected and repaired (or quarantined) by `_align_fact_foreign_keys()`. |
 | **Quarantine** | Orphan rows whose FK is `NOT NULL` and cannot be repaired are copied to `_quarantine_<table>` before deletion, for forensic inspection. |
+| **Aggregation-aware reassignment** | `_aggregate_and_reassign()`. When two fact rows collide on their natural key after an FK reassignment, SUM counts, AVG rates, MIN categoricals. Avoids the silent data loss of the previous merge-then-delete behaviour. |
 | **DBSCAN** | Density-based clustering used to merge nearby locations. Operates on haversine distance with `eps = 5 km` by default. |
 | **ISO alpha-2 / alpha-3** | Two- and three-letter country codes. The CDM stores alpha-2 (`KE`, `TZ`). `ISO_COUNTRY_CODES` in the consolidation module maps between them. |
 | **Staging table** | A temporary table used by the PostgreSQL COPY path. Created with `LIKE <target> INCLUDING DEFAULTS`, filled by `COPY`, then merged with `INSERT ... ON CONFLICT`. |
@@ -182,7 +201,7 @@ the one that applies to the code in `data-analysis/` and
 | **`concept_id`** | The FK from a dimension row (e.g. `dim_location`) to `dim_concept`. Populated only on a confident match. |
 | **`standard_code`** | The vocabulary's own code for the matched concept (e.g. `GID_2_KEN.3_1` for a GADM admin-2). Stored on the dimension row. |
 | **Exact match** | Raw value equals `concept_name` case-insensitively after whitespace collapse. Auto-approved. |
-| **Normalized match** | Match after stripping diacritics and collapsing whitespace. Auto-approved. |
+| **Normalized match** | Match after stripping diacritics and collapsing whitespace (species-normalised for the vector domain). Auto-approved. |
 | **Fuzzy match** | RapidFuzz `token_set_ratio >= 0.85`. Recorded with `is_approved = FALSE`, awaiting human review. |
 | **`fact_concept_map`** | Records every match attempt: source table, source column, source value, matched concept, method, score, approval flag. |
 
@@ -192,9 +211,11 @@ the one that applies to the code in `data-analysis/` and
 
 | Variable | Effect |
 |---|---|
-| `DATABASE_URL` | `sqlite:///...` or `postgresql://...`. Checked by `cdm_connect()` after an explicit `db_path` and before `SQL_LITE_DB_NAME`. |
+| `DATABASE_URL` | `sqlite:///...` or `postgresql://...`. Checked by `cdm_connect()` after an explicit `db_path` / `db_url` and before `SQL_LITE_DB_NAME`. |
 | `SQL_LITE_DB_NAME` | Filename only. Searched in the project root and its parent. Note the misspelling - `LITE`, not `LITE`. |
-| `R_CONFIG_ACTIVE` | Selects a top-level block in `config.yml`. Unset means the `default:` block. |
+
+> The `config` package is not used anywhere in this pipeline, so
+> `R_CONFIG_ACTIVE` has no effect.
 
 ---
 
@@ -234,7 +255,7 @@ Things that look like synonyms but are not:
 | `mortality` vs `infection_rate` | Percentage in `[0, 100]` vs proportion in `[0, 1]`. |
 | `location_id` vs `location_code` | Surrogate integer PK vs natural text key (`GRID_...` for grid cells). |
 | `date_id` vs `date` | `date_id` is the string FK on fact tables. `date` is the `Date` column on `dim_time`. Always join on `date_id`. |
-| `cfg$db_path` vs `config.yml` `database` | Same thing. The config key is `database`; the R field is `db_path`. |
+| `cfg$db_path` vs `cfg$db_url` | Exactly one is non-`NULL` per run. `resolve_database()` sets one and leaves the other `NULL`. |
 | `vector_code` vs `species_name` | Code is the FK (`ANOGAM`); name is the label (`Anopheles gambiae`). Always join on `vector_code`. |
 | `case_count` vs `COUNT(*)` | `case_count` is a value column (aggregated rows carry > 1). `COUNT(*)` counts rows. |
 | `is_approved` in `fact_concept_map` | `TRUE` for exact/normalized matches (auto-approved), `FALSE` for fuzzy matches awaiting review. |

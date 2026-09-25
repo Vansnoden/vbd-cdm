@@ -1,7 +1,7 @@
 # Pipeline
 
 The pipeline is defined in `_targets.R` at the project root. It is a
-directed acyclic graph (DAG) of about 30 targets. `targets` runs only
+directed acyclic graph (DAG) of about 35 targets. `targets` runs only
 what needs running, in the right order, and caches the rest on disk.
 
 The pipeline is **vector-centred**: extraction and analysis of vectors,
@@ -27,28 +27,39 @@ The first run will take several minutes. Subsequent runs are incremental.
 The pipeline is safe to interrupt; `targets` commits each target's value
 atomically, so an interrupted run leaves the cache consistent.
 
-### A note on `config::get()` failures
+### A note on `read_cfg()` failures
 
-`_targets.R` runs `config::get("study_name")` and similar calls at parse
-time, before any target is defined. If a key is missing from
-`config.yml`, `tar_make()` will error before doing any work, with a
-message like:
-
-```
-Error: The config package could not find the config value 'study_name'.
-```
-
-Nine keys are read this way, with no fallback:
+`_targets.R` runs `read_cfg("study_name")` and similar calls at parse
+time, before any target is defined. If a required key is missing from
+the `vbd-cdm-analysis:` block in `config.yml`, `tar_make()` will error
+before doing any work, with a message like:
 
 ```
-study_name, location, country, start_year, end_year,
-disease_code, env_variables, max_lag_months, database
+Error: Required config key "study_name" not found in "vbd-cdm-analysis".
 ```
 
-Even `disease_code` must be present - set it to `null` if you don't want
-to filter. Only `location_ids`, `include_estimated_cases`,
-`species_filter`, and `output_dir` use the safer `cfg_get()` wrapper
-that returns a default on failure.
+The **required** keys are read with `read_cfg()` and have no fallback:
+
+```
+study_name, start_year, end_year, env_variables, max_lag_months
+```
+
+The **optional** keys are read with `read_cfg_opt()` and return a default
+on failure:
+
+```
+countries, locations, diseases,
+include_estimated_cases, species_filter, output_dir
+```
+
+The `database:` block is read as a whole by `read_db_block()` and
+resolved into `list(db_path, db_url)` by `resolve_database()`. A
+malformed `postgres:` sub-block (missing `host`, `port`, `username`, or
+`password`) produces a warning and falls back to `sqlite:` or
+`DATABASE_URL`.
+
+There is no `config::get()` path anywhere in the pipeline. The `config`
+package is not used.
 
 ---
 
@@ -201,13 +212,27 @@ flowchart TB
     QA --> QS
     AR --> RSAN
 
-    QR["qa_report<br/>(.qmd)"]
-    ARPT["analysis_report<br/>(.qmd)"]
+    subgraph serialise["RDS serialisation"]
+        QRDS["qa_rds<br/>(format = file)"]
+        RRDS["results_rds<br/>(format = file)"]
+    end
+
+    QS --> QRDS
+    RSAN --> RRDS
+
+    QR["qa_report<br/>(tar_quarto)"]
+    ARPT["analysis_report<br/>(tar_quarto)"]
 
     CS --> QR
-    QS --> QR
+    QRDS --> QR
     CS --> ARPT
-    RSAN --> ARPT
+    RRDS --> ARPT
+
+    QRP["qa_report_published<br/>(format = file)"]
+    ARPP["analysis_report_published<br/>(format = file)"]
+
+    QR --> QRP
+    ARPT --> ARPP
 ```
 
 The exhaustive dependency graph is available interactively via
@@ -218,11 +243,11 @@ tool shows the exact edges.
 dependency of every target that references it, and hashes its value. See
 *Config handling* below.
 
-`fig_dir` is also a global (a plain string), and is passed as the
-`out_dir` argument to every plot function. Changing `cfg$output_dir`
-changes `fig_dir`, which changes the plot targets' commands - but only
-because `cfg` changed. If you edit `fig_dir` directly in `_targets.R`
-without changing `cfg`, `targets` will *not* invalidate the plot targets.
+`fig_dir`, `data_dir`, and `rep_dir` are also globals (plain strings),
+derived from `cfg$output_dir` at the top of `_targets.R` and created with
+`dir.create()` before the pipeline is defined. They are passed as
+arguments to the plot and report targets, so a change to `cfg$output_dir`
+propagates through `cfg`'s hash — not through `fig_dir` directly.
 
 ---
 
@@ -232,13 +257,18 @@ without changing `cfg`, `targets` will *not* invalidate the plot targets.
 
 | Target | Command | Notes |
 |---|---|---|
-| `locations` | `resolve_location_ids(cfg$location, cfg$country, db_path = cfg$db_path, explicit_ids = cfg$location_ids)` | Aborts on zero matches. |
-| `vectors` | `query_vectors(cfg, locations$location_id, species_filter = cfg$species_filter)` | |
-| `environment` | `query_environment(cfg, locations$location_id)` | |
-| `resistance` | `query_resistance(cfg, locations$location_id)` | |
+| `locations` | `resolve_location_ids(countries = cfg$countries, locations = cfg$locations, db_path = cfg$db_path, db_url = cfg$db_url)` | Aborts on zero matches. Warns above 20. |
+| `vectors` | `query_vectors(cfg, locations$location_id, species_filter = cfg$species_filter)` | Species filter is exact, case-insensitive. Aborts on unknown name. |
+| `environment` | `query_environment(cfg, locations$location_id)` | Pivots long → wide. |
+| `resistance` | `query_resistance(cfg, locations$location_id)` | Full width, including all VGSC counts and `source_code`. |
 | `bionomics` | `query_bionomics(cfg, locations$location_id)` | |
 | `cases` | `query_cases(cfg, locations$location_id)` | Excludes `'ESTIMATE'` rows unless `include_estimated_cases`. |
 | `burden` | `query_burden(cfg, locations$location_id)` | |
+
+Each query function calls `cdm_backend(cfg$db_path, cfg$db_url)` to
+detect the SQL dialect and passes the result to `.loc_clause()` so the
+JSON-array expansion uses the correct function
+(`json_each` on SQLite, `jsonb_array_elements_text` on PostgreSQL).
 
 ### Validation
 
@@ -255,6 +285,9 @@ without changing `cfg`, `targets` will *not* invalidate the plot targets.
 |---|---|
 | `qa` | `summarize_available_data(cases_validated, vectors_validated, environment_validated, locations, cfg)` |
 
+`qa` is a pure function of its inputs (defined in `R/qa.R`), so its
+output is cached and reusable by any downstream target or report.
+
 ### Analysis
 
 | Target | Command |
@@ -266,10 +299,10 @@ without changing `cfg`, `targets` will *not* invalidate the plot targets.
 | `seasonal` | `analyze_seasonal(cases_validated)` |
 
 Note that `resistance_summary` and `bionomics_summary` depend on the
-**unvalidated** extraction targets. There is no `resistance_validated` or
-`bionomics_validated`. This is intentional: an empty resistance dataset
-should produce a `list(error = "...")` from `analyze_resistance`, not
-abort the pipeline. The same applies to `seasonal` (via
+**unvalidated** extraction targets. There is no `resistance_validated`
+or `bionomics_validated`. This is intentional: an empty resistance
+dataset should produce a `list(error = "...")` from `analyze_resistance`,
+not abort the pipeline. The same applies to `seasonal` (via
 `cases_validated`).
 
 ### Figures
@@ -283,27 +316,55 @@ abort the pipeline. The same applies to `seasonal` (via
 | `fig_seasonal` | `plot_seasonal(seasonal, cfg$study_name, fig_dir)` |
 
 Each returns a character vector of written file paths (invisibly). On
-error, they warn and return `character()` - they never abort.
+error, they warn and return `character()` — they never abort.
 
 ### Bundling and sanitisation
 
 | Target | Purpose |
 |---|---|
-| `analysis_results` | A single list containing `cfg`, `locations`, all extraction outputs, all analysis results, all figure paths, `cases_available`, and `qa`. This is what the report consumes. |
-| `cfg_sanitized` | `sanitize_for_quarto(cfg)` - recursive `NA` replacement. |
+| `analysis_results` | A single list containing `cfg`, `locations`, all extraction outputs, all analysis results, all figure paths, `cases_available`, `cases_n`, and `qa`. This is what the report consumes. |
+| `cfg_sanitized` | `sanitize_for_quarto(cfg)` — recursive `NA` replacement. |
 | `qa_sanitized` | `sanitize_for_quarto(qa)`. |
 | `results_sanitized` | `sanitize_for_quarto(analysis_results)`. |
+
+### RDS serialisation
+
+Two file targets serialise the sanitised parameter objects to disk:
+
+| Target | Writes | `format` |
+|---|---|---|
+| `qa_rds` | `outputs/analysis/data/qa.rds` | `"file"` |
+| `results_rds` | `outputs/analysis/data/analysis_results.rds` | `"file"` |
+
+Both return the written path. They are then passed to `tar_quarto()` as
+`execute_params`.
+
+**Why RDS and not the objects directly.** Quarto's YAML 1.2 parameter
+round-trip cannot faithfully serialise every R object. Simple lists of
+tibbles usually survive, but nested structures (a `ggplot` grob, an
+S4 object, a raw `call`) do not. Serialising to RDS and passing the file
+path is robust, keeps the `targets` cache small, and lets the report
+call `readRDS()` at the top of its setup chunk.
 
 ### Reports
 
 | Target | Command |
 |---|---|
-| `qa_report` | `tar_quarto(path = "inst/report/qa_report.qmd", quiet = FALSE, execute_params = list(qa = qa_sanitized, cfg = cfg_sanitized))` |
-| `analysis_report` | `tar_quarto(path = "inst/report/analysis_report.qmd", quiet = FALSE, execute_params = list(cfg = cfg_sanitized, results = results_sanitized))` |
+| `qa_report` | `tar_quarto(path = "inst/report/qa_report.qmd", quiet = FALSE, execute_params = list(qa_path = qa_rds, cfg = cfg_sanitized))` |
+| `qa_report_published` | Copies the rendered HTML from `inst/report/` into `outputs/analysis/reports/`. `format = "file"`. |
+| `analysis_report` | `tar_quarto(path = "inst/report/analysis_report.qmd", quiet = FALSE, execute_params = list(cfg = cfg_sanitized, results_path = results_rds))` |
+| `analysis_report_published` | Copies the rendered HTML from `inst/report/` into `outputs/analysis/reports/`. `format = "file"`. |
 
-Both use `quiet = FALSE`, so Quarto's own output is visible during
-`tar_make()`. This is deliberate - the render is the slowest single step,
-and the progress lines are useful.
+Both `tar_quarto` calls use `quiet = FALSE`, so Quarto's own output is
+visible during `tar_make()`. This is deliberate — the render is the
+slowest single step, and the progress lines are useful for spotting
+early failures.
+
+The `*_published` targets are what actually populate
+`outputs/analysis/reports/`. `tar_quarto()` writes next to the source
+`.qmd` by default (`inst/report/`); the publishing targets copy the
+result to the output directory. If you only want the HTML in
+`inst/report/`, drop the publishing targets.
 
 ---
 
@@ -313,21 +374,23 @@ and the progress lines are useful.
 time:
 
 ```r
+db <- resolve_database(read_db_block())
+
 cfg <- new_analysis_config(
-  study_name              = config::get("study_name"),
-  location                = config::get("location"),
-  country                 = config::get("country"),
-  location_ids            = normalize_list(cfg_get("location_ids")),
-  start_year              = config::get("start_year"),
-  end_year                = config::get("end_year"),
-  disease_code            = config::get("disease_code"),
-  include_estimated_cases = isTRUE(cfg_get("include_estimated_cases", FALSE)),
-  env_variables           = config::get("env_variables"),
-  species_filter          = normalize_list(cfg_get("species_filter")),
-  max_lag_months          = config::get("max_lag_months"),
-  db_path                 = config::get("database"),
+  study_name              = read_cfg("study_name"),
+  countries               = read_cfg_opt("countries"),
+  locations               = read_cfg_opt("locations"),
+  start_year              = read_cfg("start_year"),
+  end_year                = read_cfg("end_year"),
+  diseases                = read_cfg_opt("diseases"),
+  include_estimated_cases = isTRUE(read_cfg_opt("include_estimated_cases", FALSE)),
+  env_variables           = read_cfg("env_variables"),
+  species_filter          = read_cfg_opt("species_filter"),
+  max_lag_months          = read_cfg("max_lag_months"),
+  db_path                 = db$db_path,
+  db_url                  = db$db_url,
   output_dir              = {
-    od <- cfg_get("output_dir")
+    od <- read_cfg_opt("output_dir")
     if (is.null(od)) "outputs/analysis" else od
   }
 )
@@ -338,7 +401,7 @@ cfg <- new_analysis_config(
 `cfg` is a plain R object in `_targets.R`'s environment. It is **not** a
 `tar_target()`. However, `targets` detects it as a dependency of every
 target that references it, and hashes its value. So changing any key in
-`config.yml` invalidates every target that reads `cfg` - which is nearly
+`config.yml` invalidates every target that reads `cfg` — which is nearly
 all of them, including the extraction queries.
 
 The practical consequence: changing `study_name` invalidates
@@ -352,28 +415,73 @@ If this becomes a problem, the fix is to make `cfg` an explicit target:
 tar_target(cfg, new_analysis_config(...))
 ```
 
-...and then split it into per-consumer targets so `study_name`
-invalidates only the plot targets. Neither change is currently made.
+...and then split it into per-consumer targets (`cfg_study_name`,
+`cfg_env_variables`, `cfg_db_path`, ...) so `study_name` invalidates
+only the plot targets. Neither change is currently made.
 
-### Two config accessors
+### Three config accessors
 
-- `config::get(key)` - errors if `key` is missing. Used for the nine
+Defined in `R/config.R`:
+
+- **`read_cfg(key)`** — reads from the `vbd-cdm-analysis:` block. Aborts
+  with a `cli::cli_abort()` if the key is missing. Used for the five
   required keys.
-- `cfg_get(key, default)` - `tryCatch`es and returns `default` on
-  failure. Used for the four optional keys.
+- **`read_cfg_opt(key, default = NULL)`** — returns `default` if the key
+  is missing or the block is absent. Used for the six optional keys.
+- **`read_db_block()`** — returns the entire `database:` block (or
+  `NULL`). The result is passed to `resolve_database()`, which returns
+  `list(db_path, db_url)`.
 
-### `normalize_list()`
+### `normalize_all_list()`
 
 YAML `[]` becomes an R `list()` with `length == 0`, and
-`as.integer(list())` would error inside `new_analysis_config`. The
-`normalize_list()` helper converts empty lists to `NULL` before they
-reach the constructor:
+`as.integer(list())` or `toupper(list())` would error downstream. The
+`normalize_all_list()` helper in `R/config.R` handles this:
 
 ```r
-normalize_list <- function(x) {
-  if (is.null(x) || length(x) == 0) NULL else unlist(x, use.names = FALSE)
+normalize_all_list <- function(x) {
+  if (is.null(x)) return(NULL)
+  if (is.list(x) && length(x) == 0) return(NULL)
+  vals <- unlist(x, use.names = FALSE)
+  if (length(vals) == 0) return(NULL)
+  vals <- trimws(as.character(vals))
+  vals <- vals[nzchar(vals)]
+  if (length(vals) == 0) return(NULL)
+  lower <- tolower(vals)
+  all_tokens <- c("all", "any", "*")
+  if (all(lower %in% all_tokens)) return(NULL)
+  if (any(lower %in% all_tokens)) {
+    cli::cli_abort(c(
+      "Cannot mix 'ALL' with explicit values in the same list.",
+      "i" = "Use either `[\"ALL\"]` or a list of specific values, not both."
+    ))
+  }
+  vals
 }
 ```
+
+It is applied inside `new_analysis_config()` to `countries`, `locations`,
+and `diseases`. A `NULL` return means "no filter" for that dimension.
+
+### `resolve_database()`
+
+Also in `R/config.R`. Takes the raw `database:` block and returns
+`list(db_path = ..., db_url = ...)`:
+
+1. If `postgres:` is present and complete (`host`, `port`, `username`,
+   `password`; `dbname` defaults to `"vbd_cdm"`), builds a
+   `postgresql://user:pw@host:port/dbname` URL. `db_url` is set;
+   `db_path` is `NULL`.
+2. Otherwise, if `sqlite:` is present with a non-empty `db_path`, that
+   path is returned. `db_url` is `NULL`.
+3. Otherwise, if `DATABASE_URL` is set in the environment, it becomes
+   `db_url`.
+4. Otherwise, both are `NULL`, and `cdm_connect()` falls back to
+   `SQL_LITE_DB_NAME`.
+
+Normalises the raw YAML in two shapes: a plain dict (`sqlite: {db_path: …}`)
+and a list of single-key dicts (`sqlite: [{db_path: …}]`). Both forms
+are accepted.
 
 ---
 
@@ -432,7 +540,9 @@ normalize_list <- function(x) {
    ```
 
    The bundle is a hard-coded list; new fields do not appear
-   automatically.
+   automatically. Because `results_sanitized` and `results_rds` depend
+   on `analysis_results`, adding a field here automatically propagates
+   to the report parameter.
 
 5. **Add a section** to `inst/report/analysis_report.qmd`, following the
    pattern of the existing sections:
@@ -442,8 +552,8 @@ normalize_list <- function(x) {
 
    ```{r}
    tr <- res$trend
-   if (!is.null(tr$error)) {
-     note("Trend analysis did not run: ", tr$error)
+   if (!is.null(err_of(tr))) {
+     note("Trend analysis did not run: ", err_of(tr))
    } else {
      tr$monthly |> gt::gt() |> gt::tab_header(title = "Monthly counts")
    }

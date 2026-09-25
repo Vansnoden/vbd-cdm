@@ -19,7 +19,7 @@ tar_option_set(
   packages = c(
     "dplyr", "tidyr", "purrr", "tibble", "lubridate",
     "ggplot2", "patchwork", "scales",
-    "glue", "cli", "fs", "config", "here", "yaml",
+    "glue", "cli", "fs", "here", "yaml",
     "DBI", "RSQLite", "RPostgres",
     "MASS", "broom",
     "gt", "jsonlite"

@@ -352,10 +352,20 @@ query_resistance <- function(cfg, location_ids = NULL) {
            r.vector_code,
            r.insecticide_code,
            r.test_type_code,
+           r.source_code,
            r.concentration,
            r.exposure_time,
            r.n_insect_tested,
+           r.n_insect_susceptible,
            r.n_insect_dead,
+           r.vgsc_n_insect_tested,
+           r.vgsc995l_vgsc995l_n,
+           r.vgsc995l_vgsc995f_n,
+           r.vgsc995f_vgsc995f_n,
+           r.vgsc995l_vgsc995s_n,
+           r.vgsc995s_vgsc995s_n,
+           r.vgsc995f_vgsc995s_n,
+           r.vgsc_generation
            r.mortality,
            r.resistance_status
     FROM fact_insecticide_resistance r

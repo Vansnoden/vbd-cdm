@@ -14,11 +14,11 @@ flowchart LR
     R --> OUT
 ```
 
-The two projects share **only** the database. They have no shared code, no
-shared configuration, and no shared test suite. This is deliberate: it
+The two projects share **only** the database. They have no shared code,
+no shared configuration, and no shared test suite. This is deliberate: it
 means the R side can be developed, versioned, and deployed independently
 of the Python side, as long as both agree on the schema described in the
-[CDM contract](../../data-integration/docs/cdm_contract.md).
+CDM contract.
 
 The contract is one-directional in practice: the Python ETL writes it,
 the R analysis reads it. The R side never writes to `vbd_cdm.db`.
@@ -32,8 +32,9 @@ data-analysis/
 |-- DESCRIPTION             package metadata
 |-- renv.lock               pinned dependencies
 |-- R/
-|   |-- config.R            new_analysis_config()
-|   |-- db.R                cdm_connect(), cdm_query()
+|   |-- config.R            new_analysis_config(), read_cfg(),
+|   |                       read_db_block(), resolve_database()
+|   |-- db.R                cdm_connect(), cdm_query(), cdm_backend()
 |   |-- db_queries.R        all SQL - pure data access, no analysis
 |   |-- qa.R                summarize_available_data()
 |   |-- analysis_vector_seasonal.R    vector seasonality (primary)
@@ -50,6 +51,9 @@ data-analysis/
 |   |-- analysis_report.qmd           narrative report
 |   `-- qa_report.qmd                 data-availability report
 |-- outputs/analysis/       created by _targets.R at runtime
+|   |-- figures/            PNG outputs from plot_*()
+|   |-- data/               qa.rds, analysis_results.rds
+|   `-- reports/            rendered HTML
 `-- docs/                   this documentation
 ```
 
@@ -104,7 +108,11 @@ a Layer 1 function that returns a Layer 2-shaped object.
 If you want to bring it into compliance, the refactor is small:
 
 1. Move the centroid query into `R/db_queries.R` as
-   `query_location_centroids(cfg)`.
+   `query_location_centroids(cfg)`. It should follow the same pattern as
+   every other query: take `cfg` and `location_ids`, call
+   `cdm_query_cfg()`, and return a tibble with `location_id`,
+   `centroid_lat`, `centroid_lon`.
+
 2. Change `attach_grid_cells()` to take the centroids as an argument:
 
    ```r
@@ -126,14 +134,21 @@ exception to the purity rule. Do not add more.
 
 Every layer above Layer 1 receives a `cfg` object - the result of
 `new_analysis_config()` in `R/config.R`. It is a plain list with class
-`"analysis_config"`. Its fields mirror `config.yml` plus a few normalised
-derived fields.
+`"analysis_config"`. Its fields are the `vbd-cdm-analysis:` block from
+`config.yml` plus two fields resolved from the `database:` block:
+
+- `db_path` — a SQLite file path, or `NULL`.
+- `db_url` — a full connection URL, or `NULL`.
+
+Exactly one of `db_path` / `db_url` is non-`NULL` per run. That choice is
+made by `resolve_database()` at the top of `_targets.R` and is encoded
+into the `cfg` object.
 
 `cfg` is passed by value; nothing mutates it. It is hashed by `targets`
 as a single object, so **any change to any key in `config.yml`
 invalidates every target that reads `cfg`** - which is nearly all of
 them, including the extraction queries. See
-[Configuration -> Config invalidation](configuration.md#config-invalidation)
+[Configuration → Config invalidation](configuration.md#config-invalidation)
 for the full picture.
 
 The distinction between `cfg` and the rest of the pipeline: `cfg` is
@@ -168,10 +183,25 @@ This is why:
   (`tar_target(vectors, query_vectors(cfg, locations$location_id))`) are
   the only place the database is touched. If the database changes, you
   invalidate those targets manually (see *Database invalidation* below).
+
+- **Dialect detection lives in `R/db.R::cdm_backend()`.** Every fact
+  query calls it once with `cfg$db_path` and `cfg$db_url`, and passes
+  the result to `.loc_clause()` so the JSON-array expansion uses the
+  correct function (`json_each` on SQLite, `jsonb_array_elements_text`
+  on PostgreSQL). This keeps the queries portable without duplicating
+  dialect logic.
+
 - **All analysis functions are pure.** No file reads, no DB, no time, no
   randomness.
+
 - **Plot functions write files but produce no analysis.** Their outputs
   are file paths, which `targets` hashes like any other value.
+
+- **RDS serialisation is a target, not an inline call.** `qa_rds` and
+  `results_rds` write their payload to disk and return the path. The
+  path is what `tar_quarto()` receives. Because they are file targets,
+  `targets` hashes the file's contents and re-serialises when the
+  sanitised object changes.
 
 The `qa.R` module is pure and takes query outputs as arguments. It is
 called from a target, not from a report, so its output is cached and
@@ -185,16 +215,19 @@ Four properties matter here:
    only the targets that call it, not the ones that don't. On a
    large-project rebuild, this is the difference between two minutes and
    two hours.
+
 2. **Content hashing.** Every global that a target references is hashed
    as part of that target's dependency set. Because `cfg` is a single
    global, changing any key in `config.yml` invalidates every target
    that reads `cfg`. To get finer invalidation you would need to split
    `cfg` into per-consumer globals, which this project does not do.
+
 3. **Parallelism.** Independent branches (`vectors`, `environment`,
    `resistance`, `bionomics`, `cases`) can run concurrently if the DAG
    allows it. In practice the six SQL extraction targets are
    independent and run in parallel; everything downstream is
    sequential because it depends on the extraction results.
+
 4. **Reproducibility.** `targets::tar_manifest()` shows exactly what ran.
    `targets::tar_meta()` shows when, how long, and with what warnings.
 
@@ -211,10 +244,10 @@ tar_option_set(
   packages = c(
     "dplyr", "tidyr", "purrr", "tibble", "lubridate",
     "ggplot2", "patchwork", "scales",
-    "glue", "cli", "fs", "config", "here",
-    "DBI", "RSQLite",
+    "glue", "cli", "fs", "here", "yaml",
+    "DBI", "RSQLite", "RPostgres",
     "MASS", "broom",
-    "gt"
+    "gt", "jsonlite"
   ),
   format = "qs",
   memory = "transient"
@@ -224,7 +257,8 @@ tar_option_set(
 - **`packages`** - attached inside every target's process. Add any
   package a target calls. If you forget one, the target errors with a
   `could not find function` error that only appears when the target
-  actually runs.
+  actually runs. `config` is not in this list because the pipeline does
+  not use it — see [Configuration](configuration.md).
 - **`format = "qs"`** - the on-disk cache format. Fast, compressed,
   schema-stable. Do not change this without invalidating the cache;
   `targets` will error on an unreadable cache.
@@ -247,7 +281,9 @@ Two ways to handle this:
 the extraction targets explicitly:
 
 ```r
-targets::tar_invalidate(c(vectors, environment, resistance, bionomics, cases, burden))
+targets::tar_invalidate(c(
+  locations, vectors, environment, resistance, bionomics, cases, burden
+))
 targets::tar_make()
 ```
 
@@ -263,18 +299,23 @@ hash is a dependency. When the DB changes, `db_hash` changes, and
 everything downstream invalidates automatically.
 
 The automatic approach is cleaner but requires touching every query
-function. If you adopt it, do it uniformly - a half-migrated pipeline is
-worse than either extreme.
+function. It also only works for SQLite — `tools::md5sum()` cannot hash
+a PostgreSQL database. For Postgres, an equivalent hash would need to be
+computed server-side (e.g. `pg_stat_database` row counts, or a
+user-maintained audit table).
+
+If you adopt the automatic approach, do it uniformly - a half-migrated
+pipeline is worse than either extreme.
 
 ## Outputs and the cache
 
-Two directories matter:
+Three directories under `outputs/analysis/` matter:
 
 ```
 outputs/analysis/
 |-- figures/     PNG files written by plot_*() functions
-|-- reports/     HTML files written by tar_quarto()
-`-- (data/)      reserved; currently unused
+|-- data/        qa.rds, analysis_results.rds written by qa_rds/results_rds
+`-- reports/     rendered HTML, copied by *_report_published
 ```
 
 The `targets` cache lives at `_targets/` in the project root by default.
@@ -291,11 +332,11 @@ tar_option_set(store = file.path(cfg$output_dir, "_targets"))
 `_targets.R` calls `tar_option_set()` before building `cfg`, so moving
 the store requires reordering the file.
 
-`figures/` and `reports/` are **not** cached; they are file targets. The
-plot functions run every time their inputs change, and `tar_quarto` re-
-renders when its `.qmd` or its parameters change. This is correct: file
-outputs should be regenerated when their inputs change, not persisted in
-the cache.
+`figures/`, `data/`, and `reports/` are **not** cached; they are file
+targets. The plot functions run every time their inputs change, and
+`tar_quarto` re-renders when its `.qmd` or its parameters change. This is
+correct: file outputs should be regenerated when their inputs change, not
+persisted in the cache.
 
 ## Adding a new module
 
@@ -314,7 +355,7 @@ Follow the existing layout:
 6. Add a section to `inst/report/analysis_report.qmd`.
 7. Run `targets::tar_make()`. Only the new targets run.
 
-See [Pipeline -> extending](pipeline.md#extending) for the concrete
+See [Pipeline → extending](pipeline.md#extending) for the concrete
 walkthrough.
 
 ## What this architecture deliberately does not do
@@ -325,6 +366,11 @@ walkthrough.
 - **No R-to-Python bridge.** No `reticulate`, no shared config file, no
   shared library. The database is the interface. This means a Python
   upgrade cannot break the R side, and vice versa.
+- **No `config` package.** The two-block `config.yml` layout (analysis
+  block + database block) conflicts with the `config` package's
+  `default:` fallback convention, so the file is read directly via
+  `yaml::read_yaml()`. There is no multi-environment switcher; use
+  `DATABASE_URL` or a second checkout.
 - **No test suite for the R side (yet).** `DESCRIPTION` declares
   `testthat` and `mockery` in `Suggests`, but the project has no
   `tests/` directory. The QA report serves as a smoke test: if the

@@ -97,6 +97,9 @@ data-integration/outputs/
 data-integration/exploration/
 data-analysis/outputs/
 
+outputs/analysis/reports/*.html
+outputs/analysis/reports/*.qmd
+
 *_bundle.txt
 project_bundle.txt
 python_bundle.txt
