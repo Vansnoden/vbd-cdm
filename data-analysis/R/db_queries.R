@@ -14,7 +14,17 @@
 # Location resolution
 # ---------------------------------------------------------------------------
 
-#' Resolve location IDs from country and location name filters.
+#' Resolve administrative location IDs from country and location-name filters.
+#'
+#' Grid cells (admin_level = 'grid') are excluded. The Python consolidation
+#' step labels every environment pixel "X (Climate Grid)", so a substring
+#' filter like "Siaya" matches both the admin row and hundreds of pixel
+#' rows. Grid cells carry climate data only — no vector observation, case,
+#' or resistance test ever points at one. Passing grid IDs to a fact query
+#' silently fans out the filter and empties the result.
+#'
+#' For the environment query, which genuinely lives on grid cells, use
+#' `resolve_grid_location_ids()`.
 #'
 #' @param countries Character vector of ISO alpha-2 country codes, or NULL.
 #' @param locations Character vector of location names (matched exactly or
@@ -25,12 +35,37 @@
 #' @export
 resolve_location_ids <- function(countries = NULL, locations = NULL,
                                  db_path = NULL, db_url = NULL) {
-  
+  .resolve_locations(
+    countries = countries, locations = locations,
+    db_path = db_path, db_url = db_url,
+    admin_filter = "(admin_level IS NULL OR admin_level <> 'grid')"
+  )
+}
+
+#' Resolve grid-cell location IDs.
+#'
+#' A companion to `resolve_location_ids()` for the environment query.
+#' Returns only rows with `admin_level = 'grid'`.
+#'
+#' @inheritParams resolve_location_ids
+#' @export
+resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
+                                      db_path = NULL, db_url = NULL) {
+  .resolve_locations(
+    countries = countries, locations = locations,
+    db_path = db_path, db_url = db_url,
+    admin_filter = "admin_level = 'grid'"
+  )
+}
+
+#' @noRd
+.resolve_locations <- function(countries, locations, db_path, db_url,
+                               admin_filter) {
   countries <- normalize_all_list(countries)
   if (!is.null(countries)) countries <- toupper(countries)
   locations <- normalize_all_list(locations)
   
-  where  <- character()
+  where  <- c(admin_filter)
   params <- list()
   
   if (length(countries) > 0) {
@@ -50,7 +85,7 @@ resolve_location_ids <- function(countries = NULL, locations = NULL,
   
   sql <- paste0(
     "SELECT location_id, name, country_code, admin_level FROM dim_location",
-    if (length(where)) paste0(" WHERE ", paste(where, collapse = " AND ")) else "",
+    " WHERE ", paste(where, collapse = " AND "),
     " ORDER BY name"
   )
   df <- cdm_query(sql, params, db_path = db_path, db_url = db_url)
@@ -60,8 +95,9 @@ resolve_location_ids <- function(countries = NULL, locations = NULL,
       "No locations matched the configured filter.",
       "i" = "countries = {.val {countries}}",
       "i" = "locations = {.val {locations}}",
-      "i" = "Check `SELECT DISTINCT country_code FROM dim_location;` and " %+%
-        "`SELECT name FROM dim_location LIMIT 30;`"
+      "i" = "admin_filter = {admin_filter}",
+      "i" = "Check `SELECT DISTINCT country_code FROM dim_location;`, " %+%
+        "`SELECT name, admin_level FROM dim_location LIMIT 30;`"
     ))
   }
   
@@ -265,6 +301,11 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
 #' location_ids is NULL, this is a mean over every environment row in the
 #' year window — a placeholder, not a per-site series.
 #'
+#' Aborts if any requested variable is entirely absent from the result.
+#' A partial miss (some variables present, some not) otherwise surfaces
+#' as a downstream `all_of()` error in `analyze_vector_climate()`, which
+#' is much harder to read.
+#'
 #' @export
 query_environment <- function(cfg, location_ids = NULL) {
   backend <- cdm_backend(cfg$db_path, cfg$db_url)
@@ -285,6 +326,24 @@ query_environment <- function(cfg, location_ids = NULL) {
   ")
   df <- cdm_query_cfg(cfg, sql, params)
   df$date <- as.Date(df$date)
+  
+  # --- Partial-miss guard ---------------------------------------------------
+  # Whatever of cfg$env_variables exist in fact_environment for the matched
+  # locations and years comes back; the rest is silently absent. Report the
+  # gap here rather than letting `dplyr::across(all_of(...))` trip on it
+  # inside analyze_vector_climate().
+  present_vars <- unique(df$variable)
+  missing_vars <- setdiff(cfg$env_variables, present_vars)
+  if (length(missing_vars) > 0) {
+    cli::cli_abort(c(
+      "query_environment() returned no rows for some requested variables.",
+      "!" = "Missing: {.val {missing_vars}}",
+      "i" = "Requested: {.val {cfg$env_variables}}",
+      "i" = "Present:   {.val {sort(present_vars)}}",
+      "i" = "Run `SELECT DISTINCT variable FROM fact_environment;` and " %+%
+        "adjust `env_variables` in config.yml."
+    ))
+  }
   
   tidyr::pivot_wider(
     df,
@@ -357,6 +416,7 @@ query_resistance <- function(cfg, location_ids = NULL) {
            r.exposure_time,
            r.n_insect_tested,
            r.n_insect_susceptible,
+           r.n_insect_resistant,
            r.n_insect_dead,
            r.vgsc_n_insect_tested,
            r.vgsc995l_vgsc995l_n,
@@ -365,7 +425,7 @@ query_resistance <- function(cfg, location_ids = NULL) {
            r.vgsc995l_vgsc995s_n,
            r.vgsc995s_vgsc995s_n,
            r.vgsc995f_vgsc995s_n,
-           r.vgsc_generation
+           r.vgsc_generation,
            r.mortality,
            r.resistance_status
     FROM fact_insecticide_resistance r

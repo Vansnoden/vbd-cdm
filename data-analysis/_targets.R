@@ -107,9 +107,27 @@ list(
   # 1. Data extraction
   # =========================================================================
   
+  # Administrative locations. Grid cells are excluded — see the resolver
+  # docstring. These are the rows every fact query except environment joins
+  # against.
   tar_target(
     locations,
     resolve_location_ids(
+      countries = cfg$countries,
+      locations = cfg$locations,
+      db_path   = cfg$db_path,
+      db_url    = cfg$db_url
+    )
+  ),
+  
+  # Grid cells. The environment side of the CDM is stored on grid pixels
+  # (admin_level = 'grid'), which the Python consolidation step labels as
+  # "<region> (Climate Grid)". Vector observations, cases, and resistance
+  # tests never point at grid cells, so they get their own target here and
+  # the environment query uses this one instead.
+  tar_target(
+    grid_locations,
+    resolve_grid_location_ids(
       countries = cfg$countries,
       locations = cfg$locations,
       db_path   = cfg$db_path,
@@ -125,7 +143,7 @@ list(
   
   tar_target(
     environment,
-    query_environment(cfg, locations$location_id)
+    query_environment(cfg, grid_locations$location_id)
   ),
   
   tar_target(
@@ -171,10 +189,10 @@ list(
     environment_validated,
     {
       if (nrow(environment) == 0) {
-        loc_str <- paste(locations$location_id, collapse = ", ")
+        loc_str <- paste(grid_locations$location_id, collapse = ", ")
         cli::cli_abort(c(
           "query_environment() returned 0 rows.",
-          "i" = "Locations: {loc_str}",
+          "i" = "Grid locations: {loc_str}",
           "i" = "env_variables = {paste(cfg$env_variables, collapse = ', ')}"
         ))
       }
@@ -296,6 +314,7 @@ list(
     list(
       cfg                 = cfg,
       locations           = locations,
+      grid_locations      = grid_locations,
       vectors             = vectors_validated,
       environment         = environment_validated,
       resistance          = resistance,

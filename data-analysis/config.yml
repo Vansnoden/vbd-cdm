@@ -6,9 +6,10 @@
 #   vbd-cdm-analysis : what to analyse
 #   database         : where the CDM lives
 #
-# The `config` package reads the first block on request; the second is
-# read directly by yaml::read_yaml(). Do not nest `database:` inside
-# `vbd-cdm-analysis:`.
+# The `vbd-cdm-analysis:` block is read via read_cfg() / read_cfg_opt()
+# in R/config.R. The `database:` block is read as a whole by
+# read_db_block() and resolved by resolve_database(). Do not nest
+# `database:` inside `vbd-cdm-analysis:`.
 
 vbd-cdm-analysis:
   study_name: "Case Study"
@@ -21,19 +22,19 @@ vbd-cdm-analysis:
   # locations: ["ALL"]                  # every location inside the country filter
   # locations: ["Siaya County"]         # exact or substring match on dim_location.name
   # locations: ["Siaya", "Mombasa"]     # multiple; OR-ed together
-  locations: ["ALL"]
+  locations: ["Siaya"]
 
-  start_year: 2019
+  start_year: 1984
   end_year:   2025
 
   # diseases: ["ALL"]                     # no disease filter
   # diseases: ["MAL"]                     # one code
   # diseases: ["MAL", "DENGUE"]           # multiple; OR-ed
-  diseases: ["MAL", "DENGUE"]
+  diseases: ["MAL"]
 
   include_estimated_cases: true
 
-  env_variables: ["t2m", "tp"]
+  env_variables: ["2t", "tp"]
 
   # species_filter: ["All"]                                  # every species
   # species_filter: ["Anopheles gambiae", "Anopheles funestus"]
