@@ -46,6 +46,22 @@ analyze_vector_seasonal <- function(vectors, value_col = NULL) {
     return(list(error = glue::glue("value_col '{value_col}' not present in data.")))
   }
   
+  # Pool across locations if the input carries a location_id column.
+  # query_vectors() returns one row per (date, location, species); this
+  # function summarises a single per-species vector series. Summing
+  # counts and averaging derived rates across locations preserves the
+  # semantics of the previous per-date-per-species series.
+  if ("location_id" %in% names(vectors)) {
+    vectors <- vectors |>
+      dplyr::group_by(.data$date, .data$species_name, .data$vector_code) |>
+      dplyr::summarise(
+        count            = sum(.data$count, na.rm = TRUE),
+        density_per_trap = mean(.data$density_per_trap, na.rm = TRUE),
+        infection_rate   = mean(.data$infection_rate, na.rm = TRUE),
+        .groups          = "drop"
+      )
+  }
+  
   vectors <- vectors |>
     dplyr::mutate(
       date  = as.Date(.data$date),

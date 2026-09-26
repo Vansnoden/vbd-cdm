@@ -388,7 +388,7 @@ list(
       intervention_vector  = intervention_vector,
       cases               = cases_validated,
       cases_available     = cases_available,
-      cases_n             = nrow(cases_validated),
+      cases_n             = dplyr::n_distinct(cases_validated$date),
       burden              = burden,
       seasonal            = seasonal,
       qa                  = qa,

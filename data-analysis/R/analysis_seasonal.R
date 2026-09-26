@@ -6,6 +6,23 @@ analyze_seasonal <- function(cases, value_col = "case_count") {
     return(list(error = "Not enough data for seasonal analysis."))
   }
   
+  # Pool across locations if the input carries a location_id column.
+  # query_cases() returns one row per (date, location); this function
+  # summarises a single daily case series. Summing across locations
+  # here preserves the semantics of the previous per-date series.
+  if ("location_id" %in% names(cases)) {
+    cases <- cases |>
+      dplyr::group_by(.data$date) |>
+      dplyr::summarise(
+        case_count = sum(.data[[value_col]], na.rm = TRUE),
+        .groups = "drop"
+      )
+    # After pooling, the value_col is always case_count.
+    if (value_col != "case_count") {
+      value_col <- "case_count"
+    }
+  }
+  
   cases <- cases |>
     dplyr::mutate(
       date  = as.Date(date),

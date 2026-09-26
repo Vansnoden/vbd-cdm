@@ -88,15 +88,18 @@ analyze_intervention_summary <- function(interventions) {
 
 #' Pre/post impact of interventions on an outcome
 #'
-#' For each intervention event, the outcome is aggregated to one row per
-#' date (multiple rows per date are summed), then split into a window of
-#' `window_months` before the intervention start and the same window after.
-#' The before/after means and their percent change are reported per event,
-#' aggregated by intervention type, and aligned into an event-study series
-#' for plotting.
+#' For each intervention event, the outcome is restricted to the event's
+#' own location_id, split into a window of `window_months` before the
+#' intervention start and the same window after, and summarised as a
+#' before/after mean with percent change. Events whose location has
+#' fewer than `min_obs` observations on either side are dropped.
+#'
+#' Requires the outcome tibble to carry a `location_id` column. The
+#' extraction queries (query_cases, query_vectors) produce this column.
 #'
 #' @param interventions Output of `query_interventions()`.
-#' @param outcome       Tibble with a `date` column and an outcome column.
+#' @param outcome       Tibble with `date`, `location_id`, and an outcome
+#'                      column.
 #' @param outcome_col   Name of the outcome column in `outcome`.
 #' @param window_months Months on each side of the intervention start.
 #' @param min_events    Minimum number of usable events required to report
@@ -122,6 +125,13 @@ analyze_intervention_impact <- function(interventions,
   if (!outcome_col %in% names(outcome)) {
     return(list(error = glue::glue("Column '{outcome_col}' not found in outcome.")))
   }
+  if (!"location_id" %in% names(outcome)) {
+    return(list(error = paste0(
+      "Outcome must carry a `location_id` column for per-site ",
+      "intervention analysis. query_cases() and query_vectors() both ",
+      "produce it."
+    )))
+  }
   
   interventions <- interventions |>
     dplyr::mutate(date = as.Date(.data$date)) |>
@@ -131,19 +141,20 @@ analyze_intervention_impact <- function(interventions,
     return(list(error = "No interventions with a valid date."))
   }
   
-  # Aggregate outcome to one row per date. Multiple rows per date (e.g.
-  # vector observations across species) are summed. This is a no-op for
-  # case data, which query_cases() already returns at daily granularity.
-  outcome_by_date <- outcome |>
+  # Aggregate the outcome to one row per (date, location_id). Multiple
+  # rows for the same date and location (e.g., several species at the
+  # same site on the same day) are summed so each event sees a single
+  # series at its own location.
+  outcome_by_loc_date <- outcome |>
     dplyr::mutate(date = as.Date(.data$date)) |>
     dplyr::filter(!is.na(.data$date), !is.na(.data[[outcome_col]])) |>
-    dplyr::group_by(.data$date) |>
+    dplyr::group_by(.data$date, .data$location_id) |>
     dplyr::summarise(
       value = sum(.data[[outcome_col]], na.rm = TRUE),
       .groups = "drop"
     )
   
-  if (nrow(outcome_by_date) == 0) {
+  if (nrow(outcome_by_loc_date) == 0) {
     return(list(error = "No usable outcome rows after cleaning."))
   }
   
@@ -151,20 +162,25 @@ analyze_intervention_impact <- function(interventions,
   min_events    <- as.integer(min_events)
   min_obs       <- as.integer(min_obs)
   
-  # ---- Per-event pre/post ------------------------------------------------
-  # Period object shared by the per-event and alignment loops. `lubridate::months()`
-  # is not exported in every lubridate version; `period(months = n)` is the
-  # exported constructor and produces the same Period object.
   win <- lubridate::period(months = window_months)
   
+  # ---- Per-event pre/post ------------------------------------------------
+  # Each event is evaluated against the outcome series AT ITS OWN
+  # LOCATION. Events whose location_id has no outcome data in the window
+  # are dropped.
   events <- purrr::map_dfr(seq_len(nrow(interventions)), function(i) {
     iv <- interventions[i, , drop = FALSE]
     before_start <- iv$date %m-% win
     after_end    <- iv$date %m+% win
     
-    before <- outcome_by_date |>
+    site <- outcome_by_loc_date |>
+      dplyr::filter(.data$location_id == iv$location_id)
+    
+    if (nrow(site) == 0) return(tibble::tibble())
+    
+    before <- site |>
       dplyr::filter(.data$date >= before_start, .data$date <  iv$date)
-    after  <- outcome_by_date |>
+    after  <- site |>
       dplyr::filter(.data$date >= iv$date,       .data$date <= after_end)
     
     if (nrow(before) < min_obs || nrow(after) < min_obs) {
@@ -213,16 +229,16 @@ analyze_intervention_impact <- function(interventions,
   }
   
   # ---- Event-study alignment --------------------------------------------
-  # For each event, the outcome is aligned to months-offset-from-start.
-  # Offsets are computed in whole months (30.44-day approximation) so the
-  # aggregate plot is on a single axis regardless of the exact date.
+  # Restrict to the event's location before aligning on month offset.
   aligned <- purrr::map_dfr(seq_len(nrow(interventions)), function(i) {
     iv <- interventions[i, , drop = FALSE]
     before_start <- iv$date %m-% win
     after_end    <- iv$date %m+% win
     
-    sub <- outcome_by_date |>
-      dplyr::filter(.data$date >= before_start, .data$date <= after_end)
+    sub <- outcome_by_loc_date |>
+      dplyr::filter(.data$location_id == iv$location_id,
+                    .data$date >= before_start,
+                    .data$date <= after_end)
     if (nrow(sub) == 0) return(tibble::tibble())
     
     sub$offset_months <- as.integer(round(

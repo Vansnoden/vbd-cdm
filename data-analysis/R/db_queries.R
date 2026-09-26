@@ -362,6 +362,7 @@ resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
 #' 'ESTIMATE') unless `cfg$include_estimated_cases` is TRUE.
 #'
 #' @export
+#' @export
 query_cases <- function(cfg, location_ids = NULL) {
   backend <- cdm_backend(cfg$db_path, cfg$db_url)
   loc <- .loc_clause(location_ids, alias = "c", backend = backend)
@@ -375,12 +376,17 @@ query_cases <- function(cfg, location_ids = NULL) {
     method_filter <- "AND c.identification_method_code <> 'ESTIMATE'"
   }
   
+  # location_id is preserved so that per-site analyses (intervention
+  # pre/post, spatial comparisons) can filter to the study unit rather
+  # than a pooled continental average. Pooled consumers (case seasonality,
+  # QA summary) re-aggregate across location before use.
   sql <- glue::glue("
     SELECT t.date          AS date,
            t.year          AS year,
            t.month         AS month,
            t.week          AS week,
            t.season        AS season,
+           c.location_id   AS location_id,
            SUM(COALESCE(c.case_count, 1)) AS case_count
     FROM fact_disease_case c
     JOIN dim_time t ON c.date_id_reported = t.date_id
@@ -389,14 +395,13 @@ query_cases <- function(cfg, location_ids = NULL) {
       {yf$sql}
       {df_$sql}
       {method_filter}
-    GROUP BY t.date, t.year, t.month, t.week, t.season
-    ORDER BY t.date
+    GROUP BY t.date, t.year, t.month, t.week, t.season, c.location_id
+    ORDER BY t.date, c.location_id
   ")
   df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
-
 # ---------------------------------------------------------------------------
 # Vectors
 # ---------------------------------------------------------------------------
@@ -445,8 +450,13 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
   yf     <- .year_filter(cfg, list(), alias = "t")
   params <- c(loc$params, species_params, yf$params)
   
+  # location_id is preserved for the same reason as in query_cases():
+  # per-site intervention analysis needs it. Pooled consumers
+  # (vector seasonality, vector-climate) re-aggregate across location
+  # before use.
   sql <- glue::glue("
     SELECT t.date, t.year, t.month,
+           o.location_id,
            COALESCE(v.species_name, o.vector_code) AS species_name,
            o.vector_code,
            SUM(o.count)             AS count,
@@ -459,15 +469,14 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
       {loc$sql}
       {species_sql}
       {yf$sql}
-    GROUP BY t.date, t.year, t.month,
+    GROUP BY t.date, t.year, t.month, o.location_id,
              COALESCE(v.species_name, o.vector_code), o.vector_code
-    ORDER BY t.date
+    ORDER BY t.date, o.location_id
   ")
   df <- cdm_query_cfg(cfg, sql, params)
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
-
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
