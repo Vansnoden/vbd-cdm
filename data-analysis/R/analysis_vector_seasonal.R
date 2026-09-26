@@ -19,6 +19,19 @@
 #'   - value_col, n_observations, n_species
 #'   On error: list(error = "...")
 #' @export
+#' Analyze vector species composition and seasonality
+#'
+#' @param vectors   Output of query_vectors().
+#' @param value_col Which abundance column to summarise. Auto-detected from
+#'                  "count" (preferred) or "density_per_trap".
+#' @return A list with:
+#'   - composition:        per-species totals and share
+#'   - monthly:            climatological monthly mean abundance (pooled)
+#'   - monthly_by_species: monthly mean by species
+#'   - yoy:                monthly by year (empty when only one year)
+#'   - value_col, n_observations, n_species
+#'   On error: list(error = "...")
+#' @export
 analyze_vector_seasonal <- function(vectors, value_col = NULL) {
   if (is.null(vectors) || nrow(vectors) == 0) {
     return(list(error = "No vector data available."))
@@ -47,8 +60,19 @@ analyze_vector_seasonal <- function(vectors, value_col = NULL) {
       total_count = sum(.data[[value_col]], na.rm = TRUE),
       .groups     = "drop"
     ) |>
-    dplyr::arrange(dplyr::desc(.data$total_count)) |>
-    dplyr::mutate(share = .data$total_count / sum(.data$total_count))
+    dplyr::arrange(dplyr::desc(.data$total_count))
+  
+  # Guard against a divide-by-zero when every count is NA or the value_col
+  # carries only missing values. Return NA_real_ in that case, so the plot
+  # renders as an empty panel rather than silently producing NaN bars.
+  total <- sum(composition$total_count, na.rm = TRUE)
+  composition <- composition |>
+    dplyr::mutate(
+      share = if (is.finite(total) && total > 0)
+        .data$total_count / total
+      else
+        NA_real_
+    )
   
   monthly <- vectors |>
     dplyr::group_by(.data$month) |>

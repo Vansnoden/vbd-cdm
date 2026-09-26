@@ -69,6 +69,16 @@ class DimLocation(Base):
     admin_level = Column(String(100))
     standard_code = Column(String(100))
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
+    parent_location_id = Column(
+        Integer, ForeignKey("dim_location.location_id"), nullable=True
+    )
+    origin = Column(String(30), default="source")
+
+    __table_args__ = (
+        Index("idx_dim_location_parent", "parent_location_id"),
+        Index("idx_dim_location_admin", "admin_level"),
+        Index("idx_dim_location_origin", "origin"),
+    )
 
 
 class DimDisease(Base):
@@ -248,7 +258,10 @@ class FactDiseaseCase(Base):
     age_group = Column(String(100))
     sex = Column(String(10))
     outcome = Column(String(100))
-    case_count = Column(Integer, nullable=False, server_default="1")
+    case_count = Column(Integer, 
+        nullable=False, 
+        default=1,
+        server_default="1")
 
     # Relationships
     location = relationship("DimLocation")

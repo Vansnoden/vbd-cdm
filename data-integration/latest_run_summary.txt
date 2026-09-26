@@ -1,0 +1,230 @@
+
+============================================================
+0. PIPELINE INVOCATIONS (one per run)
+============================================================
+2026-09-25 04:19:33,867 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 04:59:30,512 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:41:48,669 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:53:35,326 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:53:48,414 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:53:59,912 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:54:10,454 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:54:22,008 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:54:32,892 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+
+============================================================
+1. LOG OVERVIEW
+============================================================
+File:       logs/etl.log
+Size:       11M
+Lines:      54663
+First ts:   2026-09-25 04:19:33
+Last ts:    2026-09-25 05:54:38
+INFO:       50476
+WARNING:    4174
+ERROR:      1
+CRITICAL:   0
+
+============================================================
+2. PER-SOURCE COMPLETION SUMMARY
+============================================================
+Vector Atlas Occurrence                        dim=821       facts=9719
+GBIF Occurrence                                dim=5         facts=12
+IRMapper 1: WHO susceptibility, complex/subgroup  dim=177       facts=1502
+IRMapper 2: WHO susceptibility, species        dim=45        facts=126
+IRMapper 3: CDC bottle bioassay, complex/subgroup  dim=212       facts=1127
+IRMapper 4: paired synergist bioassays, complex/subgroup  dim=10        facts=12
+IRMapper 5: intensity bioassay, complex/subgroup  dim=27        facts=57
+IRMapper 6: VGSC allele frequency, complex/subgroup  dim=872       facts=2096
+IRMapper 7: VGSC allele frequency, species     dim=1031      facts=3626
+IRMapper 8: VGSC allele frequency, survivors vs dead  dim=68        facts=226
+MAP Pf Incidence Count (Kenya)                 dim=1120      facts=1106
+MAP Pf Incidence Rate (Kenya)                  dim=1680      facts=1666
+MAP Pf Parasite Rate (Kenya)                   dim=1680      facts=1666
+MAP Pv Incidence Count (Kenya)                 dim=1680      facts=1666
+MAP Pv Incidence Rate (Kenya)                  dim=1680      facts=1666
+MAP Pv Parasite Rate (Kenya)                   dim=1680      facts=1666
+Kenya Health Facilities                        dim=325       facts=334
+World Bank Kenya Indicators                    dim=1500      facts=98868
+ITN Use (itnuse.org)                           dim=3         facts=4
+MAP ITN Access (Kenya)                         dim=1113      facts=1106
+MAP ITN Use (Kenya)                            dim=1169      facts=1162
+MAP ITN Use/Access Ratio (Kenya)               dim=1113      facts=1106
+ERA5-Land Climate                              dim=366       facts=518173
+MAP Pf Incidence Count (Kenya)                 dim=1120      facts=1106
+MAP Pf Incidence Rate (Kenya)                  dim=1680      facts=1666
+MAP Pf Parasite Rate (Kenya)                   dim=1680      facts=1666
+MAP Pv Incidence Count (Kenya)                 dim=1680      facts=1666
+MAP Pv Incidence Rate (Kenya)                  dim=1680      facts=1666
+MAP Pv Parasite Rate (Kenya)                   dim=1680      facts=1666
+
+============================================================
+3. SOURCE-LEVEL FAILURES
+============================================================
+2026-09-25 04:21:04,981  Failed to process source 'ERA5-Land Climate': Required field 'value' in table 'fact_environment' has null value
+
+============================================================
+4. PER-TABLE LOAD ACTIVITY (aggregated)
+============================================================
+-----                                  ------        -----     -------- -------
+dim_disease                                85        18876           85     85
+dim_insecticide                            53        10589           53      9
+dim_location                            26157       902763        26157    122
+dim_resistance_test_type                   64        10589           64      9
+dim_socioeconomic_indicator              1498        99660         1498      1
+dim_source                                122       902763          122    122
+dim_vector                                 40        10717           40     10
+fact_bionomics                           3078         5131         3078      1
+fact_disease_burden                     18872        18872        18872     84
+fact_environment                       518173       518173       518173      3
+fact_health_facility                      334          334          334      1
+fact_insecticide_resistance              8220        10589         8220      9
+fact_intervention                        3378         3378         3378     22
+fact_socioeconomic_condition            98868        99660        98868      1
+fact_vector_observation                  7205        10717         7205     10
+table                                  loaded        input     prepared batches
+
+============================================================
+5. CONSOLIDATION STEP MARKERS
+============================================================
+Step 9: Detecting and resolving duplicates...
+Step 10: Computing resistance status after deduplication...
+Step 11: Final verification...
+CONSOLIDATION COMPLETE
+STARTING FULL DATA CONSOLIDATION
+Step 1: Aligning all foreign keys...
+Step 1: Cleaning dimension tables...
+Step 2: Aligning dimension FKs...
+Step 3: Aligning fact FKs...
+FOREIGN KEY ALIGNMENT COMPLETE
+Step 2: Standardizing country codes to ISO format...
+Step 3: Binding climate coordinates to regions...
+Step 4: Standardizing vocabularies...
+VOCABULARY STANDARDIZATION COMPLETE
+Step 5: Fixing orphaned burden records...
+Step 6: Expanding burden data to daily records...
+Step 7: Consolidating locations...
+Step 8: Consolidating vocabulary...
+Step 9: Detecting and resolving duplicates...
+Step 10: Computing resistance status after deduplication...
+Step 11: Final verification...
+CONSOLIDATION COMPLETE
+STARTING FULL DATA CONSOLIDATION
+Step 1: Aligning all foreign keys...
+Step 1: Cleaning dimension tables...
+Step 2: Aligning dimension FKs...
+Step 3: Aligning fact FKs...
+FOREIGN KEY ALIGNMENT COMPLETE
+Step 2: Standardizing country codes to ISO format...
+Step 3: Binding climate coordinates to regions...
+Step 4: Standardizing vocabularies...
+VOCABULARY STANDARDIZATION COMPLETE
+Step 5: Fixing orphaned burden records...
+Step 6: Expanding burden data to daily records...
+Step 7: Consolidating locations...
+Step 8: Consolidating vocabulary...
+Step 9: Detecting and resolving duplicates...
+Step 10: Computing resistance status after deduplication...
+Step 11: Final verification...
+CONSOLIDATION COMPLETE
+
+============================================================
+6. FK ALIGNMENT - ORPHAN FINDINGS
+============================================================
+All orphans fixed in fact_insecticide_resistance.test_type_code
+
+============================================================
+6b. FK ALIGNMENT - NO VALID VALUES / SKIPPED
+============================================================
+
+============================================================
+7. QUARANTINE EVENTS (fact rows deleted)
+============================================================
+(none)
+
+============================================================
+8. HARD DELETES DURING LOCATION MERGE
+============================================================
+(none)
+
+============================================================
+9. LOCATION CONSOLIDATION SPLIT
+============================================================
+Grid cells preserved as-is: 921; non-grid locations eligible for merge: 2529
+Location consolidation: 2032 original, 61 clusters merged
+Grid cells preserved as-is: 921; non-grid locations eligible for merge: 134
+Location consolidation: 1055 original, 24 clusters merged
+Grid cells preserved as-is: 921; non-grid locations eligible for merge: 97
+Location consolidation: 1018 original, 17 clusters merged
+
+============================================================
+10. MAPPING LOOKUP FAILURES (top 25 by count)
+============================================================
+
+============================================================
+11. VALUE TRANSFORM FAILURES (top 25 by count)
+============================================================
+   2165 Concat: column 'Concentration (µg)' missing or null in row N
+    410 Concat: column 'Identification method N' missing or null in row N
+    406 Concat: column 'Longitude' missing or null in row N
+    406 Concat: column 'Latitude' missing or null in row N
+    256 Concat: column 'locality' missing or null in row N
+    256 Concat: column 'decimalLongitude' missing or null in row N
+    256 Concat: column 'decimalLatitude' missing or null in row N
+      4 Concat: column 'Synergist concentration' missing or null in row N
+
+============================================================
+12. UNIQUE ERROR MESSAGES (top 30 by count)
+============================================================
+      1 Failed to process source 'ERAN-Land Climate': Required field 'value' in table 'fact_environment' has null value
+
+============================================================
+13. UNIQUE WARNING MESSAGES (top 30 by count)
+============================================================
+   2165 Concat: column 'Concentration (µg)' missing or null in row N
+    410 Concat: column 'Identification method N' missing or null in row N
+    406 Concat: column 'Longitude' missing or null in row N
+    406 Concat: column 'Latitude' missing or null in row N
+    256 Concat: column 'locality' missing or null in row N
+    256 Concat: column 'decimalLongitude' missing or null in row N
+    256 Concat: column 'decimalLatitude' missing or null in row N
+      4 Concat: column 'Synergist concentration' missing or null in row N
+      3   N rows still have no resistance_status (no usable counts and no pre-computed mortality).
+      3 No burden records with valid data found
+      3 Found N duplicates in vector_observations
+      3 Found N duplicates in resistance_tests
+      3   Could not resolve a target location for N orphan values; leaving those rows as-is.
+
+============================================================
+14. FINAL CONSOLIDATION RESULT
+============================================================
+2026-09-25 05:41:48,670 - __main__ - INFO - ============================================================
+--
+2026-09-25 05:41:58,146 - utilities.consolidation - INFO - CONSOLIDATION COMPLETE
+2026-09-25 05:41:58,146 - utilities.consolidation - INFO -   Total locations:       1011
+2026-09-25 05:41:58,146 - utilities.consolidation - INFO -   Valid country codes:   953
+2026-09-25 05:41:58,146 - utilities.consolidation - INFO -   Burden records fixed:  0
+2026-09-25 05:41:58,146 - utilities.consolidation - INFO -   Remaining orphans:     {}
+2026-09-25 05:41:58,147 - utilities.consolidation - INFO - ============================================================
+2026-09-25 05:41:58,147 - __main__ - INFO - Location consolidation: 1018 original, 17 clusters merged
+2026-09-25 05:41:58,147 - __main__ - WARNING - Found 440 duplicates in vector_observations
+2026-09-25 05:41:58,147 - __main__ - WARNING - Found 192 duplicates in resistance_tests
+2026-09-25 05:53:35,326 - __main__ - INFO - Loaded configuration from /home/void/Documents/codes/vbd-cdm/data-integration/base_config.yaml
+2026-09-25 05:53:35,327 - __main__ - INFO - ===== Processing source: MAP Pf Incidence Count (Kenya) =====
+2026-09-25 05:53:35,329 - __main__ - INFO - Found 7 files in folder /mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Incidence_Count_KEN
+2026-09-25 05:53:35,329 - __main__ - INFO - Initializing dim_time from 1900-01-01 to 2026-12-31
+
+============================================================
+15. INGEST-SIDE TABLE COUNTS (from 'Loading ... with N rows')
+============================================================
+-----                                     --- -------
+dim_disease                             18876     85
+dim_insecticide                         10589      9
+dim_location                           902763    122
+dim_resistance_test_type                10589      9
+dim_socioeconomic_indicator             99660      1
+dim_source                             902763    122
+dim_vector                              10717     10
+table                                     sum batches
+
+=== END OF SUMMARY ===

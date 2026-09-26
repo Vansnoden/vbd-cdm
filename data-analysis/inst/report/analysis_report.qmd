@@ -205,6 +205,74 @@ if (length(p) >= 1 && file.exists(p[1])) {
 }
 ```
 
+## Interventions
+
+```{r}
+iv <- res$intervention_summary
+if (!is.null(err_of(iv))) {
+  note("Intervention summary did not run: ", err_of(iv))
+} else if (is.data.frame(iv$by_type) && nrow(iv$by_type) > 0) {
+  iv$by_type |> gt::gt() |> gt::tab_header(title = "Interventions by type")
+} else {
+  note("No interventions recorded for this study area.")
+}
+```
+
+```{r, fig.width=12, fig.height=5, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_summary)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention summary figure available.")
+}
+```
+
+### Impact on disease burden
+
+```{r}
+ib <- res$intervention_burden
+if (!is.null(err_of(ib))) {
+  note("Intervention–burden analysis did not run: ", err_of(ib))
+} else if (is.data.frame(ib$by_type) && nrow(ib$by_type) > 0) {
+  ib$by_type |> gt::gt() |>
+    gt::tab_header(title = "Pre/post change in cases by intervention type")
+} else {
+  note("No usable pre/post comparisons for case data.")
+}
+```
+
+```{r, fig.width=12, fig.height=6, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_burden)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention–burden figure available.")
+}
+```
+
+### Impact on vector abundance
+
+```{r}
+ivv <- res$intervention_vector
+if (!is.null(err_of(ivv))) {
+  note("Intervention–vector analysis did not run: ", err_of(ivv))
+} else if (is.data.frame(ivv$by_type) && nrow(ivv$by_type) > 0) {
+  ivv$by_type |> gt::gt() |>
+    gt::tab_header(title = "Pre/post change in vector abundance by intervention type")
+} else {
+  note("No usable pre/post comparisons for vector data.")
+}
+```
+
+```{r, fig.width=12, fig.height=6, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_vector)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention–vector figure available.")
+}
+```
+
 ## Case data (context)
 
 ```{r}

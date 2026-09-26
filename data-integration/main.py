@@ -17,9 +17,13 @@ from sqlalchemy import text
 import pandas as pd
 from dotenv import load_dotenv
 
+
 from utilities.consolidation import (
-    DataConsolidator, run_consolidation, 
-    enrich_location_dataframe)
+    DataConsolidator, run_consolidation,
+    enrich_location_dataframe,
+    ISO_COUNTRY_CODES,
+    get_iso_country_code,
+)
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.absolute()
@@ -332,84 +336,226 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
         return False
 
 
-def run_consolidation_step():
-    """Run the data consolidation step."""
+def run_consolidation_step(core_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Run the full data consolidation step.
+
+    Parameters
+    ----------
+    core_cfg : dict
+        The `core:` block from base_config.yaml. Expected keys:
+            countries         : list[str]  — ISO-2 or ISO-3 codes, e.g. ['KEN']
+            vocabulary.gadm_gpkg : str     — path to the GADM GeoPackage
+
+    Returns
+    -------
+    dict
+        The result dictionary from DataConsolidator.consolidate_all(),
+        or {'error': <message>} if consolidation failed.
+    """
     logger.info("=" * 60)
     logger.info("RUNNING DATA CONSOLIDATION")
     logger.info("=" * 60)
-    
+
+    core_cfg = core_cfg or {}
+
+    vocabulary    = core_cfg.get("vocabulary", {}) or {}
+    gadm_gpkg     = vocabulary.get("gadm_gpkg")
+    country_codes = core_cfg.get("countries")
+
+    # Normalise country codes: GADM layer filtering expects ISO-3
+    # (GID_0 values like 'KEN'). Accept either ISO-2 or ISO-3 from config
+    # and translate to ISO-3 here so the caller does not have to know.
+    if country_codes:
+        iso3_codes = []
+        for code in country_codes:
+            iso2 = get_iso_country_code(code)
+            if iso2 is None:
+                logger.warning(
+                    f"Unrecognised country code '{code}' in core.countries; "
+                    f"passing through unchanged."
+                )
+                iso3_codes.append(code)
+                continue
+            iso3 = ISO_COUNTRY_CODES.get(iso2)
+            iso3_codes.append(iso3 or code)
+        country_codes = iso3_codes
+
+    if gadm_gpkg:
+        logger.info(f"  GADM GeoPackage: {gadm_gpkg}")
+    else:
+        logger.info("  No GADM GeoPackage configured; skipping geographic "
+                    "resolution (parent assignment, admin concepts).")
+    if country_codes:
+        logger.info(f"  Country filter:  {country_codes}")
+
+    consolidator = None
     try:
         consolidator = DataConsolidator()
+
+        # 1. Pre-flight: fill any remaining NULL country codes from
+        #    coordinates before the main consolidation pass.
         try:
-            # Fix country codes first
             fixed = consolidator.fix_location_country_codes()
-            logger.info(f"Fixed country codes for {fixed} locations")
-            
-            def _counts(session):
-                from sqlalchemy import text
-                tables = [
-                    'fact_vector_observation', 'fact_disease_case', 'fact_insecticide_resistance',
-                    'fact_bionomics', 'fact_intervention', 'fact_socioeconomic_condition',
-                    'fact_health_facility', 'fact_disease_burden', 'fact_environment',
-                ]
-                return {t: session.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar()
-                        for t in tables}
+            logger.info(f"  Pre-flight: filled country codes for {fixed} locations")
+        except Exception as e:
+            # Non-fatal: consolidation will try again inside consolidate_all.
+            logger.warning(f"  Pre-flight country-code fill failed: {e}")
 
-            # Run full consolidation
-            results = consolidator.consolidate_all()
-            
-            # Log summary
-            loc_results = results.get('locations', {})
-            if isinstance(loc_results, dict):
-                original = loc_results.get('original_count', 0)
-                clusters = loc_results.get('cluster_results', {})
-                merged = clusters.get('merged_count', 0) if isinstance(clusters, dict) else 0
-                logger.info(f"Location consolidation: {original} original, "
-                            f"{merged} clusters merged")
-            
-            vocab_results = results.get('vocabulary', {})
-            for table, result in vocab_results.items():
-                if isinstance(result, dict):
-                    dup_count = result.get('duplicates_found', 0)
-                    if dup_count > 0:
-                        logger.info(f"Consolidated {dup_count} duplicates in {table}")
-            
-            dup_results = results.get('duplicates', {})
-            for table, result in dup_results.items():
-                if isinstance(result, dict):
-                    dup_count = result.get('duplicate_count', 0)
-                    if dup_count > 0:
-                        logger.warning(f"Found {dup_count} duplicates in {table}")
-            
-            return results
-        finally:
-            consolidator.close()
+        # 2. Single consolidation pass. The previous implementation called
+        #    consolidate_all() twice — once with GADM args, once without —
+        #    which discarded the GADM work and doubled the runtime.
+        results = consolidator.consolidate_all(
+            gadm_gpkg=gadm_gpkg,
+            country_codes=country_codes,
+        )
+
+        # 3. Log a summary using the keys consolidate_all actually returns.
+        _log_consolidation_summary(results)
+
+        return results
+
     except Exception as e:
-        logger.error(f"Consolidation failed: {e}")
-        return {'error': str(e)}
+        logger.error(f"Consolidation failed: {e}", exc_info=True)
+        return {"error": str(e)}
+    finally:
+        if consolidator is not None:
+            consolidator.close()
 
 
-def run_burden_expansion():
+def _log_consolidation_summary(results: Dict[str, Any]) -> None:
+    """Emit a human-readable summary of a consolidate_all() result dict."""
+    logger.info("-" * 60)
+    logger.info("CONSOLIDATION SUMMARY")
+    logger.info("-" * 60)
+
+    # Locations
+    loc = results.get("locations", {})
+    if isinstance(loc, dict):
+        original = loc.get("original_count", 0)
+        grid     = loc.get("grid_count", 0)
+        non_grid = loc.get("non_grid_count", 0)
+        clusters = loc.get("cluster_results", {}) or {}
+        merged   = clusters.get("merged_count", 0) if isinstance(clusters, dict) else 0
+        name_dups = loc.get("name_duplicate_groups", []) or []
+        final_fix = loc.get("final_country_fixes", 0)
+
+        logger.info(
+            f"  Locations:  {original} total, {grid} grid (preserved), "
+            f"{non_grid} non-grid"
+        )
+        logger.info(f"              {len(name_dups)} name-duplicate groups merged")
+        logger.info(f"              {merged} proximity clusters merged")
+        logger.info(f"              {final_fix} final country-code fixes")
+
+    # Foreign keys
+    fk = results.get("foreign_key_alignment", {})
+    if isinstance(fk, dict):
+        summary = fk.get("summary", {}) or {}
+        logger.info(
+            f"  Foreign keys: {summary.get('total_fixed', 0)} rows fixed, "
+            f"{summary.get('orphans_found', 0)} orphans found"
+        )
+
+    # Vocabulary standardisation (raw value -> concept)
+    vstd = results.get("vocabulary_standard", {}) or {}
+    for key, stats in vstd.items():
+        if isinstance(stats, dict):
+            logger.info(
+                f"  Standardised {key}: {stats.get('matched', 0)}/"
+                f"{stats.get('total', 0)} matched "
+                f"({stats.get('exact', 0)} exact, "
+                f"{stats.get('normalized', 0)} normalized, "
+                f"{stats.get('fuzzy', 0)} fuzzy)"
+            )
+
+    # Vocabulary consolidation (duplicate concept merging)
+    vcons = results.get("vocabulary_consolidate", {}) or {}
+    for table, stats in vcons.items():
+        if isinstance(stats, dict):
+            dup_count = stats.get("duplicates_found", 0)
+            if dup_count > 0:
+                logger.info(f"  Merged {dup_count} duplicate groups in {table}")
+
+    # Fact-table duplicates found (pre-resolution)
+    dups = results.get("duplicates", {}) or {}
+    for table, stats in dups.items():
+        if isinstance(stats, dict):
+            dup_count = stats.get("duplicate_count", 0)
+            if dup_count > 0:
+                logger.warning(f"  Found {dup_count} duplicate groups in {table}")
+
+    # Country code validation
+    validation = results.get("validation", {}) or {}
+    if validation:
+        logger.info(
+            f"  Country codes: {validation.get('valid', 0)} valid, "
+            f"{validation.get('invalid', 0)} invalid, "
+            f"{validation.get('missing', 0)} missing "
+            f"(of {validation.get('total', 0)} locations)"
+        )
+
+    # Hierarchy
+    hierarchy = results.get("hierarchy", {}) or {}
+    if hierarchy:
+        logger.info(
+            f"  Hierarchy: {hierarchy.get('placed', 0)}/"
+            f"{hierarchy.get('total_non_admin', 0)} non-admin locations "
+            f"placed under a parent"
+        )
+
+    # Remaining orphans
+    orphans = results.get("remaining_orphans", {}) or {}
+    if orphans:
+        logger.warning(f"  Remaining orphans: {len(orphans)} FK(s)")
+        for key, count in orphans.items():
+            logger.warning(f"    {key}: {count}")
+
+    # Burden
+    burden_fixed = results.get("burden_fixed", 0)
+    if burden_fixed:
+        logger.info(f"  Burden records repaired: {burden_fixed}")
+
+    logger.info("-" * 60)
+
+
+def run_burden_expansion(force: bool = True) -> bool:
     """
-    Run the burden expansion script to create daily case records.
-    This is a standalone function that can be called from main.
+    Expand yearly disease-burden rows into daily case records.
+
+    Delegates to DataConsolidator.expand_burden_to_daily(), which is the
+    single implementation shared with consolidate_all() and the
+    fix_cases.py CLI.
+
+    `force=True` matches the caller's intent: this entry point exists for
+    the case where consolidation was skipped or is being re-run, so any
+    previous ESTIMATE rows should be replaced.
     """
     logger.info("=" * 60)
     logger.info("RUNNING BURDEN EXPANSION")
     logger.info("=" * 60)
-    
-    try:
-        from fix_cases import expand_burden_to_daily
-        expand_burden_to_daily()
-        logger.info("Burden expansion completed successfully")
-        return True
-    except ImportError:
-        logger.warning("fix_cases.py not found, attempting to use consolidation...")
-        return False
-    except Exception as e:
-        logger.error(f"Burden expansion failed: {e}")
-        return False
 
+    from utilities.consolidation import DataConsolidator
+
+    consolidator = None
+    try:
+        consolidator = DataConsolidator()
+        stats = consolidator.expand_burden_to_daily(force=force)
+        logger.info(
+            f"Burden expansion completed: "
+            f"{stats['inserted']} inserted, "
+            f"{stats['already_present']} already present, "
+            f"{stats['skipped']} skipped, "
+            f"{stats['errors']} errors"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Burden expansion failed: {e}", exc_info=True)
+        return False
+    finally:
+        if consolidator is not None:
+            consolidator.close()
+            
 
 def generate_summary(output_dir: str = "outputs"):
     """Generate database summary reports."""
@@ -468,8 +614,9 @@ def main():
                 run_ingestion_for_source(source_cfg)
     
     # 1.5. Consolidate data
+    core = config.get("core", {})
     if run_consolidate:
-        run_consolidation_step()
+        run_consolidation_step(core)
     
     # --- 2. Generate summary ---
     if run_summary:

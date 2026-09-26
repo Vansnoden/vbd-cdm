@@ -23,9 +23,32 @@
 # at the shared natural key.
 
 core:
-  vocabulary: "data/vocabulary.csv"
-  # study_region: "Siaya"
-  # study_period: "2019-2025"
+  vocabulary:
+    gadm_gpkg: "vocabularies/gadm41_KEN.gpkg"
+    ncbi_csv:  "vocabularies/ncbi_vectors.csv"
+    idomal_csv: "vocabularies/idomal_diseases.csv"
+    diagnostic_methods_csv:  "vocabularies/diagnostic_methods.csv"
+    collection_methods_csv:  "vocabularies/collection_methods.csv"
+
+  # Countries to load GADM admin units for. GADM GID_0 codes (3-letter).
+  countries: ["KEN"]
+
+  # Which admin level defines the study area, and which names at that
+  # level are in scope. Substring matching is gone; this is exact.
+  study_area:
+    admin_level: "admin2"
+    names:
+      - "Siaya"
+      - "Busia"
+      - "Bungoma"
+      - "Kakamega"
+      - "Kisumu"
+      - "Nandi"
+      - "Vihiga"
+
+  # Whether to keep all locations within the study area's admin units,
+  # or only locations whose parent chain reaches a listed unit.
+  grid_scope: "study_area"   # or "countries" to keep every grid cell
 
 data_sources:
 
@@ -37,7 +60,7 @@ data_sources:
     source_name: "Vector Atlas Occurrence"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/va_data_filtered_species.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/occurrence/va_data_filtered_species.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -51,7 +74,7 @@ data_sources:
     source_name: "GBIF Occurrence"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/occurrence/kenya_funestus_gambiae_stephensi_GBIF.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/occurrence/kenya_funestus_gambiae_stephensi_GBIF.csv"
     extension_options:
       sep: "\t"
       quotechar: '"'
@@ -69,7 +92,7 @@ data_sources:
     source_name: "IRMapper 1: WHO susceptibility, complex/subgroup"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/1_standard_who_susc_test_complex_subgroup.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -83,7 +106,7 @@ data_sources:
     source_name: "IRMapper 2: WHO susceptibility, species"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/2_standard_who_susc_test_species.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/2_standard_who_susc_test_species.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -97,7 +120,7 @@ data_sources:
     source_name: "IRMapper 3: CDC bottle bioassay, complex/subgroup"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/3_CDC-bottle-bioassay_complex-subgroup.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -111,7 +134,7 @@ data_sources:
     source_name: "IRMapper 4: paired synergist bioassays, complex/subgroup"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/4_paired_synergist_bioassays_complex_subgroup.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -125,7 +148,7 @@ data_sources:
     source_name: "IRMapper 5: intensity bioassay, complex/subgroup"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/5_intensity_bioassay_complex_subgroup.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -150,7 +173,7 @@ data_sources:
     source_name: "IRMapper 6: VGSC allele frequency, complex/subgroup"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/6_Vgsc-allele-freq_complex-subgroup.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/6_Vgsc-allele-freq_complex-subgroup.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -164,7 +187,7 @@ data_sources:
     source_name: "IRMapper 7: VGSC allele frequency, species"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/7_Vgsc-allele-freq_species.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/7_Vgsc-allele-freq_species.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -178,7 +201,7 @@ data_sources:
     source_name: "IRMapper 8: VGSC allele frequency, survivors vs dead"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/resistance/8_Vgsc-allele-freq_survivors-dead.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/resistance/8_Vgsc-allele-freq_survivors-dead.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -196,7 +219,7 @@ data_sources:
     source_name: "ERA5-Land Climate"
     type: "folder"
     extension: "nc"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/climate"
     matching: "mappings/era5_climate.mapping.csv"
     extract_mode: "timeseries"
 
@@ -218,7 +241,7 @@ data_sources:
     source_name: "MAP Pf Incidence Count (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Incidence_Count_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pf_Incidence_Count_KEN"
     matching: "mappings/malariaatlas_pf_incidence_count.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -230,7 +253,7 @@ data_sources:
     source_name: "MAP Pf Incidence Rate (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Incidence_Rate_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pf_Incidence_Rate_KEN"
     matching: "mappings/malariaatlas_pf_incidence_rate.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -242,7 +265,7 @@ data_sources:
     source_name: "MAP Pf Parasite Rate (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Parasite_Rate_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pf_Parasite_Rate_KEN"
     matching: "mappings/malariaatlas_pf_parasite_rate.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -259,7 +282,7 @@ data_sources:
   #   source_name: "MAP Pf Reproductive Number (Kenya)"
   #   type: "folder"
   #   extension: "tif"
-  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Reproductive_Number_KEN"
+  #   path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pf_Reproductive_Number_KEN"
   #   matching: "mappings/malariaatlas_pf_reproductive_number.mapping.csv"
   #   extract_mode: "chunked"
   #   extension_options:
@@ -284,7 +307,7 @@ data_sources:
     source_name: "MAP Pv Incidence Count (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pv_Incidence_Count_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pv_Incidence_Count_KEN"
     matching: "mappings/malariaatlas_pv_incidence_count.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -296,7 +319,7 @@ data_sources:
     source_name: "MAP Pv Incidence Rate (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pv_Incidence_Rate_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pv_Incidence_Rate_KEN"
     matching: "mappings/malariaatlas_pv_incidence_rate.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -308,7 +331,7 @@ data_sources:
     source_name: "MAP Pv Parasite Rate (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pv_Parasite_Rate_KEN"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/disease_incidence/Global_Pv_Parasite_Rate_KEN"
     matching: "mappings/malariaatlas_pv_parasite_rate.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -324,7 +347,7 @@ data_sources:
     source_name: "Kenya Health Facilities"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/health_facilities/kmhfr_facilities.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/health_facilities/kmhfr_facilities.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -342,7 +365,7 @@ data_sources:
     source_name: "World Bank Kenya Indicators"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -371,7 +394,7 @@ data_sources:
     source_name: "ITN Use (itnuse.org)"
     type: "file"
     extension: "csv"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/itn_usage_data.csv"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/intervention_data/itn_usage_data.csv"
     extension_options:
       sep: ","
       quotechar: '"'
@@ -385,7 +408,7 @@ data_sources:
     source_name: "MAP ITN Access (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/map_itn_access_2000_2025"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/intervention_data/map_itn_access_2000_2025"
     matching: "mappings/map_itn_access.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -397,7 +420,7 @@ data_sources:
     source_name: "MAP ITN Use (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/map_itn_use_2000_2025"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/intervention_data/map_itn_use_2000_2025"
     matching: "mappings/map_itn_use.mapping.csv"
     extract_mode: "chunked"
     extension_options:
@@ -409,7 +432,7 @@ data_sources:
     source_name: "MAP ITN Use/Access Ratio (Kenya)"
     type: "folder"
     extension: "tiff"
-    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/intervention_data/map_itn_use_rate_2000_2025"
+    path: "/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/west_kenya_data/intervention_data/map_itn_use_rate_2000_2025"
     matching: "mappings/map_itn_use_rate.mapping.csv"
     extract_mode: "chunked"
     extension_options:

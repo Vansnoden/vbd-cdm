@@ -116,7 +116,8 @@ list(
       countries = cfg$countries,
       locations = cfg$locations,
       db_path   = cfg$db_path,
-      db_url    = cfg$db_url
+      db_url    = cfg$db_url,
+      descendants = TRUE
     )
   ),
   
@@ -164,6 +165,11 @@ list(
   tar_target(
     burden,
     query_burden(cfg, locations$location_id)
+  ),
+  
+  tar_target(
+    interventions,
+    query_interventions(cfg, locations$location_id)
   ),
   
   # =========================================================================
@@ -263,6 +269,35 @@ list(
     analyze_bionomics(bionomics)
   ),
   
+  tar_target(
+    intervention_summary,
+    analyze_intervention_summary(interventions)
+  ),
+  
+  tar_target(
+    intervention_burden,
+    analyze_intervention_impact(
+      interventions = interventions,
+      outcome       = cases_validated,
+      outcome_col   = "case_count",
+      window_months = 24L,
+      min_events    = 1L,
+      min_obs       = 2L
+    )
+  ),
+  
+  tar_target(
+    intervention_vector,
+    analyze_intervention_impact(
+      interventions = interventions,
+      outcome       = vectors_validated,
+      outcome_col   = "count",
+      window_months = 24L,
+      min_events    = 1L,
+      min_obs       = 2L
+    )
+  ),
+  
   # =========================================================================
   # 5. Case-side analyses (CONTEXT; may be empty)
   # =========================================================================
@@ -301,6 +336,31 @@ list(
   ),
   
   tar_target(
+    fig_intervention_summary,
+    plot_intervention_summary(intervention_summary, cfg$study_name, fig_dir)
+  ),
+  
+  tar_target(
+    fig_intervention_burden,
+    plot_intervention_impact(
+      result        = intervention_burden,
+      outcome_label = "cases",
+      study_name    = cfg$study_name,
+      out_dir       = fig_dir
+    )
+  ),
+  
+  tar_target(
+    fig_intervention_vector,
+    plot_intervention_impact(
+      result        = intervention_vector,
+      outcome_label = "vectors",
+      study_name    = cfg$study_name,
+      out_dir       = fig_dir
+    )
+  ),
+  
+  tar_target(
     fig_seasonal,
     plot_seasonal(seasonal, cfg$study_name, fig_dir)
   ),
@@ -333,6 +393,9 @@ list(
       fig_vector_climate  = fig_vector_climate,
       fig_resistance      = fig_resistance,
       fig_bionomics       = fig_bionomics,
+      fig_intervention_summary = fig_intervention_summary,
+      fig_intervention_burden  = fig_intervention_burden,
+      fig_intervention_vector  = fig_intervention_vector,
       fig_seasonal        = fig_seasonal
     )
   ),

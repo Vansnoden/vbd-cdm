@@ -177,6 +177,26 @@ titled panel rather than aborting the figure.
 
 ---
 
+## `analysis_intervention`
+
+**Functions:** `analyze_intervention_summary(interventions)`,
+`analyze_intervention_impact(interventions, outcome, outcome_col, ...)`
+**Targets:** `intervention_summary`, `intervention_burden`, `intervention_vector`
+**Figures:** `plot_intervention_summary(...)`, `plot_intervention_impact(...)`
+
+Two descriptive analyses. The summary tabulates intervention types, coverage,
+and temporal distribution. The impact analysis is a pre/post event study:
+for each intervention start date, it compares the mean outcome in the
+`window_months` before against the same window after, aligned as an
+event-study curve.
+
+**Not a causal estimate.** There is no control group, no counterfactual, and
+no adjustment for seasonality beyond the symmetry of the before/after
+windows. It answers "did the outcome change around intervention dates",
+not "did the intervention cause the change".
+
+---
+
 ## `analysis_seasonal`
 
 **Function:** `analyze_seasonal(cases, value_col = "case_count")`

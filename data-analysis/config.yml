@@ -22,9 +22,12 @@ vbd-cdm-analysis:
   # locations: ["ALL"]                  # every location inside the country filter
   # locations: ["Siaya County"]         # exact or substring match on dim_location.name
   # locations: ["Siaya", "Mombasa"]     # multiple; OR-ed together
-  locations: ["Siaya"]
+  locations: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
+  # study_area:
+  #  admin_level: "admin2"
+  #  names: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
 
-  start_year: 1984
+  start_year: 2015
   end_year:   2025
 
   # diseases: ["ALL"]                     # no disease filter

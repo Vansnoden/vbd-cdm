@@ -43,6 +43,127 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 MAX_IN_VARS = 900
+# =============================================================================
+# Burden-expansion parameters
+#
+# Single source of truth for the seasonal and weekly shape of the synthetic
+# daily case series. Previously these values lived only in fix_cases.py.
+# =============================================================================
+
+# Tropical seasonal curve: dry-season trough in Jan–Feb and Nov–Dec,
+# transmission peak in the long-rains window Apr–Jun.
+_BURDEN_SEASONAL_FACTORS = {
+    1: 0.55, 2: 0.50, 3: 0.65, 4: 1.35, 5: 1.50, 6: 1.40,
+    7: 1.30, 8: 1.10, 9: 0.85, 10: 0.65, 11: 0.55, 12: 0.50,
+}
+
+# Day-of-week multipliers. Monday = 1 in isocalendar(); Saturday = 6,
+# Sunday = 7 — reported case counts dip on weekends.
+_BURDEN_WEEKLY_PATTERNS = {
+    1: 0.95, 2: 1.00, 3: 1.05, 4: 1.10, 5: 1.10, 6: 0.90, 7: 0.85,
+}
+
+
+def _burden_seasonal_factor(month: int) -> float:
+    return _BURDEN_SEASONAL_FACTORS.get(month, 1.0)
+
+
+def _burden_weekly_factor(date: "datetime") -> float:
+    return _BURDEN_WEEKLY_PATTERNS.get(date.isocalendar()[2], 1.0)
+
+
+def _burden_generate_daily_case_counts(
+    annual_cases: float,
+    year: int,
+    location_id: int,
+    base_variation: float = 0.25,
+    seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Expand an annual case total into a realistic daily series.
+
+    The shape is the product of six multiplicative factors:
+
+        seasonal(month) * weekly(dow) * intra_month(day_of_month, month)
+            * lognormal_noise(sigma = base_variation * 0.7)
+            * holiday(christmas, new year, easter)
+            * spike(random, ~0.5% of days)
+
+    The factors are normalised so their sum equals the number of days in
+    the year. Multiplying by `annual_cases` therefore preserves the annual
+    total exactly, up to integer rounding.
+
+    The random seed is combined with `location_id` and `year`, so two
+    locations in the same year do not share a random sequence, but the
+    same (location, year) reproduces identically across runs.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: date_id, year, month, case_count, location_id.
+        One row per day of `year`.
+    """
+    if seed is not None:
+        np.random.seed(seed + int(location_id) + int(year))
+
+    start_date = datetime(year, 1, 1)
+    end_date   = datetime(year, 12, 31)
+    date_range = pd.date_range(start_date, end_date)
+
+    daily_factors: List[float] = []
+    for date in date_range:
+        month = date.month
+
+        seasonal_factor = _burden_seasonal_factor(month)
+        weekly_factor   = _burden_weekly_factor(date)
+
+        day_in_month = date.day
+        days_in_month = (
+            date.replace(month=month % 12 + 1, day=1)
+            - date.replace(day=1)
+        ).days
+        intra_month_phase  = (day_in_month / max(days_in_month, 1)) * 2 * np.pi
+        intra_month_factor = 1.0 + 0.08 * np.sin(intra_month_phase + month * 0.5)
+
+        noise = np.random.lognormal(0, base_variation * 0.7)
+
+        holiday_factor = 1.0
+        if date.month == 12 and date.day in (25, 26):
+            holiday_factor = 0.80
+        elif date.month == 1 and date.day == 1:
+            holiday_factor = 0.75
+        elif date.month == 4 and 1 <= date.day <= 10:
+            holiday_factor = 0.85
+        elif date.month == 5 and date.day <= 5:
+            holiday_factor = 0.85
+
+        spike_factor = 1.0
+        if np.random.random() < 0.005:
+            spike_factor = 1.0 + np.random.exponential(0.5)
+
+        daily_factors.append(
+            seasonal_factor * weekly_factor * intra_month_factor
+            * noise * holiday_factor * spike_factor
+        )
+
+    # Normalise so sum(factors) == number of days; annual total preserved.
+    total_factor = sum(daily_factors)
+    if total_factor > 0:
+        daily_factors = [f / total_factor * len(date_range) for f in daily_factors]
+
+    rows = []
+    for date, factor in zip(date_range, daily_factors):
+        daily_cases = max(1, int(round(annual_cases * factor)))
+        rows.append({
+            "date_id":     date.strftime("%Y-%m-%d"),
+            "year":        year,
+            "month":       date.month,
+            "case_count":  daily_cases,
+            "location_id": location_id,
+        })
+
+    return pd.DataFrame(rows)
+
 _GRID_NAME_RE = re.compile(r'^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$')
 _SPECIES_QUALIFIER_RE = re.compile(r"\s+(complex|subgroup|group)$")
 _SPECIES_STRAIN_RE    = re.compile(r"\s+(?:s\s*form|m\s*form|form)\b.*$")
@@ -72,10 +193,6 @@ _SPECIES_STRAIN_RE    = re.compile(r"\s+(?:s\s*form|m\s*form|form)\b.*$")
 
 _FACT_AGGREGATION_SPEC = {
     "fact_vector_observation": {
-        # Full unique constraint: (location_id, date_id, vector_code,
-        # source_code, life_stage, sex, collection_method).
-        # Do NOT omit vector_code — dropping it would merge different
-        # species observations when reassigning location_id.
         "natural_key": ["location_id", "date_id", "vector_code", "source_code",
                         "life_stage", "sex", "collection_method"],
         "sums":  ["count"],
@@ -83,8 +200,6 @@ _FACT_AGGREGATION_SPEC = {
         "first": ["tested_for_pathogen", "infection_status"],
     },
     "fact_insecticide_resistance": {
-        # Unique constraint: (location_id, date_id, vector_code,
-        # insecticide_code, test_type_code, source_code, concentration).
         "natural_key": ["location_id", "date_id", "vector_code", "insecticide_code",
                         "test_type_code", "source_code", "concentration"],
         "sums": [
@@ -97,9 +212,14 @@ _FACT_AGGREGATION_SPEC = {
         ],
         "means": [],
         "first": ["exposure_time", "vgsc_generation"],
+        # mortality and resistance_status are functions of the summed
+        # counts. They are NULLed out during aggregation and recomputed
+        # afterwards by _compute_resistance_status(). Storing the pre-
+        # aggregation values would leave a stale rate paired with the
+        # summed counts.
+        "derived": ["mortality", "resistance_status"],
     },
     "fact_bionomics": {
-        # Unique constraint: (location_id, date_id, vector_code, source_code).
         "natural_key": ["location_id", "date_id", "vector_code", "source_code"],
         "sums":  [],
         "means": ["biting_rate"],
@@ -107,33 +227,31 @@ _FACT_AGGREGATION_SPEC = {
                   "resting_behavior", "larval_site_type"],
     },
     "fact_environment": {
-        # Unique constraint: (location_id, date_id, variable) — NO source_code.
         "natural_key": ["location_id", "date_id", "variable"],
         "sums":  [],
         "means": ["value"],
         "first": ["source_code"],
     },
     "fact_disease_case": {
-        # Unique constraint: (location_id, date_id_onset, disease_code,
-        # identification_method_code, source_code, case_status,
-        # age_group, sex).
         "natural_key": ["location_id", "date_id_onset", "disease_code",
                         "identification_method_code", "source_code",
                         "case_status", "age_group", "sex"],
         "sums":  ["case_count"],
         "means": [],
-        "first": ["date_id_reported", "host_type", "outcome"],
+        # age_years is NOT part of the natural key (age_group is), so
+        # colliding rows can legitimately disagree. MIN is the safest
+        # non-lossy choice for an integer age; AVG would change the
+        # column's meaning. Adding it here is required — without it, the
+        # column is silently dropped by the aggregation INSERT.
+        "first": ["date_id_reported", "host_type", "outcome", "age_years"],
     },
     "fact_disease_burden": {
-        # Unique constraint: (location_id, year, disease_code) — NO source_code.
-        "natural_key": ["location_id", "year", "disease_code", 'pathogen_species'],
+        "natural_key": ["location_id", "year", "disease_code", "pathogen_species"],
         "sums":  ["cases_mean"],
         "means": ["incidence_rate", "prevalence_rate", "mortality_rate"],
         "first": ["source_code"],
     },
     "fact_intervention": {
-        # Unique constraint: (location_id, date_start, target_disease_code,
-        # source_code, intervention_type).
         "natural_key": ["location_id", "date_start", "target_disease_code",
                         "source_code", "intervention_type"],
         "sums":  [],
@@ -141,15 +259,13 @@ _FACT_AGGREGATION_SPEC = {
         "first": ["date_end"],
     },
     "fact_socioeconomic_condition": {
-        # Unique constraint: (location_id, year, indicator_code) — NO source_code.
         "natural_key": ["location_id", "year", "indicator_code"],
         "sums":  [],
         "means": ["indicator_value"],
         "first": ["source_code"],
     },
-    # fact_health_facility has no natural aggregation policy — its unique
-    # key is facility_code, and colliding facility rows would need manual
-    # review. Falls back to plain UPDATE + collision log.
+    # fact_health_facility has no aggregation policy — falls back to
+    # plain UPDATE + collision log.
 }
 
 
@@ -460,6 +576,31 @@ class DataConsolidator:
     # ===================== FOREIGN KEY ALIGNMENT =====================
 
     def align_all_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
+        """
+        Align every fact-to-dimension foreign key.
+
+        Order matters and is deliberate:
+
+            Step 1  _clean_dimension_tables
+                    Logs dimension rows with no fact references. Read-only.
+
+            Step 2  _align_fact_foreign_keys
+                    Attempts to REPAIR orphans by name-matching the raw FK
+                    value against the dimension's name column. Only the
+                    values it cannot repair are NULLed or quarantined.
+
+            Step 3  _align_dimension_foreign_keys
+                    Catches any FK pair that step 2 did not cover — either
+                    because the pair is not in the hardcoded repair list, or
+                    because the fact alignment was skipped for that table.
+                    NULLs the remaining unresolvable values in nullable
+                    columns.
+
+        Running step 3 before step 2 (the previous order) nulled every
+        orphan before step 2 could see it, silently disabling the repair
+        pass. That is why so many location/vector/source orphans survived
+        consolidation in earlier revisions.
+        """
         logger.info("=" * 60)
         logger.info("ALIGNING ALL FOREIGN KEYS")
         logger.info("=" * 60)
@@ -470,32 +611,42 @@ class DataConsolidator:
             'summary': {
                 'total_fixed': 0,
                 'tables_processed': 0,
-                'orphans_found': 0
-            }
+                'orphans_found': 0,
+            },
         }
 
-        logger.info("Step 1: Cleaning dimension tables...")
+        logger.info("Step 1: Auditing dimension tables...")
         self._clean_dimension_tables(dry_run)
 
-        logger.info("Step 2: Aligning dimension FKs...")
-        dimension_alignments = self._align_dimension_foreign_keys(dry_run)
-        results['dimensions'] = dimension_alignments
-
-        logger.info("Step 3: Aligning fact FKs...")
+        logger.info("Step 2: Repairing fact FKs (name-match before NULL)...")
         fact_alignments = self._align_fact_foreign_keys(dry_run)
         results['facts'] = fact_alignments
 
+        logger.info("Step 3: Sweeping remaining unresolved FKs...")
+        dimension_alignments = self._align_dimension_foreign_keys(dry_run)
+        results['dimensions'] = dimension_alignments
+
         for table, stats in fact_alignments.items():
             if isinstance(stats, dict):
-                results['summary']['total_fixed'] += stats.get('fixed', 0)
-                results['summary']['orphans_found'] += stats.get('orphaned', 0)
+                results['summary']['total_fixed']    += stats.get('fixed', 0)
+                results['summary']['orphans_found']  += stats.get('orphaned', 0)
                 results['summary']['tables_processed'] += 1
 
         logger.info("=" * 60)
         logger.info("FOREIGN KEY ALIGNMENT COMPLETE")
+        logger.info(
+            f"  Repaired:        {results['summary']['total_fixed']} rows"
+        )
+        logger.info(
+            f"  Orphans found:   {results['summary']['orphans_found']}"
+        )
+        logger.info(
+            f"  Tables touched:  {results['summary']['tables_processed']}"
+        )
         logger.info("=" * 60)
 
         return results
+
 
     def _clean_dimension_tables(self, dry_run: bool = False):
         inspector = inspect(self.session.bind)
@@ -854,10 +1005,23 @@ class DataConsolidator:
 
             results[table_name]['still_orphaned'] = remaining_orphans
 
+            # `remaining_orphans` is measured after this method NULLed (or
+            # quarantined) everything it could not repair by name. A non-zero
+            # count here therefore means rows survived with a non-null FK that
+            # still does not resolve — which should not happen unless the FK
+            # column is non-nullable and the quarantine path was skipped.
             if remaining_orphans:
-                logger.warning(f"    {remaining_orphans} orphans remain in {table_name}.{fk_col}")
+                logger.error(
+                    f"    {table_name}.{fk_col}: {remaining_orphans} rows still "
+                    f"carry an unresolvable FK after repair and NULL/quarantine. "
+                    f"Manual review required."
+                )
             else:
-                logger.info(f"    All orphans fixed in {table_name}.{fk_col}")
+                logger.info(
+                    f"    {table_name}.{fk_col}: repair complete "
+                    f"({results[table_name]['fixed']} fixed, "
+                    f"{results[table_name]['orphaned']} orphaned)"
+                )
 
         return results
 
@@ -1122,48 +1286,55 @@ class DataConsolidator:
 
     # ===================== BURDEN EXPANSION =====================
 
-    def _expand_burden_to_daily(self, force: bool = False):
+    def expand_burden_to_daily(
+        self,
+        force: bool = False,
+        seed: int = 42,
+        base_variation: float = 0.25,
+    ) -> Dict[str, int]:
+        """
+        Expand yearly disease-burden rows into daily case records.
+
+        This is the single canonical implementation. Both consolidate_all()
+        and the CLI wrapper in fix_cases.py call it.
+
+        Parameters
+        ----------
+        force : bool
+            If True, delete existing ESTIMATE rows for a burden record before
+            re-inserting. If False (the default), skip any burden record that
+            already has ESTIMATE rows for its (location, year, disease).
+        seed : int
+            Random seed. Combined with location_id and year so each (location,
+            year) reproduces the same daily series across runs.
+        base_variation : float
+            Log-normal sigma for the per-day noise term, before the internal
+            0.7 multiplier. 0.25 is a reasonable default for surveillance data.
+
+        Returns
+        -------
+        dict
+            Counts: inserted, already_present, skipped, errors.
+        """
         logger.info("=" * 60)
         logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
         logger.info("=" * 60)
 
-        total_burden = self.session.execute(
-            text("SELECT COUNT(*) FROM fact_disease_burden")
-        ).scalar()
+        # ---- 0. case_count column must exist --------------------------------
+        # The Alembic migration owns this column. Fail loudly if the DB has
+        # not been upgraded, rather than silently doing a no-op or ALTER.
+        try:
+            self.session.execute(text("SELECT case_count FROM fact_disease_case LIMIT 1"))
+        except Exception as e:
+            logger.error(
+                "case_count column missing from fact_disease_case. Run "
+                "`alembic upgrade head` before expanding burden data."
+            )
+            raise RuntimeError(
+                "Missing case_count column; run migrations first."
+            ) from e
 
-        if total_burden == 0:
-            logger.info("No burden records found")
-            return
-
-        pop_results = self.session.execute(text("""
-            SELECT location_id, indicator_value
-            FROM fact_socioeconomic_condition
-            WHERE indicator_code = 'SP.POP.TOTL'
-        """)).fetchall()
-        population_map = {r[0]: r[1] for r in pop_results}
-
-        loc_results = self.session.execute(text("SELECT location_id FROM dim_location")).fetchall()
-        all_location_ids = [r[0] for r in loc_results]
-
-        default_population = 1_000_000
-        for loc_id in all_location_ids:
-            if (loc_id not in population_map
-                    or population_map[loc_id] is None
-                    or population_map[loc_id] <= 0):
-                population_map[loc_id] = default_population
-
-        burden_records = self.session.execute(text("""
-            SELECT burden_id, location_id, year, disease_code, source_code,
-                incidence_rate, cases_mean
-            FROM fact_disease_burden
-            WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0)
-               OR (cases_mean IS NOT NULL AND cases_mean > 0)
-        """)).fetchall()
-
-        if not burden_records:
-            logger.warning("No burden records with valid data found")
-            return
-
+        # ---- 1. Ensure the ESTIMATE method exists ---------------------------
         self.session.execute(text("""
             INSERT INTO dim_identification_method
                 (method_code, method_name, method_type)
@@ -1173,104 +1344,150 @@ class DataConsolidator:
         """))
         self.session.commit()
 
-        monthly_factors = {
-            1: 0.6, 2: 0.5, 3: 0.7, 4: 1.4, 5: 1.5, 6: 1.3,
-            7: 1.2, 8: 1.0, 9: 0.8, 10: 0.6, 11: 0.5, 12: 0.5,
-        }
-        total_factor = sum(monthly_factors.values())
-        normalized_factors = {m: f / total_factor for m, f in monthly_factors.items()}
+        # ---- 2. Population lookup -------------------------------------------
+        total_burden = self.session.execute(
+            text("SELECT COUNT(*) FROM fact_disease_burden")
+        ).scalar() or 0
+        if total_burden == 0:
+            logger.info("No burden records found; nothing to expand.")
+            return {"inserted": 0, "already_present": 0, "skipped": 0, "errors": 0}
 
-        is_sqlite = 'sqlite' in str(self.session.bind.url).lower()
+        pop_rows = self.session.execute(text("""
+            SELECT location_id, indicator_value
+            FROM fact_socioeconomic_condition
+            WHERE indicator_code = 'SP.POP.TOTL'
+        """)).fetchall()
+        population_map = {r[0]: r[1] for r in pop_rows}
 
-        inserted_count = 0
-        skipped_count = 0
-        already_present_count = 0
-        error_count = 0
+        default_population = 1_000_000
+        for loc_id_row in self.session.execute(
+            text("SELECT location_id FROM dim_location")
+        ).fetchall():
+            loc_id = loc_id_row[0]
+            if (loc_id not in population_map
+                    or population_map[loc_id] is None
+                    or population_map[loc_id] <= 0):
+                population_map[loc_id] = default_population
+
+        # ---- 3. Iterate burden rows -----------------------------------------
+        burden_records = self.session.execute(text("""
+            SELECT burden_id, location_id, year, disease_code, source_code,
+                incidence_rate, cases_mean
+            FROM fact_disease_burden
+            WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0)
+            OR (cases_mean      IS NOT NULL AND cases_mean      > 0)
+        """)).fetchall()
+
+        if not burden_records:
+            logger.warning("No burden records with valid data found.")
+            return {"inserted": 0, "already_present": 0, "skipped": 0, "errors": 0}
+
+        is_sqlite = "sqlite" in str(self.session.bind.url).lower()
+        stats = {"inserted": 0, "already_present": 0, "skipped": 0, "errors": 0}
 
         for record in burden_records:
             (burden_id, location_id, year, disease_code,
-             source_code, incidence_rate, cases_mean) = record
+            source_code, incidence_rate, cases_mean) = record
 
             population = population_map.get(location_id, default_population)
-
             if incidence_rate is not None and incidence_rate > 0 and population > 0:
                 annual_cases = (incidence_rate / 100_000) * population
             elif cases_mean is not None and cases_mean > 0:
                 annual_cases = cases_mean
             else:
-                skipped_count += 1
+                stats["skipped"] += 1
                 continue
-
             annual_cases = max(annual_cases, 1)
-            start_date = datetime(year, 1, 1)
-            end_date = datetime(year, 12, 31)
-            start_str = start_date.strftime('%Y-%m-%d')
-            end_str = end_date.strftime('%Y-%m-%d')
 
+            start_str = f"{year}-01-01"
+            end_str   = f"{year}-12-31"
+
+            # ---- Idempotency check ------------------------------------------
             existing = self.session.execute(text("""
                 SELECT COUNT(*) FROM fact_disease_case
                 WHERE location_id = :loc_id
-                  AND date_id_onset >= :start_date
-                  AND date_id_onset <= :end_date
-                  AND disease_code = :disease
-                  AND identification_method_code = 'ESTIMATE'
+                AND date_id_onset >= :start_date
+                AND date_id_onset <= :end_date
+                AND disease_code = :disease
+                AND identification_method_code = 'ESTIMATE'
             """), {
-                'loc_id': location_id,
-                'start_date': start_str,
-                'end_date': end_str,
-                'disease': disease_code,
-            }).scalar()
+                "loc_id":     location_id,
+                "start_date": start_str,
+                "end_date":   end_str,
+                "disease":    disease_code,
+            }).scalar() or 0
 
-            if existing and existing > 0 and not force:
-                already_present_count += 1
+            if existing > 0 and not force:
+                logger.info(
+                    f"  Skipping burden_id {burden_id} "
+                    f"(location={location_id}, year={year}, disease={disease_code}): "
+                    f"{existing} ESTIMATE rows already present. Use force=True to overwrite."
+                )
+                stats["already_present"] += 1
                 continue
 
-            daily_cases_list = []
-            current_date = start_date
-            while current_date <= end_date:
-                month = current_date.month
-                if month == 12:
-                    next_month = datetime(year + 1, 1, 1)
-                else:
-                    next_month = datetime(year, month + 1, 1)
-                days_in_month = (next_month - datetime(year, month, 1)).days
+            # ---- Generate daily series -------------------------------------
+            daily_df = _burden_generate_daily_case_counts(
+                annual_cases=annual_cases,
+                year=year,
+                location_id=location_id,
+                base_variation=base_variation,
+                seed=seed,
+            )
+            logger.info(
+                f"  burden_id {burden_id} (loc={location_id}, year={year}): "
+                f"{len(daily_df)} days, mean={daily_df['case_count'].mean():.1f}, "
+                f"min={daily_df['case_count'].min()}, "
+                f"max={daily_df['case_count'].max()}, "
+                f"std={daily_df['case_count'].std():.1f}"
+            )
 
-                monthly_cases = annual_cases * normalized_factors[month]
-                daily_cases = max(1, int(round(monthly_cases / days_in_month)))
-
-                daily_cases_list.append({
-                    'loc_id': location_id,
-                    'date_id': current_date.strftime('%Y-%m-%d'),
-                    'disease': disease_code,
-                    'src_code': source_code,
-                    'case_count': daily_cases,
-                })
-                current_date += timedelta(days=1)
-
-            if not daily_cases_list:
-                continue
-
+            # ---- Write ------------------------------------------------------
             try:
-                if existing and existing > 0:
-                    self.session.execute(text("""
+                if existing > 0:
+                    deleted = self.session.execute(text("""
                         DELETE FROM fact_disease_case
                         WHERE location_id = :loc_id
-                          AND date_id_onset >= :start_date
-                          AND date_id_onset <= :end_date
-                          AND disease_code = :disease
-                          AND identification_method_code = 'ESTIMATE'
+                        AND date_id_onset >= :start_date
+                        AND date_id_onset <= :end_date
+                        AND disease_code = :disease
+                        AND identification_method_code = 'ESTIMATE'
                     """), {
-                        'loc_id': location_id,
-                        'start_date': start_str,
-                        'end_date': end_str,
-                        'disease': disease_code,
-                    })
+                        "loc_id":     location_id,
+                        "start_date": start_str,
+                        "end_date":   end_str,
+                        "disease":    disease_code,
+                    }).rowcount or 0
+                    logger.info(f"    Deleted {deleted} existing ESTIMATE rows")
 
                 batch_size = 5000
-                for i in range(0, len(daily_cases_list), batch_size):
-                    batch = daily_cases_list[i:i + batch_size]
-                    if is_sqlite:
-                        for row in batch:
+                records_to_insert = []
+                for idx, row in daily_df.iterrows():
+                    records_to_insert.append({
+                        "loc_id":     location_id,
+                        "date_id":    row["date_id"],
+                        "disease":    disease_code,
+                        "src_code":   source_code,
+                        "case_count": int(row["case_count"]),
+                    })
+                    is_last = (idx == len(daily_df) - 1)
+                    if len(records_to_insert) >= batch_size or is_last:
+                        if is_sqlite:
+                            for rec in records_to_insert:
+                                self.session.execute(text("""
+                                    INSERT INTO fact_disease_case (
+                                        location_id, date_id_onset, date_id_reported,
+                                        disease_code, identification_method_code,
+                                        source_code, case_status, host_type,
+                                        age_group, sex, outcome, case_count
+                                    ) VALUES (
+                                        :loc_id, :date_id, :date_id,
+                                        :disease, 'ESTIMATE',
+                                        :src_code, 'confirmed', 'human',
+                                        'all', 'unknown', 'unknown', :case_count
+                                    )
+                                """), rec)
+                        else:
                             self.session.execute(text("""
                                 INSERT INTO fact_disease_case (
                                     location_id, date_id_onset, date_id_reported,
@@ -1279,41 +1496,31 @@ class DataConsolidator:
                                     age_group, sex, outcome, case_count
                                 ) VALUES (
                                     :loc_id, :date_id, :date_id,
-                                    :disease, 'ESTIMATE', :src_code,
-                                    'confirmed', 'human',
+                                    :disease, 'ESTIMATE',
+                                    :src_code, 'confirmed', 'human',
                                     'all', 'unknown', 'unknown', :case_count
                                 )
-                            """), row)
-                    else:
-                        self.session.execute(text("""
-                            INSERT INTO fact_disease_case (
-                                location_id, date_id_onset, date_id_reported,
-                                disease_code, identification_method_code,
-                                source_code, case_status, host_type,
-                                age_group, sex, outcome, case_count
-                            ) VALUES (
-                                :loc_id, :date_id, :date_id,
-                                :disease, 'ESTIMATE', :src_code,
-                                'confirmed', 'human',
-                                'all', 'unknown', 'unknown', :case_count
-                            )
-                        """), batch)
+                            """), records_to_insert)
+                        records_to_insert = []
 
                 self.session.commit()
-                inserted_count += len(daily_cases_list)
+                stats["inserted"] += len(daily_df)
+
             except Exception as e:
-                logger.error(f"Error expanding burden_id {burden_id}: {e}")
+                logger.error(f"    Error expanding burden_id {burden_id}: {e}")
                 self.session.rollback()
-                error_count += 1
+                stats["errors"] += 1
                 continue
 
         logger.info("=" * 60)
         logger.info("BURDEN EXPANSION COMPLETE")
-        logger.info(f"  Inserted:          {inserted_count} daily records")
-        logger.info(f"  Already present:   {already_present_count} records")
-        logger.info(f"  Skipped (no data): {skipped_count} records")
-        logger.info(f"  Errors:            {error_count}")
+        logger.info(f"  Inserted:          {stats['inserted']} daily records")
+        logger.info(f"  Already present:   {stats['already_present']} burden records skipped")
+        logger.info(f"  Skipped (no data): {stats['skipped']}")
+        logger.info(f"  Errors:            {stats['errors']}")
         logger.info("=" * 60)
+
+        return stats
 
     # ===================== DUPLICATE RESOLUTION =====================
 
@@ -1486,6 +1693,7 @@ class DataConsolidator:
                         case_status, age_group, sex,
                         MIN(date_id_reported) AS date_id_reported,
                         MIN(host_type)        AS host_type,
+                        MIN(age_years)        AS age_years,
                         MIN(outcome)          AS outcome,
                         SUM(case_count)       AS case_count
                     FROM fact_disease_case
@@ -1499,19 +1707,19 @@ class DataConsolidator:
                         location_id, date_id_onset, date_id_reported,
                         disease_code, identification_method_code,
                         source_code, case_status, host_type,
-                        age_group, sex, outcome, case_count
+                        age_years, age_group, sex, outcome, case_count
                     )
                     SELECT
                         location_id, date_id_onset, date_id_reported,
                         disease_code, identification_method_code,
                         source_code, case_status, host_type,
-                        age_group, sex, outcome, case_count
+                        age_years, age_group, sex, outcome, case_count
                     FROM temp_case_dedup
                 """))
                 self.session.execute(text("DROP TABLE temp_case_dedup"))
                 self.session.commit()
                 logger.info(f"  Deduplicated {dup_count} case-key groups "
-                            f"(case_count preserved via SUM)")
+                            f"(case_count and age_years preserved)")
             else:
                 logger.info("  No case duplicates found; fact_disease_case untouched")
         except Exception as e:
@@ -1520,74 +1728,100 @@ class DataConsolidator:
 
     # ===================== MAIN CONSOLIDATION =====================
 
-    def consolidate_all(self, study_region: str = "Kenya") -> Dict[str, Any]:
+    def consolidate_all(
+        self,
+        gadm_gpkg: Optional[str] = None,
+        country_codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
-        Run all consolidation steps.
-
-        Ordering rationale
-        ------------------
-        Step 4 (standardize_vocabularies) must run BEFORE step 8
-        (consolidate_vocabulary) so that dim_vector rows carry a
-        concept_id when the consolidation step groups them.
-
-        Step 8 (consolidate_vocabulary) MUST aggregate fact rows rather
-        than delete them — see _aggregate_and_reassign.
-
-        Step 9 (resolve_fact_table_duplicates) rebuilds three fact
-        tables. It MUST list every column in its SELECTs, otherwise
-        those columns are silently lost. See the method docstring.
-
-        Step 10 (_compute_resistance_status) MUST run after step 9,
-        because step 9's rebuild drops resistance_status.
+        Run the full consolidation pipeline.
         """
+        from utilities.admin_alignment import (
+            load_admin_hierarchy,
+            resolve_parent_locations,
+            attach_admin_concepts,
+        )
+
         logger.info("=" * 60)
         logger.info("STARTING FULL DATA CONSOLIDATION")
         logger.info("=" * 60)
 
-        logger.info("Step 1: Aligning all foreign keys...")
+        # The rebuild runs first, unconditionally, so any prior
+        # cross-level merge damage is corrected before the rest of the
+        # pipeline reads the hierarchy.
+        logger.info("Step 0a: Rebuilding admin hierarchy from standard_code...")
+        rebuild_results = self._rebuild_admin_hierarchy_from_standard_code()
+
+        if gadm_gpkg:
+            logger.info("Step 0b: Loading GADM admin hierarchy...")
+            load_admin_hierarchy(self.session, gadm_gpkg, country_codes)
+
+            logger.info("Step 0c: Resolving parent locations by coordinates...")
+            resolve_parent_locations(
+                self.session, gadm_gpkg, country_codes
+            )
+
+            logger.info("Step 0d: Reassigning grid-sited facts to admin units...")
+            grid_reassign_results = self.reassign_grid_facts_to_admin()
+        else:
+            grid_reassign_results = {}
+
+        logger.info("Step 1: Aligning foreign keys...")
         fk_results = self.align_all_foreign_keys()
 
-        logger.info("Step 2: Standardizing country codes to ISO format...")
-        self._standardize_country_codes()
+        logger.info("Step 2: Repairing dangling parent references...")
+        dangling_fixed = self._repair_dangling_parents()
 
-        logger.info("Step 3: Binding climate coordinates to regions...")
-        self._bind_climate_coordinates_to_region(study_region=study_region)
-
-        logger.info("Step 4: Standardizing vocabularies...")
+        logger.info("Step 3: Standardizing vocabularies...")
         vocab_std_results = self.standardize_vocabularies()
+
+        if gadm_gpkg:
+            logger.info("Step 3b: Attaching GADM concepts to locations...")
+            attach_admin_concepts(self.session)
+
+        logger.info("Step 4: Standardizing country codes...")
+        self._standardize_country_codes()
 
         logger.info("Step 5: Fixing orphaned burden records...")
         burden_fixed = self.fix_orphaned_burden_records()
 
-        logger.info("Step 6: Expanding burden data to daily records...")
-        self._expand_burden_to_daily()
+        logger.info("Step 6: Expanding burden to daily records...")
+        self.expand_burden_to_daily(force=False)
 
-        logger.info("Step 7: Consolidating locations...")
+        logger.info("Step 7: Consolidating locations (name-based merge)...")
         loc_results = self.consolidate_locations()
+
+        logger.info("Step 7b: Re-checking dangling references after merge...")
+        dangling_after_merge = self._repair_dangling_parents()
 
         logger.info("Step 8: Consolidating vocabulary...")
         vocab_cons_results = self.consolidate_vocabulary()
 
-        logger.info("Step 9: Detecting and resolving duplicates...")
+        logger.info("Step 9: Resolving duplicates...")
         dup_results = self.detect_duplicates()
         self.resolve_fact_table_duplicates()
 
-        logger.info("Step 10: Computing resistance status after deduplication...")
+        logger.info("Step 10: Computing resistance status...")
         self._compute_resistance_status()
 
         logger.info("Step 11: Final verification...")
         validation = self.validate_country_codes()
         final_orphan_check = self._check_remaining_orphans()
+        hierarchy_check = self._check_hierarchy()
 
         results = {
-            'foreign_key_alignment':  fk_results,
-            'locations':              loc_results,
-            'vocabulary_standard':    vocab_std_results,
-            'vocabulary_consolidate': vocab_cons_results,
-            'duplicates':             dup_results,
-            'validation':             validation,
-            'burden_fixed':           burden_fixed,
-            'remaining_orphans':      final_orphan_check,
+            "foreign_key_alignment":  fk_results,
+            "locations":              loc_results,
+            "vocabulary_standard":    vocab_std_results,
+            "vocabulary_consolidate": vocab_cons_results,
+            "duplicates":             dup_results,
+            "validation":             validation,
+            "burden_fixed":           burden_fixed,
+            "grid_reassignment":      grid_reassign_results,
+            "hierarchy_rebuild":      rebuild_results,
+            "dangling_parent_fixes":  dangling_fixed + dangling_after_merge,
+            "remaining_orphans":      final_orphan_check,
+            "hierarchy":              hierarchy_check,
         }
 
         logger.info("=" * 60)
@@ -1595,10 +1829,39 @@ class DataConsolidator:
         logger.info(f"  Total locations:       {validation.get('total', 0)}")
         logger.info(f"  Valid country codes:   {validation.get('valid', 0)}")
         logger.info(f"  Burden records fixed:  {burden_fixed}")
-        logger.info(f"  Remaining orphans:     {final_orphan_check}")
+        logger.info(f"  Grid-to-admin reassigned:")
+        for tbl, n in (grid_reassign_results or {}).items():
+            logger.info(f"    {tbl}: {n} rows")
+        logger.info(f"  Hierarchy levels fixed:  {rebuild_results['level_fixed']}")
+        logger.info(f"  Hierarchy parents fixed: {rebuild_results['parent_fixed']}")
+        logger.info(f"  Dangling parents fixed:  {dangling_fixed + dangling_after_merge}")
+        logger.info(f"  Remaining orphans:       {final_orphan_check}")
+        logger.info(
+            f"  Hierarchy: "
+            f"{hierarchy_check['placed']} placed / "
+            f"{hierarchy_check['total_non_admin']} non-admin"
+        )
         logger.info("=" * 60)
 
         return results
+
+
+    def _check_hierarchy(self) -> Dict[str, int]:
+        """Count how many non-admin locations have a parent."""
+        total_non_admin = self.session.execute(text("""
+            SELECT COUNT(*) FROM dim_location
+            WHERE (origin IS NULL OR origin <> 'gadm')
+            AND (admin_level IS NULL OR admin_level NOT LIKE 'admin%')
+        """)).scalar() or 0
+
+        placed = self.session.execute(text("""
+            SELECT COUNT(*) FROM dim_location
+            WHERE (origin IS NULL OR origin <> 'gadm')
+            AND parent_location_id IS NOT NULL
+        """)).scalar() or 0
+
+        return {"total_non_admin": total_non_admin, "placed": placed}
+
 
     def _check_remaining_orphans(self) -> Dict[str, int]:
         results = {}
@@ -1630,6 +1893,226 @@ class DataConsolidator:
                     logger.debug(f"  Could not check {table}.{fk_col}: {e}")
 
         return results
+
+    
+    def _rebuild_admin_hierarchy_from_standard_code(self) -> Dict[str, int]:
+        """
+        Rebuild admin_level and parent_location_id for every location
+        whose standard_code is a GADM GID.
+
+        Cross-level merges in earlier revisions collapsed admin units of
+        different levels into each other, leaving chains like
+        admin3 -> admin3 -> admin3 that violate the GADM hierarchy. This
+        method rebuilds the chain from the authoritative source — the
+        GID stored in standard_code — so the resulting hierarchy is
+        correct regardless of prior damage.
+
+        The GID encodes both level and ancestry:
+
+            KEN           level 0 (admin0)
+            KEN.1_1       level 1 (admin1)
+            KEN.1.1_1     level 2 (admin2)
+            KEN.1.1.1_1   level 3 (admin3)
+
+        The `_<version>` suffix is stripped before parsing. Dot count
+        determines level; the parent is the GID with the last segment
+        removed.
+
+        Returns
+        -------
+        dict
+            {'level_fixed': int, 'parent_fixed': int, 'orphaned': int}
+        """
+        logger.info("=" * 60)
+        logger.info("REBUILDING ADMIN HIERARCHY FROM STANDARD_CODE")
+        logger.info("=" * 60)
+
+        rows = self.session.execute(text("""
+            SELECT location_id, standard_code, admin_level, parent_location_id
+            FROM dim_location
+            WHERE standard_code IS NOT NULL
+              AND standard_code != ''
+        """)).fetchall()
+
+        if not rows:
+            logger.info("  No locations have a standard_code; skipping.")
+            return {"level_fixed": 0, "parent_fixed": 0, "orphaned": 0}
+
+        # Map stripped GID -> location_id. First writer wins if the same
+        # GID is stored on multiple rows (which would itself be a bug,
+        # but we do not want to crash on it).
+        gid_to_id: Dict[str, int] = {}
+        parsed = []
+        for loc_id, sc, cur_level, cur_parent in rows:
+            stripped = str(sc).split("_")[0]
+            if not stripped:
+                continue
+            parsed.append((int(loc_id), stripped, cur_level, cur_parent))
+            if stripped not in gid_to_id:
+                gid_to_id[stripped] = int(loc_id)
+
+        level_fixed = 0
+        parent_fixed = 0
+        orphaned = 0
+
+        for loc_id, gid, cur_level, cur_parent in parsed:
+            dot_count = gid.count(".")
+            if dot_count >= 3:
+                new_level = "admin3"
+            elif dot_count == 2:
+                new_level = "admin2"
+            elif dot_count == 1:
+                new_level = "admin1"
+            else:
+                new_level = "admin0"
+
+            if "." in gid:
+                parent_prefix = gid.rsplit(".", 1)[0]
+                new_parent = gid_to_id.get(parent_prefix)
+            else:
+                new_parent = None
+
+            needs_level = (cur_level != new_level)
+            needs_parent = (cur_parent != new_parent)
+
+            if needs_level or needs_parent:
+                self.session.execute(text("""
+                    UPDATE dim_location
+                    SET admin_level = :level, parent_location_id = :parent
+                    WHERE location_id = :lid
+                """), {"level": new_level, "parent": new_parent, "lid": loc_id})
+                if needs_level:
+                    level_fixed += 1
+                if needs_parent:
+                    parent_fixed += 1
+
+            if new_parent is None and dot_count > 0:
+                # A child whose parent GID is not present in the map.
+                orphaned += 1
+
+        self.session.commit()
+
+        logger.info(f"  Admin levels corrected:  {level_fixed}")
+        logger.info(f"  Parent links corrected:  {parent_fixed}")
+        if orphaned:
+            logger.warning(
+                f"  {orphaned} rows reference a parent GID that is not "
+                f"present in dim_location; they remain unparented."
+            )
+        logger.info("=" * 60)
+
+        return {
+            "level_fixed":  level_fixed,
+            "parent_fixed": parent_fixed,
+            "orphaned":     orphaned,
+        }
+
+
+    def _repair_dangling_parents(self) -> int:
+        """
+        Repair any dim_location row whose parent_location_id points at a
+        row that no longer exists.
+
+        Dangling parent references arise when consolidate_locations()
+        merges two locations and deletes the non-canonical one without
+        updating the rows that pointed at it. The reparenting fix in
+        `_merge_by_name` and `_merge_location_clusters` prevents new
+        occurrences; this method cleans up any that existed before that
+        fix was applied, or that arise from any other code path that
+        deletes a parent row.
+
+        Repairs admin3 -> admin2, admin2 -> admin1, admin1 -> admin0 by
+        matching on the GADM GID prefix. GADM GIDs are hierarchical by
+        dot segment: `KEN.1.1` is an admin2, `KEN.1.1.1` is its admin3
+        child. The parent's stripped GID is the child's stripped GID
+        with the last segment removed.
+
+        Runs before `align_all_foreign_keys` in `consolidate_all` so
+        the FK sweep sees a coherent hierarchy. Idempotent: after the
+        first run, the dangling sets are empty and the method is a
+        no-op.
+
+        Returns
+        -------
+        int
+            Total number of rows repaired across all levels.
+        """
+        logger.info("=" * 60)
+        logger.info("REPAIRING DANGLING PARENT REFERENCES")
+        logger.info("=" * 60)
+
+        total = 0
+
+        for child_level, parent_level in (
+            ("admin3", "admin2"),
+            ("admin2", "admin1"),
+            ("admin1", "admin0"),
+        ):
+            # Find every child at this level whose parent pointer is
+            # broken — either it points at a row that has been deleted,
+            # or it was left pointing at a merged-away row.
+            dangling = self.session.execute(text("""
+                SELECT l.location_id, l.standard_code
+                FROM dim_location l
+                WHERE l.admin_level = :child
+                  AND l.parent_location_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM dim_location x
+                      WHERE x.location_id = l.parent_location_id
+                  )
+            """), {"child": child_level}).fetchall()
+
+            if not dangling:
+                continue
+
+            # Build a {stripped_gid: location_id} map for the parent level.
+            # `split("_")[0]` strips GADM's `_<version>` suffix, e.g.
+            # `KEN.1.1_1` -> `KEN.1.1`.
+            parents = self.session.execute(text("""
+                SELECT standard_code, location_id
+                FROM dim_location
+                WHERE admin_level = :parent
+                  AND standard_code IS NOT NULL
+            """), {"parent": parent_level}).fetchall()
+
+            parent_map: Dict[str, int] = {}
+            for sc, lid in parents:
+                stripped = str(sc).split("_")[0]
+                if stripped not in parent_map:
+                    parent_map[stripped] = int(lid)
+
+            fixed = 0
+            for loc_id, std_code in dangling:
+                if not std_code:
+                    continue
+                child_stripped = str(std_code).split("_")[0]
+                if "." not in child_stripped:
+                    continue
+                parent_prefix = child_stripped.rsplit(".", 1)[0]
+                new_parent = parent_map.get(parent_prefix)
+                if new_parent is None:
+                    continue
+                self.session.execute(
+                    text("""
+                        UPDATE dim_location
+                        SET parent_location_id = :new_parent
+                        WHERE location_id = :loc_id
+                    """),
+                    {"new_parent": new_parent, "loc_id": int(loc_id)},
+                )
+                fixed += 1
+
+            if fixed:
+                logger.info(
+                    f"  {child_level} -> {parent_level}: {fixed} repaired"
+                )
+            total += fixed
+
+        self.session.commit()
+        logger.info(f"  Total dangling references repaired: {total}")
+        logger.info("=" * 60)
+        return total
+
 
     # ===================== LOCATION CONSOLIDATION =====================
 
@@ -1901,13 +2384,17 @@ class DataConsolidator:
         name = re.sub(r'\s+', ' ', name).strip()
         return name
 
+    
     def _merge_by_name(self, loc_data: pd.DataFrame, dry_run: bool = False) -> List[Dict[str, Any]]:
         results = []
-        group_cols = ['name_normalized']
+        # Group by admin_level as well as name. Without it, a site named
+        # "Siaya" and an admin2 county named "Siaya" are grouped together
+        # and one is deleted, collapsing a GADM unit into a non-GADM site.
+        group_cols = ['name_normalized', 'admin_level']
         if 'country_code' in loc_data.columns:
             group_cols.append('country_code')
 
-        for (name, country_code), group in loc_data.groupby(group_cols):
+        for (name, admin_level, country_code), group in loc_data.groupby(group_cols):
             if len(group) <= 1:
                 continue
 
@@ -1930,6 +2417,22 @@ class DataConsolidator:
                     source_id = int(row['location_id'])
                     if source_id != canonical_id:
                         self._merge_fact_locations(source_id, canonical_id)
+
+                        # Reparent children before the delete. The
+                        # `location_id != canonical_id` guard prevents a
+                        # self-loop when the canonical was itself a child
+                        # of the source (which happens when a container
+                        # and its contained location are merged).
+                        self.session.execute(
+                            text("""
+                                UPDATE dim_location
+                                SET parent_location_id = :new_parent
+                                WHERE parent_location_id = :old_parent
+                                  AND location_id != :new_parent
+                            """),
+                            {"new_parent": canonical_id, "old_parent": source_id},
+                        )
+
                         self.session.execute(
                             text("DELETE FROM dim_location WHERE location_id = :src_id"),
                             {"src_id": source_id}
@@ -1960,6 +2463,7 @@ class DataConsolidator:
 
         return results
 
+
     def _cluster_locations_by_country_and_proximity(self, loc_df: pd.DataFrame,
                                                     eps_km: float,
                                                     min_samples: int) -> pd.Series:
@@ -1975,7 +2479,13 @@ class DataConsolidator:
         final_clusters = pd.Series([-1] * len(loc_df), index=loc_df.index)
         cluster_counter = 0
 
-        for country, group in loc_df.groupby('country_code'):
+        # Cluster only within the same admin_level. Merging across levels
+        # collapses an admin3 into its containing admin2 (or vice versa)
+        # when their centroids coincide, producing the "admin3 -> admin3"
+        # chains that break the GADM hierarchy.
+        for (country, admin_level), group in loc_df.groupby(
+            ['country_code', 'admin_level']
+        ):
             if len(group) < min_samples:
                 continue
 
@@ -2007,6 +2517,8 @@ class DataConsolidator:
                     idx = valid_indices[i]
                     final_clusters[idx] = cluster_counter + cl
 
+            cluster_counter += len(set(clusters)) 
+
         unique_clusters = final_clusters.unique()
         cluster_map = {old: new for new, old in enumerate(unique_clusters) if old != -1}
         if cluster_map:
@@ -2015,6 +2527,7 @@ class DataConsolidator:
 
         return final_clusters
 
+    
     def _merge_location_clusters(self, loc_df: pd.DataFrame, clusters: pd.Series,
                                  dry_run: bool = False) -> Dict[str, Any]:
         results = {'merged_count': 0, 'clusters': {}, 'merged_locations': []}
@@ -2050,6 +2563,19 @@ class DataConsolidator:
                     source_id = int(row['location_id'])
                     if source_id != canonical_id:
                         self._merge_fact_locations(source_id, canonical_id)
+
+                        # See _merge_by_name for the rationale on the
+                        # canonical_id guard.
+                        self.session.execute(
+                            text("""
+                                UPDATE dim_location
+                                SET parent_location_id = :new_parent
+                                WHERE parent_location_id = :old_parent
+                                  AND location_id != :new_parent
+                            """),
+                            {"new_parent": canonical_id, "old_parent": source_id},
+                        )
+
                         self.session.execute(
                             text("DELETE FROM dim_location WHERE location_id = :src_id"),
                             {"src_id": source_id}
@@ -2065,8 +2591,9 @@ class DataConsolidator:
                     if not loc.centroid_lat and canonical['centroid_lat']:
                         loc.centroid_lat = canonical['centroid_lat']
                         loc.centroid_lon = canonical['centroid_lon']
-                    if hasattr(loc, 'admin_level'):
-                        loc.admin_level = canonical.get('admin_level') or loc.admin_level
+                    # admin_level is NOT overwritten. It was set at insert
+                    # time from the GADM layer or the mapping CSV; the
+                    # canonical should already carry the correct value.
                     self.session.add(loc)
                 self.session.commit()
 
@@ -2079,6 +2606,7 @@ class DataConsolidator:
             results['merged_locations'].append(canonical_id)
 
         return results
+
 
     def _merge_fact_locations(self, source_id: int, target_id: int):
         """
@@ -2295,7 +2823,7 @@ class DataConsolidator:
     
 
     def _aggregate_and_reassign(self, table_name: str, fk_col: str,
-                            old_value, new_value) -> None:
+                        old_value, new_value) -> None:
         """
         Reassign `table_name.fk_col` from old_value to new_value.
 
@@ -2303,10 +2831,13 @@ class DataConsolidator:
         key, the two rows are aggregated (SUM counts, AVG rates) rather than
         one being deleted.
 
+        Columns listed under `derived` in the spec are NULLed out by the
+        aggregation and recomputed afterwards by whatever pass owns them
+        (currently _compute_resistance_status for fact_insecticide_resistance).
+
         Autoincrement primary keys are deliberately omitted from the INSERT
         column list — after aggregation, the old IDs are meaningless, and
-        the DB assigns fresh ones. `SELECT observation_id FROM _agg_...`
-        would fail because the temp table never carries the PK.
+        the DB assigns fresh ones.
         """
         if old_value == new_value:
             return
@@ -2314,8 +2845,7 @@ class DataConsolidator:
         spec = _FACT_AGGREGATION_SPEC.get(table_name)
         if spec is None:
             # No aggregation rules for this table. Plain UPDATE, catching
-            # unique-constraint collisions. Log every collision and roll back
-            # the reassign rather than deleting rows silently.
+            # unique-constraint collisions.
             try:
                 result = self.session.execute(
                     text(f"UPDATE {table_name} SET {fk_col} = :new WHERE {fk_col} = :old"),
@@ -2338,10 +2868,14 @@ class DataConsolidator:
                 raise
             return
 
-        nk = spec["natural_key"]
-        sums = spec["sums"]
-        means = spec["means"]
-        first = spec["first"]
+        # ---- Spec coverage check (fails loudly, not silently) ----------------
+        self._validate_aggregation_spec(table_name, spec)
+
+        nk      = spec["natural_key"]
+        sums    = spec["sums"]
+        means   = spec["means"]
+        first   = spec["first"]
+        derived = spec.get("derived", [])
 
         # Build the SELECT list and track the exact column order of the temp
         # table so the INSERT column list matches it 1:1.
@@ -2361,6 +2895,9 @@ class DataConsolidator:
         for col in first:
             select_parts.append(f"MIN({col}) AS {col}")
             temp_cols.append(col)
+        # `derived` columns are deliberately NOT selected. They will be
+        # inserted as NULL (their column default) and recomputed by the
+        # owning pass.
         select_sql = ", ".join(select_parts)
 
         group_cols = [c for c in nk if c != fk_col]
@@ -2373,24 +2910,6 @@ class DataConsolidator:
             inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
         )
         insert_cols = [c for c in temp_cols if c not in pk_cols]
-
-        # Guard: every NOT NULL column that isn't a PK must appear in the
-        # insert list, or the INSERT will fail (or the DB will insert a
-        # default that silently loses data).
-        col_info = {c["name"]: c for c in inspector.get_columns(table_name)}
-        missing_notnull = [
-            c for c in col_info
-            if c not in insert_cols
-            and c not in pk_cols
-            and not col_info[c].get("nullable", True)
-            and col_info[c].get("default") is None
-        ]
-        if missing_notnull:
-            logger.warning(
-                f"    {table_name}: aggregation spec omits NOT NULL columns "
-                f"{missing_notnull}; add them to sums/means/first before the "
-                f"INSERT or it will fail."
-            )
 
         try:
             self.session.execute(text(f"""
@@ -2415,7 +2934,9 @@ class DataConsolidator:
             logger.info(
                 f"    Aggregated + reassigned {table_name}.{fk_col}: "
                 f"{old_value} -> {new_value} "
-                f"({len(insert_cols)} columns preserved)"
+                f"({len(insert_cols)} columns preserved"
+                + (f", {len(derived)} derived column(s) reset for recomputation)"
+                if derived else ")")
             )
         except Exception as e:
             self.session.rollback()
@@ -2424,6 +2945,66 @@ class DataConsolidator:
                 f"({old_value} -> {new_value}): {e}"
             )
             raise
+
+        # If this table owns derived columns, refresh them now so callers
+        # that invoke _aggregate_and_reassign outside of consolidate_all()
+        # still get correct values without a manual second pass.
+        if table_name == "fact_insecticide_resistance" and derived:
+            try:
+                self._compute_resistance_status()
+            except Exception as e:
+                logger.warning(
+                    f"    Recompute of derived columns for "
+                    f"{table_name} failed: {e}"
+                )
+
+
+    def _validate_aggregation_spec(self, table_name: str, spec: dict) -> None:
+        """
+        Warn (once per process, per table) if the aggregation spec does not
+        account for every non-PK column of the table.
+
+        Covered columns are the union of:
+            natural_key, sums, means, first, derived
+        Autoincrement PKs are always excluded (the DB assigns fresh ones).
+
+        Any other column is a bug in the spec — it will be silently dropped
+        by the aggregation INSERT. This guard was added after two such bugs
+        (mortality/resistance_status on fact_insecticide_resistance,
+        age_years on fact_disease_case) shipped and lost data on collision.
+        """
+        if not hasattr(self, "_validated_specs"):
+            self._validated_specs: set = set()
+        if table_name in self._validated_specs:
+            return
+        self._validated_specs.add(table_name)
+
+        inspector = inspect(self.session.bind)
+        try:
+            table_cols = [c["name"] for c in inspector.get_columns(table_name)]
+        except Exception:
+            return
+
+        pk_cols = set(
+            inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
+        )
+
+        covered = (
+            set(spec.get("natural_key", []))
+            | set(spec.get("sums",  []))
+            | set(spec.get("means", []))
+            | set(spec.get("first", []))
+            | set(spec.get("derived", []))
+        )
+
+        uncovered = [c for c in table_cols if c not in covered and c not in pk_cols]
+        if uncovered:
+            logger.error(
+                f"    AGGREGATION SPEC BUG: {table_name} columns {uncovered} "
+                f"are not covered by _FACT_AGGREGATION_SPEC and will be "
+                f"silently dropped on natural-key collision. Add each to "
+                f"sums / means / first / derived."
+            )
 
 
     # ===================== DUPLICATE DETECTION =====================
@@ -2627,6 +3208,298 @@ class DataConsolidator:
 
         return stats
 
+    
+    def _aggregate_and_reassign_bulk(
+        self,
+        table_name: str,
+        fk_col: str,
+        old_values: List[Any],
+        new_value: Any,
+    ) -> int:
+        """
+        Reassign `table_name.fk_col` from a set of old values to a single
+        new_value, aggregating natural-key collisions.
+
+        This is the bulk variant of `_aggregate_and_reassign`. It exists
+        because rolling up hundreds of grid cells into a single admin
+        unit is common, and one transaction per pair is prohibitively
+        slow on a table with millions of rows.
+
+        Semantics match `_aggregate_and_reassign`:
+            - SUM on columns listed under `sums`.
+            - AVG on columns listed under `means`.
+            - MIN on columns listed under `first`.
+            - Columns listed under `derived` are set to NULL and must be
+              recomputed by whatever pass owns them (currently
+              _compute_resistance_status for fact_insecticide_resistance).
+            - Autoincrement primary keys are omitted from the INSERT.
+
+        Tables without a `_FACT_AGGREGATION_SPEC` entry fall back to a
+        plain UPDATE with a unique-constraint guard.
+
+        Returns the number of rows in the post-aggregation result.
+        """
+        if not old_values:
+            return 0
+
+        old_values = [v for v in old_values if v != new_value]
+        if not old_values:
+            return 0
+
+        spec = _FACT_AGGREGATION_SPEC.get(table_name)
+
+        # ---- Plain UPDATE for tables without aggregation rules. ----
+        if spec is None:
+            try:
+                stmt = text(
+                    f"UPDATE {table_name} SET {fk_col} = :new "
+                    f"WHERE {fk_col} IN :olds"
+                ).bindparams(bindparam("olds", expanding=True))
+                result = self.session.execute(
+                    stmt, {"new": new_value, "olds": old_values}
+                )
+                self.session.commit()
+                return result.rowcount or 0
+            except IntegrityError:
+                self.session.rollback()
+                logger.error(
+                    f"    Unique-constraint collision on {table_name}.{fk_col} "
+                    f"reassigning {len(old_values)} values -> {new_value}. "
+                    f"No aggregation spec; manual review required."
+                )
+                raise
+
+        # ---- Aggregation-aware rebuild. ----
+        self._validate_aggregation_spec(table_name, spec)
+
+        nk      = spec["natural_key"]
+        sums    = spec["sums"]
+        means   = spec["means"]
+        first   = spec["first"]
+        derived = spec.get("derived", [])
+
+        # The new value is an integer surrogate key; embed it as a literal
+        # so the SELECT is a simple projection and the expanding bindparam
+        # only carries the WHERE-list.
+        new_literal = int(new_value)
+
+        select_parts = [f"{new_literal} AS {fk_col}"]
+        temp_cols    = [fk_col]
+        for col in nk:
+            if col == fk_col:
+                continue
+            select_parts.append(col)
+            temp_cols.append(col)
+        for col in sums:
+            select_parts.append(f"SUM({col}) AS {col}")
+            temp_cols.append(col)
+        for col in means:
+            select_parts.append(f"AVG({col}) AS {col}")
+            temp_cols.append(col)
+        for col in first:
+            select_parts.append(f"MIN({col}) AS {col}")
+            temp_cols.append(col)
+
+        select_sql   = ", ".join(select_parts)
+        group_cols   = [c for c in nk if c != fk_col]
+        group_by_sql = ("GROUP BY " + ", ".join(group_cols)) if group_cols else ""
+
+        inspector = inspect(self.session.bind)
+        pk_cols = set(
+            inspector.get_pk_constraint(table_name)
+                     .get("constrained_columns", []) or []
+        )
+        insert_cols = [c for c in temp_cols if c not in pk_cols]
+
+        touched  = list(old_values) + [new_value]
+        tmp_name = f"_bulk_{table_name}"
+
+        try:
+            create_stmt = text(f"""
+                CREATE TEMP TABLE {tmp_name} AS
+                SELECT {select_sql}
+                FROM {table_name}
+                WHERE {fk_col} IN :olds
+                {group_by_sql}
+            """).bindparams(bindparam("olds", expanding=True))
+            self.session.execute(create_stmt, {"olds": touched})
+
+            staged = self.session.execute(
+                text(f"SELECT COUNT(*) FROM {tmp_name}")
+            ).scalar() or 0
+
+            delete_stmt = text(
+                f"DELETE FROM {table_name} WHERE {fk_col} IN :olds"
+            ).bindparams(bindparam("olds", expanding=True))
+            self.session.execute(delete_stmt, {"olds": touched})
+
+            self.session.execute(text(f"""
+                INSERT INTO {table_name} ({', '.join(insert_cols)})
+                SELECT {', '.join(insert_cols)} FROM {tmp_name}
+            """))
+
+            self.session.execute(text(f"DROP TABLE {tmp_name}"))
+            self.session.commit()
+
+            logger.info(
+                f"    Bulk-aggregated {table_name}.{fk_col}: "
+                f"{len(old_values)} old -> {new_value} "
+                f"({staged} rows"
+                + (f", {len(derived)} derived col(s) reset)" if derived else ")")
+            )
+            return staged
+
+        except Exception as e:
+            self.session.rollback()
+            logger.error(
+                f"    Bulk aggregation failed for {table_name}.{fk_col} "
+                f"({len(old_values)} old -> {new_value}): {e}"
+            )
+            raise
+
+
+    def reassign_grid_facts_to_admin(self) -> Dict[str, int]:
+        """
+        Reassign fact rows from environment grid cells to their nearest
+        non-grid administrative ancestor.
+
+        Runs after `resolve_parent_locations()` has populated the grid
+        cells' parent_location_id, and before `expand_burden_to_daily()`
+        so that newly generated daily case rows inherit an admin-sited
+        location from their burden row rather than a grid cell.
+
+        Only tables whose semantic meaning is "an administrative
+        observation" are reassigned:
+
+            fact_disease_case    cases are reported per admin unit
+            fact_disease_burden  same
+            fact_intervention    MAP ITN rasters are per-pixel; the study
+                                 area is admin2, so the intervention
+                                 coverage must be rolled up
+
+        Deliberately NOT reassigned:
+
+            fact_environment       per-pixel by design; rolling up to
+                                   admin loses the spatial detail the
+                                   vector-climate analysis depends on
+            fact_vector_observation, fact_insecticide_resistance,
+            fact_bionomics         already filed at `site`, not grid
+
+        The parent chain can be multi-hop if a grid cell's parent is
+        itself a grid cell, though in practice a single hop suffices.
+        SQLite's recursive CTE support is assumed.
+
+        Returns
+        -------
+        dict
+            {table_name: rows_in_aggregated_result}
+        """
+        logger.info("=" * 60)
+        logger.info("REASSIGNING GRID-SITED FACTS TO ADMIN UNITS")
+        logger.info("=" * 60)
+
+        # ---- Build the {grid_id: nearest_non_grid_ancestor_id} map. ----
+        try:
+            rows = self.session.execute(text("""
+                WITH RECURSIVE ancestry(grid_id, ancestor_id) AS (
+                    SELECT g.location_id, g.parent_location_id
+                    FROM dim_location g
+                    WHERE g.admin_level = 'grid'
+                      AND g.parent_location_id IS NOT NULL
+                    UNION ALL
+                    SELECT a.grid_id, p.parent_location_id
+                    FROM ancestry a
+                    JOIN dim_location p ON a.ancestor_id = p.location_id
+                    WHERE p.admin_level = 'grid'
+                      AND p.parent_location_id IS NOT NULL
+                )
+                SELECT a.grid_id, a.ancestor_id
+                FROM ancestry a
+                JOIN dim_location p ON a.ancestor_id = p.location_id
+                WHERE p.admin_level IS NULL
+                   OR p.admin_level <> 'grid'
+            """)).fetchall()
+        except Exception as e:
+            logger.error(f"  Could not build grid-to-admin map: {e}")
+            return {}
+
+        grid_to_admin = {int(r[0]): int(r[1]) for r in rows}
+
+        if not grid_to_admin:
+            logger.info("  No grid cells have a non-grid ancestor; skipping.")
+            return {}
+
+        logger.info(
+            f"  {len(grid_to_admin)} grid cells have a non-grid ancestor."
+        )
+
+        target_tables = [
+            "fact_disease_case",
+            "fact_disease_burden",
+            "fact_intervention",
+        ]
+
+        results: Dict[str, int] = {}
+
+        for table_name in target_tables:
+            # Which of these grid cells actually appear in the table?
+            try:
+                existing = {
+                    int(r[0]) for r in self.session.execute(
+                        text(f"SELECT DISTINCT location_id FROM {table_name} "
+                             f"WHERE location_id IS NOT NULL")
+                    ).fetchall()
+                }
+            except Exception as e:
+                logger.warning(f"  Could not scan {table_name}: {e}")
+                results[table_name] = 0
+                continue
+
+            applicable = {g: a for g, a in grid_to_admin.items() if g in existing}
+            if not applicable:
+                logger.info(f"  {table_name}: no grid-sited rows to reassign")
+                results[table_name] = 0
+                continue
+
+            # Group grid cells by their target admin unit.
+            by_admin: Dict[int, List[int]] = {}
+            for grid_id, admin_id in applicable.items():
+                by_admin.setdefault(admin_id, []).append(grid_id)
+
+            logger.info(
+                f"  {table_name}: {len(applicable)} grid cells -> "
+                f"{len(by_admin)} admin units"
+            )
+
+            total = 0
+            failures = 0
+            for admin_id, grid_ids in by_admin.items():
+                try:
+                    written = self._aggregate_and_reassign_bulk(
+                        table_name, "location_id", grid_ids, admin_id
+                    )
+                    total += written
+                except Exception as e:
+                    failures += 1
+                    logger.error(
+                        f"    Failed to reassign {len(grid_ids)} grid cells "
+                        f"-> admin {admin_id} in {table_name}: {e}"
+                    )
+                    continue
+
+            results[table_name] = total
+            if failures:
+                logger.warning(
+                    f"  {table_name}: {total} rows in aggregated result, "
+                    f"{failures} admin-unit groups failed"
+                )
+            else:
+                logger.info(
+                    f"  {table_name}: {total} rows in aggregated result"
+                )
+
+        logger.info("=" * 60)
+        return results
 
 # ========================= CONVENIENCE FUNCTIONS =========================
 

@@ -63,6 +63,8 @@ class DimLocationCreate(BaseModel):
     admin_level: Optional[str] = None
     centroid_lat: Optional[float] = None
     centroid_lon: Optional[float] = None
+    parent_location_id: Optional[int] = None
+    origin: Optional[str] = "source"
 
     @field_validator("centroid_lat")
     @classmethod

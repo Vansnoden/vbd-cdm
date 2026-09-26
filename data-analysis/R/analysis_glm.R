@@ -2,20 +2,17 @@
 
 analyze_negbin_glm <- function(cases, environment, offset_population = NULL) {
   panel <- cases |>
-    dplyr::mutate(month = lubridate::month(date)) |>
+    dplyr::mutate(month = lubridate::month(.data$date)) |>
     dplyr::left_join(environment, by = "date") |>
-    dplyr::filter(!is.na(case_count))
+    dplyr::filter(!is.na(.data$case_count))
   
-  # FIX: the previous version had `fit_pois <- MASS::glm.nb  # placeholder`
-  # which served no purpose and shadowed nothing useful. Removed.
-  
-  if (is.null(offset_population)) {
-    m_nb <- MASS::glm.nb(
+  m_nb <- if (is.null(offset_population)) {
+    MASS::glm.nb(
       case_count ~ t2m + tp + factor(month),
       data = panel
     )
   } else {
-    m_nb <- MASS::glm.nb(
+    MASS::glm.nb(
       case_count ~ t2m + tp + factor(month) + offset(log(offset_population)),
       data = panel
     )
@@ -24,8 +21,16 @@ analyze_negbin_glm <- function(cases, environment, offset_population = NULL) {
   list(
     model        = m_nb,
     coefficients = broom::tidy(m_nb, exponentiate = TRUE, conf.int = TRUE),
-    aic          = AIC(m_nb),
+    aic          = stats::AIC(m_nb),
+    
+    # Negative-binomial dispersion parameter. As theta -> Inf the NB
+    # distribution collapses to Poisson. This is the value to report when
+    # describing overdispersion.
     theta        = m_nb$theta,
-    dispersion   = summary(m_nb)$dispersion
+    
+    # Kept for callers that read $dispersion. For a MASS::glm.nb fit this
+    # is 1/theta, NOT a variance-mean ratio in the quasi-Poisson sense.
+    # Prefer $theta above.
+    dispersion   = 1 / m_nb$theta
   )
 }

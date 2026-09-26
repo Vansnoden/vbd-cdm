@@ -1,8 +1,8 @@
-"""initial CDM
+"""Initial CDM
 
-Revision ID: 4aa7488470c8
+Revision ID: 7aa764c87018
 Revises: 
-Create Date: 2026-09-24 12:49:42.581709
+Create Date: 2026-09-25 16:45:02.769786
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '4aa7488470c8'
+revision: str = '7aa764c87018'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -119,10 +119,16 @@ def upgrade() -> None:
     sa.Column('admin_level', sa.String(length=100), nullable=True),
     sa.Column('standard_code', sa.String(length=100), nullable=True),
     sa.Column('concept_id', sa.Integer(), nullable=True),
+    sa.Column('parent_location_id', sa.Integer(), nullable=True),
+    sa.Column('origin', sa.String(length=30), nullable=True),
     sa.ForeignKeyConstraint(['concept_id'], ['dim_concept.concept_id'], ),
+    sa.ForeignKeyConstraint(['parent_location_id'], ['dim_location.location_id'], ),
     sa.PrimaryKeyConstraint('location_id'),
     sa.UniqueConstraint('location_code')
     )
+    op.create_index('idx_dim_location_admin', 'dim_location', ['admin_level'], unique=False)
+    op.create_index('idx_dim_location_origin', 'dim_location', ['origin'], unique=False)
+    op.create_index('idx_dim_location_parent', 'dim_location', ['parent_location_id'], unique=False)
     op.create_table('dim_resistance_test_type',
     sa.Column('test_type_code', sa.String(length=100), nullable=False),
     sa.Column('test_type_name', sa.String(length=100), nullable=False),
@@ -429,6 +435,9 @@ def downgrade() -> None:
     op.drop_table('dim_source')
     op.drop_table('dim_socioeconomic_indicator')
     op.drop_table('dim_resistance_test_type')
+    op.drop_index('idx_dim_location_parent', table_name='dim_location')
+    op.drop_index('idx_dim_location_origin', table_name='dim_location')
+    op.drop_index('idx_dim_location_admin', table_name='dim_location')
     op.drop_table('dim_location')
     op.drop_table('dim_insecticide')
     op.drop_table('dim_identification_method')

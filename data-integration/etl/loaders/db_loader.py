@@ -479,29 +479,83 @@ class DBLoader:
             if col not in df.columns:
                 df[col] = None
 
-        # Drop rows with NaN/None in NOT NULL columns before the batch
-        # insert. A single NaN aborts the whole batch with an IntegrityError.
-        # This is a defence-in-depth guard; the extractor and transformer
-        # should already have removed malformed rows.
+        # ------------------------------------------------------------------
+        # NOT NULL column handling
         #
-        # Autoincrement PKs are skipped: their absence is expected, not an
-        # error. The upsert paths already pop None-valued PKs from each
-        # record so the database can assign a fresh id.
+        # Two-stage pass.
+        #
+        # Stage 1: fill NaN values in NOT NULL columns from the model's
+        #          Python-side default, when one exists and is a plain scalar.
+        #          This rescues columns like fact_disease_case.case_count,
+        #          which is NOT NULL with server_default='1' but which the
+        #          mapping transformer leaves as None when the source CSV does
+        #          not carry the column.
+        #
+        # Stage 2: drop rows that still have NaN in a NOT NULL column that
+        #          has NO default at all. Columns with a server-only default
+        #          are NOT dropped here — the server default cannot rescue an
+        #          explicit NULL in the INSERT column list, so silently
+        #          dropping those rows would hide a real configuration bug.
+        #          Log an error instead.
+        #
+        # Autoincrement PKs are exempt throughout: their absence means "the
+        # database will assign one", not "this row is malformed".
+        # ------------------------------------------------------------------
         for col_meta in inspector.get_columns(table_name):
             if col_meta.get("nullable", True):
                 continue
             col = col_meta["name"]
-            if col in autoincrement_pks:
+            if col in autoincrement_pks or col not in df.columns:
                 continue
-            if col not in df.columns:
+
+            model_col = model_col_map.get(col)
+            py_default = getattr(model_col, "default", None) if model_col is not None else None
+            default_arg = getattr(py_default, "arg", None) if py_default is not None else None
+
+            # Stage 1 — fill from a scalar Python-side default.
+            if default_arg is not None and not callable(default_arg):
+                nan_mask = df[col].isna()
+                n_filled = int(nan_mask.sum())
+                if n_filled:
+                    df[col] = df[col].where(~nan_mask, default_arg)
+                    logger.info(
+                        f"  {table_name}.{col}: filled {n_filled} NaN values with "
+                        f"Python-side default {default_arg!r}"
+                    )
+
+        for col_meta in inspector.get_columns(table_name):
+            if col_meta.get("nullable", True):
                 continue
+            col = col_meta["name"]
+            if col in autoincrement_pks or col not in df.columns:
+                continue
+
+            # Stage 2 — anything still NaN?
+            remaining = int(df[col].isna().sum())
+            if remaining == 0:
+                continue
+
+            # Server-only default: cannot be relied on because the upsert
+            # paths pass an explicit NULL for this column. Do not drop the
+            # rows — that hides the configuration bug. Log and continue.
+            if col_meta.get("default") is not None:
+                logger.error(
+                    f"  {table_name}.{col}: {remaining} rows still NaN after "
+                    f"default fill, but the column has only a server default. "
+                    f"Add a Python-side `default=` to the model so the loader "
+                    f"can fill these rows, or fix the mapping CSV to supply the "
+                    f"column. The INSERT will fail on NOT NULL otherwise."
+                )
+                continue
+
+            # No default at all — drop the rows.
             before = len(df)
             df = df[df[col].notna()].copy()
             dropped = before - len(df)
             if dropped:
                 logger.warning(
                     f"  {table_name}.{col}: dropped {dropped} rows with NaN "
-                    f"(column is NOT NULL)"
+                    f"(column is NOT NULL, no default)"
                 )
 
         # Convert datetimes to date objects to keep COPY simple.
