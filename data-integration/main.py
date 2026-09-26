@@ -63,6 +63,8 @@ def setup_environment():
     load_dotenv()
     (PROJECT_ROOT / 'logs').mkdir(exist_ok=True)
     (PROJECT_ROOT / 'outputs').mkdir(exist_ok=True)
+    # Seed the time dimension once, not per source.
+    init_dim_time(start_date="1900-01-01", end_date="2026-12-31")
 
 
 def get_all_files_from_folder(folder_path: str, extension: str) -> List[str]:
@@ -264,8 +266,6 @@ def run_ingestion_for_source(source_config: Dict[str, Any]) -> bool:
             return False
         # Step 2: Get mapping path
         mapping_path = get_mapping_path(source_config)
-        # step 2.5: init time dimension
-        init_dim_time(start_date="1900-01-01", end_date="2026-12-31")
         
         # Step 3: Create loader
         loader = DBLoader(batch_size=10000, upsert=True, use_copy=True)
@@ -616,7 +616,12 @@ def main():
     # 1.5. Consolidate data
     core = config.get("core", {})
     if run_consolidate:
-        run_consolidation_step(core)
+        result = run_consolidation_step(core)
+        if isinstance(result, dict) and result.get("error"):
+            logger.error(
+                "Consolidation returned an error; skipping summary generation."
+            )
+            sys.exit(2)
     
     # --- 2. Generate summary ---
     if run_summary:

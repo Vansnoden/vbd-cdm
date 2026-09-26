@@ -1735,6 +1735,12 @@ class DataConsolidator:
     ) -> Dict[str, Any]:
         """
         Run the full consolidation pipeline.
+
+        Order of operations: dimension-side changes first, fact-side
+        second. Location merges run before the grid-to-admin fact
+        reassignment, so the reassignment targets the final location set
+        and no merge can orphan a fact row after the FK alignment has
+        already declared it valid.
         """
         from utilities.admin_alignment import (
             load_admin_hierarchy,
@@ -1746,68 +1752,83 @@ class DataConsolidator:
         logger.info("STARTING FULL DATA CONSOLIDATION")
         logger.info("=" * 60)
 
-        # The rebuild runs first, unconditionally, so any prior
-        # cross-level merge damage is corrected before the rest of the
-        # pipeline reads the hierarchy.
-        logger.info("Step 0a: Rebuilding admin hierarchy from standard_code...")
+        # ------------------------------------------------------------------
+        # Phase A — dimension side.
+        # ------------------------------------------------------------------
+        logger.info("Step A1: Rebuilding admin hierarchy from standard_code...")
         rebuild_results = self._rebuild_admin_hierarchy_from_standard_code()
 
         if gadm_gpkg:
-            logger.info("Step 0b: Loading GADM admin hierarchy...")
+            logger.info("Step A2: Loading GADM admin hierarchy...")
             load_admin_hierarchy(self.session, gadm_gpkg, country_codes)
 
-            logger.info("Step 0c: Resolving parent locations by coordinates...")
-            resolve_parent_locations(
-                self.session, gadm_gpkg, country_codes
-            )
+            logger.info("Step A3: Resolving parent locations by coordinates...")
+            resolve_parent_locations(self.session, gadm_gpkg, country_codes)
 
-            logger.info("Step 0d: Reassigning grid-sited facts to admin units...")
+        logger.info("Step A4: Repairing dangling parent references (pre-merge)...")
+        dangling_before = self._repair_dangling_parents()
+
+        logger.info("Step A5: Standardizing country codes...")
+        self._standardize_country_codes()
+
+        logger.info("Step A6: Consolidating locations (merges)...")
+        loc_results = self.consolidate_locations()
+
+        logger.info("Step A7: Repairing dangling parent references (post-merge)...")
+        dangling_after_merge = self._repair_dangling_parents()
+
+        logger.info("Step A8: Consolidating vocabulary...")
+        vocab_cons_results = self.consolidate_vocabulary()
+
+        if gadm_gpkg:
+            logger.info("Step A9: Attaching GADM concepts to locations...")
+            attach_admin_concepts(self.session)
+
+        # ------------------------------------------------------------------
+        # Phase B — fact side.
+        # ------------------------------------------------------------------
+        logger.info("Step B1: Reassigning grid-sited facts to admin units...")
+        if gadm_gpkg:
             grid_reassign_results = self.reassign_grid_facts_to_admin()
         else:
             grid_reassign_results = {}
 
-        logger.info("Step 1: Aligning foreign keys...")
-        fk_results = self.align_all_foreign_keys()
-
-        logger.info("Step 2: Repairing dangling parent references...")
-        dangling_fixed = self._repair_dangling_parents()
-
-        logger.info("Step 3: Standardizing vocabularies...")
-        vocab_std_results = self.standardize_vocabularies()
-
-        if gadm_gpkg:
-            logger.info("Step 3b: Attaching GADM concepts to locations...")
-            attach_admin_concepts(self.session)
-
-        logger.info("Step 4: Standardizing country codes...")
-        self._standardize_country_codes()
-
-        logger.info("Step 5: Fixing orphaned burden records...")
+        logger.info("Step B2: Fixing orphaned burden records...")
         burden_fixed = self.fix_orphaned_burden_records()
 
-        logger.info("Step 6: Expanding burden to daily records...")
+        logger.info("Step B3: Aligning foreign keys...")
+        fk_results = self.align_all_foreign_keys()
+
+        logger.info("Step B4: Repairing dangling parent references (post-FK)...")
+        dangling_after_fk = self._repair_dangling_parents()
+
+        logger.info("Step B5: Standardizing vocabularies (fact side)...")
+        vocab_std_results = self.standardize_vocabularies()
+
+        # ------------------------------------------------------------------
+        # Phase C — derived data.
+        # ------------------------------------------------------------------
+        logger.info("Step C1: Expanding burden to daily records...")
         self.expand_burden_to_daily(force=False)
 
-        logger.info("Step 7: Consolidating locations (name-based merge)...")
-        loc_results = self.consolidate_locations()
-
-        logger.info("Step 7b: Re-checking dangling references after merge...")
-        dangling_after_merge = self._repair_dangling_parents()
-
-        logger.info("Step 8: Consolidating vocabulary...")
-        vocab_cons_results = self.consolidate_vocabulary()
-
-        logger.info("Step 9: Resolving duplicates...")
+        logger.info("Step C2: Resolving duplicates...")
         dup_results = self.detect_duplicates()
         self.resolve_fact_table_duplicates()
 
-        logger.info("Step 10: Computing resistance status...")
+        logger.info("Step C3: Computing resistance status...")
         self._compute_resistance_status()
 
-        logger.info("Step 11: Final verification...")
+        # ------------------------------------------------------------------
+        # Phase D — validation.
+        # ------------------------------------------------------------------
+        logger.info("Step D1: Final verification...")
         validation = self.validate_country_codes()
         final_orphan_check = self._check_remaining_orphans()
         hierarchy_check = self._check_hierarchy()
+
+        total_dangling_fixed = (
+            dangling_before + dangling_after_merge + dangling_after_fk
+        )
 
         results = {
             "foreign_key_alignment":  fk_results,
@@ -1819,22 +1840,22 @@ class DataConsolidator:
             "burden_fixed":           burden_fixed,
             "grid_reassignment":      grid_reassign_results,
             "hierarchy_rebuild":      rebuild_results,
-            "dangling_parent_fixes":  dangling_fixed + dangling_after_merge,
+            "dangling_parent_fixes":  total_dangling_fixed,
             "remaining_orphans":      final_orphan_check,
             "hierarchy":              hierarchy_check,
         }
 
         logger.info("=" * 60)
         logger.info("CONSOLIDATION COMPLETE")
-        logger.info(f"  Total locations:       {validation.get('total', 0)}")
-        logger.info(f"  Valid country codes:   {validation.get('valid', 0)}")
-        logger.info(f"  Burden records fixed:  {burden_fixed}")
+        logger.info(f"  Total locations:         {validation.get('total', 0)}")
+        logger.info(f"  Valid country codes:     {validation.get('valid', 0)}")
+        logger.info(f"  Burden records fixed:    {burden_fixed}")
         logger.info(f"  Grid-to-admin reassigned:")
         for tbl, n in (grid_reassign_results or {}).items():
-            logger.info(f"    {tbl}: {n} rows")
+            logger.info(f"    {tbl}: {n} rows in aggregated result")
         logger.info(f"  Hierarchy levels fixed:  {rebuild_results['level_fixed']}")
         logger.info(f"  Hierarchy parents fixed: {rebuild_results['parent_fixed']}")
-        logger.info(f"  Dangling parents fixed:  {dangling_fixed + dangling_after_merge}")
+        logger.info(f"  Dangling parents fixed:  {total_dangling_fixed}")
         logger.info(f"  Remaining orphans:       {final_orphan_check}")
         logger.info(
             f"  Hierarchy: "
@@ -2184,77 +2205,7 @@ class DataConsolidator:
 
         return results
 
-    def _bind_climate_coordinates_to_region(self, study_region: str = "Kenya"):
-        """
-        Assign a region to climate grid rows that have no country yet.
-
-        Only rows whose coordinates fall inside the study region's
-        bounding box are relabelled. The previous version blindly
-        reassigned EVERY row with a NULL country_code to Kenya, which is
-        how locations in Benin, Nigeria, and Liberia silently disappeared
-        into KE on an earlier run.
-        """
-        region_code = get_iso_country_code(study_region) or 'KE'
-        region_name = get_country_name(region_code) or study_region
-
-        # Bounding boxes per supported study region.
-        # (lat_min, lat_max, lon_min, lon_max)
-        _BBOX = {
-            'KE': (-5.0, 5.5, 33.5, 42.0),
-        }
-        bbox = _BBOX.get(region_code)
-        if bbox is None:
-            logger.warning(
-                f"No bounding box defined for study region {region_code}; "
-                f"skipping climate-coordinate binding."
-            )
-            return
-
-        lat_min, lat_max, lon_min, lon_max = bbox
-
-        result = self.session.execute(text("""
-            UPDATE dim_location
-            SET country_name = :region_name,
-                country_code = :region_code
-            WHERE (country_name IS NULL
-                   OR country_name = ''
-                   OR country_name = 'None'
-                   OR country_name = 'UNKNOWN'
-                   OR country_code IS NULL
-                   OR country_code = ''
-                   OR country_code = 'UNKNOWN')
-              AND centroid_lat BETWEEN :lat_min AND :lat_max
-              AND centroid_lon BETWEEN :lon_min AND :lon_max
-        """), {
-            "region_name": region_name,
-            "region_code": region_code,
-            "lat_min": lat_min, "lat_max": lat_max,
-            "lon_min": lon_min, "lon_max": lon_max,
-        })
-        if result.rowcount:
-            logger.info(
-                f"  Assigned {result.rowcount} NULL-country locations to "
-                f"{region_name} (inside bbox)"
-            )
-
-        if region_code == 'KE':
-            self.session.execute(text("""
-                UPDATE dim_location
-                SET name = 'Siaya County (Climate Grid)',
-                    country_name = :region_name,
-                    country_code = :region_code
-                WHERE (name LIKE '%/%' OR name IS NULL OR name = '' OR name = 'Siaya')
-                  AND centroid_lat BETWEEN :lat_min AND :lat_max
-                  AND centroid_lon BETWEEN :lon_min AND :lon_max
-            """), {
-                "region_name": region_name,
-                "region_code": region_code,
-                "lat_min": lat_min, "lat_max": lat_max,
-                "lon_min": lon_min, "lon_max": lon_max,
-            })
-
-        self.session.commit()
-
+    
     def consolidate_locations(self, distance_threshold_km: float = 5.0,
                               min_samples: int = 1, dry_run: bool = False):
         """Consolidate locations with country code standardization."""
@@ -2387,9 +2338,7 @@ class DataConsolidator:
     
     def _merge_by_name(self, loc_data: pd.DataFrame, dry_run: bool = False) -> List[Dict[str, Any]]:
         results = []
-        # Group by admin_level as well as name. Without it, a site named
-        # "Siaya" and an admin2 county named "Siaya" are grouped together
-        # and one is deleted, collapsing a GADM unit into a non-GADM site.
+        # Group by admin_level as well as name.
         group_cols = ['name_normalized', 'admin_level']
         if 'country_code' in loc_data.columns:
             group_cols.append('country_code')
@@ -2807,6 +2756,7 @@ class DataConsolidator:
         self.session.commit()
         return {"status": "ok", "duplicates_found": len(duplicate_groups), "merged": merged}
 
+
     def _update_fact_references(self, dimension_model, old_code: str, new_code: str):
         """
         Reassign a dimension FK across every fact table that references it.
@@ -2838,7 +2788,28 @@ class DataConsolidator:
         Autoincrement primary keys are deliberately omitted from the INSERT
         column list — after aggregation, the old IDs are meaningless, and
         the DB assigns fresh ones.
+
+        Implementation notes
+        --------------------
+        Uses a **named physical staging table** with a UUID suffix, not a
+        TEMP table. SQLite TEMP tables are scoped to a single connection;
+        SQLAlchemy's session pool can recycle the underlying connection
+        between the CREATE and the SELECT, at which point the temp table
+        is invisible on the new connection and the INSERT re-inserts
+        zero rows. A physical table is visible on every connection and
+        is dropped in the finally block.
+
+        Before commit, the method compares the rows the staging table
+        holds to the rows the INSERT actually wrote. If the count is
+        short, the transaction is rolled back and a RuntimeError is
+        raised. This turns silent data loss into a loud failure.
+
+        Bind parameters are used for the FK values so the method works
+        for both integer surrogate keys (location_id) and string natural
+        keys (disease_code, source_code, vector_code, insecticide_code).
         """
+        import uuid
+
         if old_value == new_value:
             return
 
@@ -2848,7 +2819,8 @@ class DataConsolidator:
             # unique-constraint collisions.
             try:
                 result = self.session.execute(
-                    text(f"UPDATE {table_name} SET {fk_col} = :new WHERE {fk_col} = :old"),
+                    text(f"UPDATE {table_name} SET {fk_col} = :new "
+                         f"WHERE {fk_col} = :old"),
                     {"new": new_value, "old": old_value},
                 )
                 self.session.commit()
@@ -2868,7 +2840,7 @@ class DataConsolidator:
                 raise
             return
 
-        # ---- Spec coverage check (fails loudly, not silently) ----------------
+        # ---- Spec coverage check (fails loudly, not silently) -----------
         self._validate_aggregation_spec(table_name, spec)
 
         nk      = spec["natural_key"]
@@ -2877,10 +2849,10 @@ class DataConsolidator:
         first   = spec["first"]
         derived = spec.get("derived", [])
 
-        # Build the SELECT list and track the exact column order of the temp
-        # table so the INSERT column list matches it 1:1.
-        select_parts = [f"'{new_value}' AS {fk_col}"]
-        temp_cols = [fk_col]
+        # The new FK value is bound as a parameter so this works for both
+        # integer surrogate keys and string natural keys.
+        select_parts = [f":new_value AS {fk_col}"]
+        temp_cols    = [fk_col]
         for col in nk:
             if col == fk_col:
                 continue
@@ -2896,53 +2868,105 @@ class DataConsolidator:
             select_parts.append(f"MIN({col}) AS {col}")
             temp_cols.append(col)
         # `derived` columns are deliberately NOT selected. They will be
-        # inserted as NULL (their column default) and recomputed by the
-        # owning pass.
+        # inserted as NULL and recomputed by the owning pass.
         select_sql = ", ".join(select_parts)
 
-        group_cols = [c for c in nk if c != fk_col]
+        group_cols   = [c for c in nk if c != fk_col]
         group_by_sql = ("GROUP BY " + ", ".join(group_cols)) if group_cols else ""
 
         inspector = inspect(self.session.bind)
-
-        # Exclude autoincrement / primary-key columns from the INSERT.
         pk_cols = set(
             inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
         )
         insert_cols = [c for c in temp_cols if c not in pk_cols]
 
+        # Unique physical staging name so concurrent runs and connection
+        # recycling cannot collide with each other or with a leftover
+        # from a failed previous call.
+        staging = f"_agg_{table_name}_{uuid.uuid4().hex[:8]}"
+
         try:
-            self.session.execute(text(f"""
-                CREATE TEMP TABLE _agg_{table_name} AS
+            # 1. Materialise the aggregated rows.
+            create_sql = text(f"""
+                CREATE TABLE {staging} AS
                 SELECT {select_sql}
                 FROM {table_name}
-                WHERE {fk_col} IN (:old_code, :new_code)
+                WHERE {fk_col} IN (:old_value, :new_value)
                 {group_by_sql}
-            """), {"old_code": old_value, "new_code": new_value})
+            """)
+            self.session.execute(
+                create_sql, {"old_value": old_value, "new_value": new_value}
+            )
 
-            self.session.execute(text(
-                f"DELETE FROM {table_name} WHERE {fk_col} IN (:old_code, :new_code)"
-            ), {"old_code": old_value, "new_code": new_value})
+            staged = self.session.execute(
+                text(f"SELECT COUNT(*) FROM {staging}")
+            ).scalar() or 0
 
+            if staged == 0:
+                # old_value is already absent from the table; nothing to
+                # reassign and nothing to lose.
+                self.session.execute(text(f"DROP TABLE {staging}"))
+                self.session.commit()
+                logger.info(
+                    f"    No rows matched {table_name}.{fk_col} = "
+                    f"{old_value!r}; nothing to reassign."
+                )
+                return
+
+            # 2. Delete the affected source rows.
+            deleted = self.session.execute(
+                text(f"DELETE FROM {table_name} "
+                     f"WHERE {fk_col} IN (:old_value, :new_value)"),
+                {"old_value": old_value, "new_value": new_value},
+            ).rowcount or 0
+
+            # 3. Reinsert from staging.
             self.session.execute(text(f"""
                 INSERT INTO {table_name} ({', '.join(insert_cols)})
-                SELECT {', '.join(insert_cols)} FROM _agg_{table_name}
+                SELECT {', '.join(insert_cols)} FROM {staging}
             """))
+            inserted = self.session.execute(
+                text("SELECT changes()")
+            ).scalar() or 0
 
-            self.session.execute(text(f"DROP TABLE _agg_{table_name}"))
+            # 4. Reconcile. Anything below `staged` is data loss.
+            if inserted < staged:
+                self.session.rollback()
+                try:
+                    self.session.execute(text(f"DROP TABLE IF EXISTS {staging}"))
+                    self.session.commit()
+                except Exception:
+                    self.session.rollback()
+                raise RuntimeError(
+                    f"Aggregation for {table_name}.{fk_col} "
+                    f"({old_value!r} -> {new_value!r}) would insert "
+                    f"{inserted} rows but the staging table held "
+                    f"{staged}. Aborted."
+                )
+
+            # 5. Drop the staging table and commit.
+            self.session.execute(text(f"DROP TABLE {staging}"))
             self.session.commit()
+
             logger.info(
                 f"    Aggregated + reassigned {table_name}.{fk_col}: "
-                f"{old_value} -> {new_value} "
-                f"({len(insert_cols)} columns preserved"
-                + (f", {len(derived)} derived column(s) reset for recomputation)"
-                if derived else ")")
+                f"{old_value!r} -> {new_value!r} "
+                f"({deleted} deleted, {inserted} inserted"
+                + (f", {len(derived)} derived col(s) reset)" if derived else ")")
             )
+
         except Exception as e:
             self.session.rollback()
+            # Best-effort cleanup. The staging name is unique, so a
+            # leftover does no harm beyond clutter.
+            try:
+                self.session.execute(text(f"DROP TABLE IF EXISTS {staging}"))
+                self.session.commit()
+            except Exception:
+                self.session.rollback()
             logger.error(
                 f"    Aggregation failed for {table_name}.{fk_col} "
-                f"({old_value} -> {new_value}): {e}"
+                f"({old_value!r} -> {new_value!r}): {e}"
             )
             raise
 
@@ -3230,15 +3254,32 @@ class DataConsolidator:
             - AVG on columns listed under `means`.
             - MIN on columns listed under `first`.
             - Columns listed under `derived` are set to NULL and must be
-              recomputed by whatever pass owns them (currently
-              _compute_resistance_status for fact_insecticide_resistance).
+              recomputed by whatever pass owns them.
             - Autoincrement primary keys are omitted from the INSERT.
 
-        Tables without a `_FACT_AGGREGATION_SPEC` entry fall back to a
-        plain UPDATE with a unique-constraint guard.
+        Implementation notes
+        --------------------
+        Uses a **named physical table** with a UUID suffix, not a TEMP
+        table. SQLite TEMP tables are scoped to a single connection;
+        SQLAlchemy's session pool can recycle the underlying connection
+        between the CREATE and the SELECT, at which point the temp table
+        is invisible on the new connection and the INSERT re-inserts
+        zero rows. A physical table is visible on every connection and
+        is dropped in a finally block.
 
-        Returns the number of rows in the post-aggregation result.
+        Before commit, the method compares deleted rows to inserted
+        rows. If the insert count is lower than the delete count by more
+        than the number of natural-key groups the SELECT produced, the
+        transaction is rolled back and a RuntimeError is raised. This
+        turns silent data loss into a loud failure.
+
+        Returns
+        -------
+        int
+            Number of rows in the post-aggregation result.
         """
+        import uuid
+
         if not old_values:
             return 0
 
@@ -3278,9 +3319,6 @@ class DataConsolidator:
         first   = spec["first"]
         derived = spec.get("derived", [])
 
-        # The new value is an integer surrogate key; embed it as a literal
-        # so the SELECT is a simple projection and the expanding bindparam
-        # only carries the WHERE-list.
         new_literal = int(new_value)
 
         select_parts = [f"{new_literal} AS {fk_col}"]
@@ -3312,45 +3350,97 @@ class DataConsolidator:
         insert_cols = [c for c in temp_cols if c not in pk_cols]
 
         touched  = list(old_values) + [new_value]
-        tmp_name = f"_bulk_{table_name}"
+        # Physical table with a unique suffix so concurrent runs and
+        # connection recycling cannot collide.
+        staging  = f"_bulk_{table_name}_{uuid.uuid4().hex[:8]}"
 
         try:
-            create_stmt = text(f"""
-                CREATE TEMP TABLE {tmp_name} AS
+            # 1. Materialise the aggregated rows.
+            create_sql = text(f"""
+                CREATE TABLE {staging} AS
                 SELECT {select_sql}
                 FROM {table_name}
                 WHERE {fk_col} IN :olds
                 {group_by_sql}
             """).bindparams(bindparam("olds", expanding=True))
-            self.session.execute(create_stmt, {"olds": touched})
+            self.session.execute(create_sql, {"olds": touched})
 
             staged = self.session.execute(
-                text(f"SELECT COUNT(*) FROM {tmp_name}")
+                text(f"SELECT COUNT(*) FROM {staging}")
             ).scalar() or 0
 
-            delete_stmt = text(
+            if staged == 0:
+                # Nothing to aggregate. Drop the staging table and bail
+                # without touching the source rows.
+                self.session.execute(text(f"DROP TABLE {staging}"))
+                self.session.commit()
+                logger.warning(
+                    f"    {table_name}.{fk_col}: no rows matched "
+                    f"{len(old_values)} old values; nothing to reassign."
+                )
+                return 0
+
+            # 2. Count source rows that are about to be removed.
+            count_sql = text(
+                f"SELECT COUNT(*) FROM {table_name} WHERE {fk_col} IN :olds"
+            ).bindparams(bindparam("olds", expanding=True))
+            before = self.session.execute(
+                count_sql, {"olds": touched}
+            ).scalar() or 0
+
+            # 3. Delete and reinsert in the same transaction.
+            delete_sql = text(
                 f"DELETE FROM {table_name} WHERE {fk_col} IN :olds"
             ).bindparams(bindparam("olds", expanding=True))
-            self.session.execute(delete_stmt, {"olds": touched})
+            deleted = self.session.execute(
+                delete_sql, {"olds": touched}
+            ).rowcount or 0
 
             self.session.execute(text(f"""
                 INSERT INTO {table_name} ({', '.join(insert_cols)})
-                SELECT {', '.join(insert_cols)} FROM {tmp_name}
+                SELECT {', '.join(insert_cols)} FROM {staging}
             """))
+            inserted = self.session.execute(
+                text("SELECT changes()")
+            ).scalar() or 0
 
-            self.session.execute(text(f"DROP TABLE {tmp_name}"))
+            # 4. Reconcile. The number of groups the SELECT produced is
+            #    the minimum expected insert count. Anything below that
+            #    is data loss.
+            if inserted < staged:
+                self.session.rollback()
+                try:
+                    self.session.execute(text(f"DROP TABLE {staging}"))
+                    self.session.commit()
+                except Exception:
+                    self.session.rollback()
+                raise RuntimeError(
+                    f"Bulk aggregation for {table_name}.{fk_col} would "
+                    f"insert {inserted} rows but the staging table held "
+                    f"{staged}. Aborted."
+                )
+
+            # 5. Drop the staging table and commit.
+            self.session.execute(text(f"DROP TABLE {staging}"))
             self.session.commit()
 
             logger.info(
                 f"    Bulk-aggregated {table_name}.{fk_col}: "
                 f"{len(old_values)} old -> {new_value} "
-                f"({staged} rows"
+                f"({before} deleted, {inserted} inserted"
                 + (f", {len(derived)} derived col(s) reset)" if derived else ")")
             )
-            return staged
+            return inserted
 
         except Exception as e:
             self.session.rollback()
+            # Best-effort cleanup of the staging table. Its name is
+            # unique, so a leftover does no harm except clutter.
+            try:
+                self.session.execute(text(f"DROP TABLE IF EXISTS {staging}"))
+                self.session.commit()
+            except Exception:
+                self.session.rollback()
             logger.error(
                 f"    Bulk aggregation failed for {table_name}.{fk_col} "
                 f"({len(old_values)} old -> {new_value}): {e}"
