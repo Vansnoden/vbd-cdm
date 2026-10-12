@@ -44,7 +44,7 @@ NATURAL_KEY_CONFIG = {
         'sentinels': {},
     },
     'fact_disease_burden': {
-        'columns': ['location_id', 'year', 'disease_code'],
+        'columns': ['location_id', 'year', 'disease_code', 'pathogen_species'],
         'sentinels': {},
     },
     'fact_socioeconomic_condition': {
@@ -192,6 +192,11 @@ class DBLoader:
         Use PostgreSQL COPY to bulk load data into a temporary staging table,
         then merge into the target table with ON CONFLICT DO UPDATE.
         Safe against modifying autoincrement primary keys.
+
+        Only columns with at least one non-null value in the incoming batch
+        participate in the DO UPDATE SET clause. A source that does not
+        populate a column cannot clobber an existing value at the same
+        natural key.
         """
         pk_cols = self._get_primary_key_columns(table_name)
         conflict_targets = self._get_conflict_targets(table_name, pk_cols)
@@ -199,7 +204,7 @@ class DBLoader:
         # Staging table setup
         staging_table = f"{table_name}_staging"
         model_columns = [c.name for c in model.__table__.columns]
-        
+
         # We align DataFrame columns with model schema
         df = df[[col for col in df.columns if col in model_columns]].copy()
         for col in model_columns:
@@ -241,14 +246,19 @@ class DBLoader:
             finally:
                 cursor.close()
 
-            # Perform upsert: EXCLUDE primary keys and unique constraint targets from SET updates!
+            # Perform upsert: EXCLUDE primary keys and unique constraint targets
+            # from SET updates. Also exclude any column that carries no value at
+            # all in this batch — such a source has no opinion about that column
+            # and must not overwrite existing data.
             update_cols = [
-                col for col in df.columns 
-                if col not in pk_cols and col not in conflict_targets
+                col for col in df.columns
+                if col not in pk_cols
+                and col not in conflict_targets
+                and df[col].notna().any()
             ]
-            
+
             conflict_target_str = ", ".join(conflict_targets)
-            
+
             if update_cols:
                 update_set = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_cols])
                 upsert_sql = f"""
@@ -274,6 +284,14 @@ class DBLoader:
     # Standard batched upsert (for smaller datasets or non‑PostgreSQL)
     # -------------------------------------------------------------------------
     def _upsert_postgresql(self, df: pd.DataFrame, table_name: str, model: Any) -> int:
+        """
+        Batched upsert for PostgreSQL.
+
+        Only columns with at least one non-null value in the incoming batch
+        participate in the DO UPDATE SET clause. A source that does not
+        populate a column cannot clobber an existing value at the same
+        natural key.
+        """
         from sqlalchemy.dialects.postgresql import insert
 
         pk_cols = self._get_primary_key_columns(table_name)
@@ -294,7 +312,9 @@ class DBLoader:
                 update_dict = {
                     col: getattr(stmt.excluded, col)
                     for col in df.columns
-                    if col not in pk_cols and col not in conflict_targets
+                    if col not in pk_cols
+                    and col not in conflict_targets
+                    and df[col].notna().any()
                 }
 
                 if update_dict:
@@ -324,6 +344,13 @@ class DBLoader:
         Upsert for SQLite using ON CONFLICT DO UPDATE rather than INSERT OR REPLACE
         to prevent deletion/regeneration of autoincremented primary keys.
 
+        Only columns with at least one non-null value in the incoming batch
+        participate in the DO UPDATE SET clause. A source that does not
+        populate a column cannot clobber an existing value at the same
+        natural key. This is the fix that prevents e.g. the MAP Pf Incidence
+        Rate source from wiping the cases_mean column that the MAP Pf
+        Incidence Count source populated a moment earlier.
+
         Returns the number of rows actually written (inserted or updated).
         """
         from sqlalchemy.dialects.sqlite import insert
@@ -331,10 +358,13 @@ class DBLoader:
         pk_cols = self._get_primary_key_columns(table_name)
         conflict_targets = self._get_conflict_targets(table_name, pk_cols)
 
-        # Exclude PKs and conflict targets from the update block.
+        # Exclude PKs, conflict targets, and any column that is entirely NULL
+        # in this batch from the update block.
         update_cols = [
             col for col in df.columns
-            if col not in pk_cols and col not in conflict_targets
+            if col not in pk_cols
+            and col not in conflict_targets
+            and df[col].notna().any()
         ]
 
         records = df.to_dict(orient='records')
@@ -407,6 +437,13 @@ class DBLoader:
         or updated). This can differ from ``len(df)`` because
         ``_prepare_for_upsert`` may collapse duplicate rows within the batch
         before insert.
+
+        Autoincrement primary keys are exempt from the NOT NULL guard below.
+        A missing autoincrement PK means "the database will assign one", not
+        "this row is malformed". Without the exemption, every table whose PK
+        is autoincremented (dim_location, dim_concept, and every fact table)
+        arrives here with a column of None values and is filtered down to zero
+        rows, aborting the ETL silently for that source.
         """
         if df.empty:
             logger.info(f"No data to load for table {table_name}")
@@ -421,15 +458,108 @@ class DBLoader:
         model = self._table_models[table_name]
         input_rows = len(df)
 
-        # Keep only model columns; add missing columns as NULL.
+        inspector = inspect(engine)
         model_columns = [c.name for c in model.__table__.columns]
+        model_col_map = {c.name: c for c in model.__table__.columns}
+
+        # Columns the database will populate itself.
+        pk_cols = set(
+            inspector.get_pk_constraint(table_name).get("constrained_columns", [])
+            or []
+        )
+        autoincrement_pks = {
+            name for name in pk_cols
+            if name in model_col_map
+            and model_col_map[name].autoincrement is True
+        }
+
+        # Keep only model columns; add missing columns as NULL.
         df = df[[col for col in df.columns if col in model_columns]].copy()
         for col in model_columns:
             if col not in df.columns:
                 df[col] = None
 
+        # ------------------------------------------------------------------
+        # NOT NULL column handling
+        #
+        # Two-stage pass.
+        #
+        # Stage 1: fill NaN values in NOT NULL columns from the model's
+        #          Python-side default, when one exists and is a plain scalar.
+        #          This rescues columns like fact_disease_case.case_count,
+        #          which is NOT NULL with server_default='1' but which the
+        #          mapping transformer leaves as None when the source CSV does
+        #          not carry the column.
+        #
+        # Stage 2: drop rows that still have NaN in a NOT NULL column that
+        #          has NO default at all. Columns with a server-only default
+        #          are NOT dropped here — the server default cannot rescue an
+        #          explicit NULL in the INSERT column list, so silently
+        #          dropping those rows would hide a real configuration bug.
+        #          Log an error instead.
+        #
+        # Autoincrement PKs are exempt throughout: their absence means "the
+        # database will assign one", not "this row is malformed".
+        # ------------------------------------------------------------------
+        for col_meta in inspector.get_columns(table_name):
+            if col_meta.get("nullable", True):
+                continue
+            col = col_meta["name"]
+            if col in autoincrement_pks or col not in df.columns:
+                continue
+
+            model_col = model_col_map.get(col)
+            py_default = getattr(model_col, "default", None) if model_col is not None else None
+            default_arg = getattr(py_default, "arg", None) if py_default is not None else None
+
+            # Stage 1 — fill from a scalar Python-side default.
+            if default_arg is not None and not callable(default_arg):
+                nan_mask = df[col].isna()
+                n_filled = int(nan_mask.sum())
+                if n_filled:
+                    df[col] = df[col].where(~nan_mask, default_arg)
+                    logger.info(
+                        f"  {table_name}.{col}: filled {n_filled} NaN values with "
+                        f"Python-side default {default_arg!r}"
+                    )
+
+        for col_meta in inspector.get_columns(table_name):
+            if col_meta.get("nullable", True):
+                continue
+            col = col_meta["name"]
+            if col in autoincrement_pks or col not in df.columns:
+                continue
+
+            # Stage 2 — anything still NaN?
+            remaining = int(df[col].isna().sum())
+            if remaining == 0:
+                continue
+
+            # Server-only default: cannot be relied on because the upsert
+            # paths pass an explicit NULL for this column. Do not drop the
+            # rows — that hides the configuration bug. Log and continue.
+            if col_meta.get("default") is not None:
+                logger.error(
+                    f"  {table_name}.{col}: {remaining} rows still NaN after "
+                    f"default fill, but the column has only a server default. "
+                    f"Add a Python-side `default=` to the model so the loader "
+                    f"can fill these rows, or fix the mapping CSV to supply the "
+                    f"column. The INSERT will fail on NOT NULL otherwise."
+                )
+                continue
+
+            # No default at all — drop the rows.
+            before = len(df)
+            df = df[df[col].notna()].copy()
+            dropped = before - len(df)
+            if dropped:
+                logger.warning(
+                    f"  {table_name}.{col}: dropped {dropped} rows with NaN "
+                    f"(column is NOT NULL, no default)"
+                )
+
         # Convert datetimes to date objects to keep COPY simple.
-        for col in df.select_dtypes(include=['datetime64[ns]']).columns:
+        for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
             df[col] = df[col].dt.date
 
         # Sentinel-fill and dedup by natural key before upsert.
@@ -445,12 +575,12 @@ class DBLoader:
 
         try:
             if self.upsert:
-                if self._db_type == 'postgresql':
+                if self._db_type == "postgresql":
                     if self.use_copy and prepared_rows > self.batch_size * 2:
                         written = self._copy_upsert_postgresql(df, table_name, model)
                     else:
                         written = self._upsert_postgresql(df, table_name, model)
-                elif self._db_type == 'sqlite':
+                elif self._db_type == "sqlite":
                     written = self._upsert_sqlite(df, table_name, model)
                 else:
                     written = self._simple_insert(df, table_name)
@@ -466,7 +596,7 @@ class DBLoader:
         except SQLAlchemyError as e:
             logger.error(f"Failed to load table {table_name}: {e}")
             raise
-    
+
 
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """

@@ -7,6 +7,7 @@ rapidfuzz
 pronto
 biopython
 matplotlib
+openpyxl
 
 # --- Database ---
 SQLAlchemy

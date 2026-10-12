@@ -3,17 +3,53 @@
 A mapping CSV declares how one source DataFrame becomes one or more CDM
 tables. It has exactly nine columns:
 
-| Column             | Meaning                                                                      |
-|--------------------|------------------------------------------------------------------------------|
-| `source_column`    | Column name in the source DataFrame. Ignored if `static_value` is set.       |
-| `source_data_type` | Optional. `int` / `float` / `str`. Cast happens before the transform.        |
-| `static_value`     | If set, this literal is used instead of `source_column`.                     |
-| `target_table`     | CDM table name, e.g. `fact_vector_observation`.                              |
-| `target_column`    | Column in the target table.                                                  |
-| `transform`        | See the transform table in [ETL pipeline](etl.md).                           |
-| `transform_params` | JSON. Example: `{"ref": "dim_location.name"}`.                               |
-| `required`         | `True` / `False`. If required and the value is null, the transformer raises. |
-| `default_value`    | Used if the value is null after transformation and `required` is false.      |
+| Column             | Meaning                                                                 |
+|--------------------|-------------------------------------------------------------------------|
+| `source_column`    | Column name in the source DataFrame. Ignored if `static_value` is set.  |
+| `source_data_type` | Optional. `int` / `float` / `str`. Cast happens before the transform.   |
+| `static_value`     | If set, this literal is used instead of `source_column`.                |
+| `target_table`     | CDM table name, e.g. `fact_vector_observation`.                         |
+| `target_column`    | Column in the target table.                                             |
+| `transform`        | See the transform table in [ETL pipeline](etl.md).                      |
+| `transform_params` | JSON. Example: `{"ref": "dim_location.name"}`.                          |
+| `required`         | `True` / `False`. See *Required semantics* below.                       |
+| `default_value`    | Used if the value is null after transformation and `required` is false. |
+
+## Required semantics
+
+`required = True` means: *abort the source if any row produces a null
+value for this column.* It is evaluated **after** the transform runs, on
+the value that would be inserted. It does **not** mean “every input row must
+have a non-null source cell”.
+
+Two consequences follow:
+
+1. A column that may legitimately be null for *some* rows in a source (for
+   example `fact_environment.value` when `maskregion` has set 29 of 121
+   cells to missing) must set `required = False`. The loader already drops
+   null-valued rows for that table; `required = True` would abort the
+   whole source on the first missing pixel.
+2. A column that is null for *every* row in a source will never trigger the
+   `required` check — the check fires on the first null, and if all values
+   are null the first row already fails.
+
+The appropriate use of `required = True` is for columns where a null
+indicates a genuine data error (a missing FK lookup that should have
+succeeded, a malformed date that should have parsed, and so on). Use it
+sparingly.
+
+## Partial-update interaction
+
+When a mapping targets a table that another source also writes to, be aware
+that the loader’s upsert is a partial update: only columns with at least one
+non-null value in the incoming batch participate in the `DO UPDATE SET`
+clause. This is what allows six MAP burden sources to share a natural key
+and each populate a distinct value column.
+
+If your mapping’s `required = False` and the source is entirely null in
+some column, that column will simply not appear in the update, and any
+existing value at the natural key will be preserved. See
+[The VBD CDM contract](cdm_contract.md) §7 for the full rule.
 
 ## Dimension FK lookups
 

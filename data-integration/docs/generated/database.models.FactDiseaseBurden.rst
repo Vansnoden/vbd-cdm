@@ -32,6 +32,7 @@
       ~FactDiseaseBurden.location_id
       ~FactDiseaseBurden.metadata
       ~FactDiseaseBurden.mortality_rate
+      ~FactDiseaseBurden.pathogen_species
       ~FactDiseaseBurden.prevalence_rate
       ~FactDiseaseBurden.registry
       ~FactDiseaseBurden.source

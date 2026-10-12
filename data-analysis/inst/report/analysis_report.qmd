@@ -4,9 +4,11 @@ format:
   html:
     toc: true
     code-fold: true
+    code-summary: "Show R code"
+    embed-resources: true
 params:
   cfg: null
-  results: null
+  results_path: null
 ---
 
 ```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
@@ -14,17 +16,51 @@ library(dplyr)
 library(ggplot2)
 library(glue)
 library(gt)
+library(here)
 
 cfg <- params$cfg
-res <- params$results
+res <- readRDS(params$results_path)
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 # Return the error string if a result list carries one, otherwise NULL.
 err_of <- function(x) if (is.list(x) && !is.null(x$error)) x$error else NULL
 
-# Print a note instead of a table when data is missing or empty.
-note <- function(...) cat(paste0("_", paste0(..., collapse = ""), "_\n"))
+# Emit raw markdown from inside an R chunk without knitr escaping it.
+# Use this instead of cat() for any string that should render as markdown
+# (italics, bold, blockquotes, headings, links).
+md <- function(...) {
+  knitr::asis_output(paste0(..., collapse = ""))
+}
+
+# Print an italicised note.
+note <- function(...) {
+  md("_", paste0(..., collapse = ""), "_\n")
+}
+
+# Resolve a stored figure path to an absolute path Quarto can find, regardless
+# of the working directory Quarto happens to be rendering from. Accepts a
+# character vector, returns a character vector of the same length.
+abs_fig <- function(p) {
+  if (!is.character(p) || length(p) == 0) return(character())
+  p <- p[!is.na(p) & nzchar(p)]
+  if (length(p) == 0) return(character())
+  vapply(
+    p,
+    function(x) {
+      if (fs::file_exists(x))      return(normalizePath(x, mustWork = TRUE))
+      cand <- here::here(x)
+      if (fs::file_exists(cand))   return(normalizePath(cand, mustWork = TRUE))
+      x
+    },
+    character(1),
+    USE.NAMES = FALSE
+  )
+}
+
+# Absolute path to the figures directory, for the sections that reconstruct
+# paths by convention rather than pulling them from `res$fig_*`.
+fig_dir <- here::here(cfg$output_dir %||% "outputs/analysis", "figures")
 ```
 
 ## Scope
@@ -46,8 +82,8 @@ if (!is.null(qa) && is.data.frame(qa$tables) && nrow(qa$tables) > 0) {
 
 ```{r}
 if (!isTRUE(res$cases_available)) {
-  cat("> **Note:** `fact_disease_case` contains no observed case rows for this ",
-      "study area. Case-based analyses are reported as contextual only.\n")
+  md("> **Note:** `fact_disease_case` contains no observed case rows for this ",
+     "study area. Case-based analyses are reported as contextual only.\n")
 }
 ```
 
@@ -65,8 +101,8 @@ if (!is.null(err_of(vs))) {
 ```
 
 ```{r, fig.width=12, fig.height=10, fig.align='center', out.width='100%'}
-p <- res$fig_vector_seasonal
-if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+p <- abs_fig(res$fig_vector_seasonal)
+if (length(p) >= 1 && file.exists(p[1])) {
   knitr::include_graphics(p[1])
 } else {
   note("No vector seasonal figure available.")
@@ -88,7 +124,6 @@ if (!is.null(err_of(vc))) {
 ```
 
 ```{r, fig.width=12, fig.height=4}
-fig_dir <- file.path(cfg$output_dir %||% "outputs/analysis", "figures")
 p <- file.path(fig_dir,
                glue("{cfg$study_name}_vector_climate_correlations.png"))
 if (file.exists(p)) knitr::include_graphics(p)
@@ -103,7 +138,7 @@ if (!is.null(err_of(vc)) || is.null(vc$climate_variables)) {
     p <- file.path(fig_dir,
                    glue("{cfg$study_name}_vector_climate_{v}.png"))
     if (file.exists(p)) {
-      cat("\n\n### ", v, "\n\n")
+      md(sprintf("\n\n### %s\n\n", v))
       knitr::include_graphics(p)
     }
   }
@@ -125,8 +160,8 @@ if (!is.null(err_of(rs))) {
 ```
 
 ```{r, fig.width=12, fig.height=8, fig.align='center', out.width='100%'}
-p <- res$fig_resistance
-if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+p <- abs_fig(res$fig_resistance)
+if (length(p) >= 1 && file.exists(p[1])) {
   knitr::include_graphics(p[1])
 } else {
   note("No resistance figure available.")
@@ -140,11 +175,17 @@ bs <- res$bionomics_summary
 if (!is.null(err_of(bs))) {
   note("Bionomics analysis did not run: ", err_of(bs))
 } else {
+  labels <- c(
+    feeding    = "Feeding preference",
+    biting_loc = "Biting location",
+    resting    = "Resting behaviour",
+    larval     = "Larval site type"
+  )
   any_shown <- FALSE
-  for (nm in c("feeding", "biting_loc", "resting", "larval")) {
+  for (nm in names(labels)) {
     df <- bs[[nm]]
     if (is.data.frame(df) && nrow(df) > 0) {
-      cat("\n\n**", nm, "**\n\n")
+      md(sprintf("\n\n### %s\n\n", labels[[nm]]))
       print(gt::gt(df))
       any_shown <- TRUE
     }
@@ -156,11 +197,79 @@ if (!is.null(err_of(bs))) {
 ```
 
 ```{r, fig.width=12, fig.height=8, fig.align='center', out.width='100%'}
-p <- res$fig_bionomics
-if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+p <- abs_fig(res$fig_bionomics)
+if (length(p) >= 1 && file.exists(p[1])) {
   knitr::include_graphics(p[1])
 } else {
   note("No bionomics figure available.")
+}
+```
+
+## Interventions
+
+```{r}
+iv <- res$intervention_summary
+if (!is.null(err_of(iv))) {
+  note("Intervention summary did not run: ", err_of(iv))
+} else if (is.data.frame(iv$by_type) && nrow(iv$by_type) > 0) {
+  iv$by_type |> gt::gt() |> gt::tab_header(title = "Interventions by type")
+} else {
+  note("No interventions recorded for this study area.")
+}
+```
+
+```{r, fig.width=12, fig.height=5, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_summary)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention summary figure available.")
+}
+```
+
+### Impact on disease burden
+
+```{r}
+ib <- res$intervention_burden
+if (!is.null(err_of(ib))) {
+  note("Intervention–burden analysis did not run: ", err_of(ib))
+} else if (is.data.frame(ib$by_type) && nrow(ib$by_type) > 0) {
+  ib$by_type |> gt::gt() |>
+    gt::tab_header(title = "Pre/post change in cases by intervention type")
+} else {
+  note("No usable pre/post comparisons for case data.")
+}
+```
+
+```{r, fig.width=12, fig.height=6, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_burden)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention–burden figure available.")
+}
+```
+
+### Impact on vector abundance
+
+```{r}
+ivv <- res$intervention_vector
+if (!is.null(err_of(ivv))) {
+  note("Intervention–vector analysis did not run: ", err_of(ivv))
+} else if (is.data.frame(ivv$by_type) && nrow(ivv$by_type) > 0) {
+  ivv$by_type |> gt::gt() |>
+    gt::tab_header(title = "Pre/post change in vector abundance by intervention type")
+} else {
+  note("No usable pre/post comparisons for vector data.")
+}
+```
+
+```{r, fig.width=12, fig.height=6, fig.align='center', out.width='100%'}
+p <- abs_fig(res$fig_intervention_vector)
+if (length(p) >= 1 && file.exists(p[1])) {
+  knitr::include_graphics(p[1])
+} else {
+  note("No intervention–vector figure available.")
 }
 ```
 
@@ -170,7 +279,7 @@ if (is.character(p) && length(p) >= 1 && file.exists(p[1])) {
 if (!isTRUE(res$cases_available)) {
   note("No observed case rows are present in the CDM for this study area.")
 } else {
-  cat("Observed case rows available:", res$cases_n, ".\n")
+  md("Observed case rows available: **", res$cases_n, "**.\n")
   se <- res$seasonal
   if (!is.null(err_of(se))) {
     note("Case seasonality analysis did not run: ", err_of(se))
@@ -183,9 +292,9 @@ if (!isTRUE(res$cases_available)) {
 ```
 
 ```{r, fig.width=12, fig.height=5}
-p <- res$fig_seasonal
+p <- abs_fig(res$fig_seasonal)
 if (isTRUE(res$cases_available) &&
-    is.character(p) && length(p) >= 1 && file.exists(p[1])) {
+    length(p) >= 1 && file.exists(p[1])) {
   knitr::include_graphics(p[1])
 }
 ```

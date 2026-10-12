@@ -55,8 +55,10 @@ def get_postgres_url():
 def get_sqlite_url():
     return "sqlite:///./%s" % os.getenv("SQL_LITE_DB_NAME", "vbd_cdm.db")
 
-config.set_main_option("sqlalchemy.url", get_sqlite_url())
-
+if os.getenv("DB_USER") and os.getenv("DB_HOST"):
+    config.set_main_option("sqlalchemy.url", get_postgres_url())
+else:
+    config.set_main_option("sqlalchemy.url", get_sqlite_url())
 
 
 def run_migrations_offline() -> None:

@@ -8,13 +8,10 @@
 #   3. Vector infection status (pathogen carriage)
 #   4. Environment (climate drivers) — feeds (1) and (2)
 #   5. Cases / burden — contextual; may be empty and should not block.
-#
-#   Run with:   targets::tar_make()
-#   Inspect:    targets::tar_visnetwork()
-#   Force one:  targets::tar_invalidate(<name>); targets::tar_make()
 
 library(targets)
 library(tarchetypes)
+library(here)
 
 tar_source()
 
@@ -22,10 +19,10 @@ tar_option_set(
   packages = c(
     "dplyr", "tidyr", "purrr", "tibble", "lubridate",
     "ggplot2", "patchwork", "scales",
-    "glue", "cli", "fs", "config", "here",
-    "DBI", "RSQLite",
+    "glue", "cli", "fs", "here", "yaml",
+    "DBI", "RSQLite", "RPostgres",
     "MASS", "broom",
-    "gt"
+    "gt", "jsonlite"
   ),
   format = "qs",
   memory = "transient"
@@ -36,8 +33,7 @@ tar_option_set(
 # ---------------------------------------------------------------------------
 
 # Recursively replace NA so the object can survive Quarto's YAML 1.2
-# parameter round-trip. Numerics with NA become NaN; logicals with NA become
-# character ""; characters with NA become "".
+# parameter round-trip.
 sanitize_for_quarto <- function(x) {
   if (is.data.frame(x)) {
     x[] <- lapply(x, sanitize_for_quarto)
@@ -60,29 +56,31 @@ sanitize_for_quarto <- function(x) {
   x
 }
 
-cfg_get <- function(key, default = NULL) {
-  tryCatch(config::get(key), error = function(e) default)
-}
+# ---------------------------------------------------------------------------
+# Config construction
+#
+# `vbd-cdm-analysis:` is read via read_cfg() / read_cfg_opt() (defined in
+# R/config.R). The sibling `database:` block is read with read_db_block()
+# and resolved into (db_path, db_url) by resolve_database().
+# ---------------------------------------------------------------------------
 
-normalize_list <- function(x) {
-  if (is.null(x) || length(x) == 0) NULL else unlist(x, use.names = FALSE)
-}
+db <- resolve_database(read_db_block())
 
 cfg <- new_analysis_config(
-  study_name              = config::get("study_name"),
-  location                = config::get("location"),
-  country                 = config::get("country"),
-  location_ids            = normalize_list(cfg_get("location_ids")),
-  start_year              = config::get("start_year"),
-  end_year                = config::get("end_year"),
-  disease_code            = config::get("disease_code"),
-  include_estimated_cases = isTRUE(cfg_get("include_estimated_cases", FALSE)),
-  env_variables           = config::get("env_variables"),
-  species_filter          = normalize_list(cfg_get("species_filter")),
-  max_lag_months          = config::get("max_lag_months"),
-  db_path                 = config::get("database"),
+  study_name              = read_cfg("study_name"),
+  countries               = read_cfg_opt("countries"),
+  locations               = read_cfg_opt("locations"),
+  start_year              = read_cfg("start_year"),
+  end_year                = read_cfg("end_year"),
+  diseases                = read_cfg_opt("diseases"),
+  include_estimated_cases = isTRUE(read_cfg_opt("include_estimated_cases", FALSE)),
+  env_variables           = read_cfg("env_variables"),
+  species_filter          = read_cfg_opt("species_filter"),
+  max_lag_months          = read_cfg("max_lag_months"),
+  db_path                 = db$db_path,
+  db_url                  = db$db_url,
   output_dir              = {
-    od <- cfg_get("output_dir")
+    od <- read_cfg_opt("output_dir")
     if (is.null(od)) "outputs/analysis" else od
   }
 )
@@ -91,9 +89,9 @@ cfg <- new_analysis_config(
 # Output directories
 # ---------------------------------------------------------------------------
 
-fig_dir  <- file.path(cfg$output_dir, "figures")
-data_dir <- file.path(cfg$output_dir, "data")
-rep_dir  <- file.path(cfg$output_dir, "reports")
+fig_dir  <- here::here(cfg$output_dir, "figures")
+data_dir <- here::here(cfg$output_dir, "data")
+rep_dir  <- here::here(cfg$output_dir, "reports")
 
 for (d in c(fig_dir, data_dir, rep_dir)) {
   dir.create(d, recursive = TRUE, showWarnings = FALSE)
@@ -109,12 +107,32 @@ list(
   # 1. Data extraction
   # =========================================================================
   
+  # Administrative locations. Grid cells are excluded — see the resolver
+  # docstring. These are the rows every fact query except environment joins
+  # against.
   tar_target(
     locations,
     resolve_location_ids(
-      cfg$location, cfg$country,
-      db_path      = cfg$db_path,
-      explicit_ids = cfg$location_ids
+      countries = cfg$countries,
+      locations = cfg$locations,
+      db_path   = cfg$db_path,
+      db_url    = cfg$db_url,
+      descendants = TRUE
+    )
+  ),
+  
+  # Grid cells. The environment side of the CDM is stored on grid pixels
+  # (admin_level = 'grid'), which the Python consolidation step labels as
+  # "<region> (Climate Grid)". Vector observations, cases, and resistance
+  # tests never point at grid cells, so they get their own target here and
+  # the environment query uses this one instead.
+  tar_target(
+    grid_locations,
+    resolve_grid_location_ids(
+      countries = cfg$countries,
+      locations = cfg$locations,
+      db_path   = cfg$db_path,
+      db_url    = cfg$db_url
     )
   ),
   
@@ -126,7 +144,7 @@ list(
   
   tar_target(
     environment,
-    query_environment(cfg, locations$location_id)
+    query_environment(cfg, grid_locations$location_id)
   ),
   
   tar_target(
@@ -147,6 +165,11 @@ list(
   tar_target(
     burden,
     query_burden(cfg, locations$location_id)
+  ),
+  
+  tar_target(
+    interventions,
+    query_interventions(cfg, locations$location_id)
   ),
   
   # =========================================================================
@@ -172,10 +195,10 @@ list(
     environment_validated,
     {
       if (nrow(environment) == 0) {
-        loc_str <- paste(locations$location_id, collapse = ", ")
+        loc_str <- paste(grid_locations$location_id, collapse = ", ")
         cli::cli_abort(c(
           "query_environment() returned 0 rows.",
-          "i" = "Locations: {loc_str}",
+          "i" = "Grid locations: {loc_str}",
           "i" = "env_variables = {paste(cfg$env_variables, collapse = ', ')}"
         ))
       }
@@ -246,6 +269,35 @@ list(
     analyze_bionomics(bionomics)
   ),
   
+  tar_target(
+    intervention_summary,
+    analyze_intervention_summary(interventions)
+  ),
+  
+  tar_target(
+    intervention_burden,
+    analyze_intervention_impact(
+      interventions = interventions,
+      outcome       = cases_validated,
+      outcome_col   = "case_count",
+      window_months = 24L,
+      min_events    = 1L,
+      min_obs       = 2L
+    )
+  ),
+  
+  tar_target(
+    intervention_vector,
+    analyze_intervention_impact(
+      interventions = interventions,
+      outcome       = vectors_validated,
+      outcome_col   = "count",
+      window_months = 24L,
+      min_events    = 1L,
+      min_obs       = 2L
+    )
+  ),
+  
   # =========================================================================
   # 5. Case-side analyses (CONTEXT; may be empty)
   # =========================================================================
@@ -256,7 +308,7 @@ list(
   ),
   
   # =========================================================================
-  # 6. Figures — vector first
+  # 6. Figures
   # =========================================================================
   
   tar_target(
@@ -284,6 +336,31 @@ list(
   ),
   
   tar_target(
+    fig_intervention_summary,
+    plot_intervention_summary(intervention_summary, cfg$study_name, fig_dir)
+  ),
+  
+  tar_target(
+    fig_intervention_burden,
+    plot_intervention_impact(
+      result        = intervention_burden,
+      outcome_label = "cases",
+      study_name    = cfg$study_name,
+      out_dir       = fig_dir
+    )
+  ),
+  
+  tar_target(
+    fig_intervention_vector,
+    plot_intervention_impact(
+      result        = intervention_vector,
+      outcome_label = "vectors",
+      study_name    = cfg$study_name,
+      out_dir       = fig_dir
+    )
+  ),
+  
+  tar_target(
     fig_seasonal,
     plot_seasonal(seasonal, cfg$study_name, fig_dir)
   ),
@@ -297,6 +374,7 @@ list(
     list(
       cfg                 = cfg,
       locations           = locations,
+      grid_locations      = grid_locations,
       vectors             = vectors_validated,
       environment         = environment_validated,
       resistance          = resistance,
@@ -305,8 +383,12 @@ list(
       vector_climate      = vector_climate,
       resistance_summary  = resistance_summary,
       bionomics_summary   = bionomics_summary,
+      intervention_summary = intervention_summary,
+      intervention_burden  = intervention_burden,
+      intervention_vector  = intervention_vector,
       cases               = cases_validated,
       cases_available     = cases_available,
+      cases_n             = dplyr::n_distinct(cases_validated$date),
       burden              = burden,
       seasonal            = seasonal,
       qa                  = qa,
@@ -314,45 +396,74 @@ list(
       fig_vector_climate  = fig_vector_climate,
       fig_resistance      = fig_resistance,
       fig_bionomics       = fig_bionomics,
+      fig_intervention_summary = fig_intervention_summary,
+      fig_intervention_burden  = fig_intervention_burden,
+      fig_intervention_vector  = fig_intervention_vector,
       fig_seasonal        = fig_seasonal
     )
   ),
   
-  # =========================================================================
-  # 8. Quarto-safe sanitization
-  # =========================================================================
+  # --- 8. Quarto-safe sanitization ---
+  tar_target(cfg_sanitized,     sanitize_for_quarto(cfg)),
+  tar_target(qa_sanitized,      sanitize_for_quarto(qa)),
+  tar_target(results_sanitized, sanitize_for_quarto(analysis_results)),
   
+  # --- 8b. Serialise deep structures to RDS ---
   tar_target(
-    cfg_sanitized,
-    sanitize_for_quarto(cfg)
+    qa_rds,
+    {
+      path <- file.path(data_dir, "qa.rds")
+      saveRDS(qa_sanitized, path)
+      path
+    },
+    format = "file"
   ),
   
   tar_target(
-    qa_sanitized,
-    sanitize_for_quarto(qa)
+    results_rds,
+    {
+      path <- file.path(data_dir, "analysis_results.rds")
+      saveRDS(results_sanitized, path)
+      path
+    },
+    format = "file"
   ),
   
-  tar_target(
-    results_sanitized,
-    sanitize_for_quarto(analysis_results)
-  ),
-  
-  # =========================================================================
-  # 9. Reports
-  # =========================================================================
-  
+  # --- 9. Reports ---
   tar_quarto(
     qa_report,
-    path            = "inst/report/qa_report.qmd",
-    quiet           = FALSE,
-    execute_params  = list(qa = qa_sanitized, cfg = cfg_sanitized)
+    path           = "inst/report/qa_report.qmd",
+    quiet          = FALSE,
+    execute_params = list(qa_path = qa_rds, cfg = cfg_sanitized)
+  ),
+  
+  tar_target(
+    qa_report_published,
+    {
+      fs::dir_create(rep_dir)
+      dest <- file.path(rep_dir, basename(qa_report))
+      fs::file_copy(qa_report, dest, overwrite = TRUE)
+      dest
+    },
+    format = "file"
   ),
   
   tar_quarto(
     analysis_report,
-    path            = "inst/report/analysis_report.qmd",
-    quiet           = FALSE,
-    execute_params  = list(cfg = cfg_sanitized, results = results_sanitized)
+    path           = "inst/report/analysis_report.qmd",
+    quiet          = FALSE,
+    execute_params = list(cfg = cfg_sanitized, results_path = results_rds)
+  ),
+  
+  tar_target(
+    analysis_report_published,
+    {
+      fs::dir_create(rep_dir)
+      dest <- file.path(rep_dir, basename(analysis_report))
+      fs::file_copy(analysis_report, dest, overwrite = TRUE)
+      dest
+    },
+    format = "file"
   ),
   
   NULL

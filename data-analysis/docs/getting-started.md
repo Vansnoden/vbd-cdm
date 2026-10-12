@@ -8,7 +8,7 @@
 | The CDM database | any | Produced by `data-integration`. Must exist before the pipeline runs. |
 | `targets` | >= 1.5 | Installed automatically by `renv::restore()`. |
 | Quarto | >= 1.4 | Optional. Only needed to render the reports. |
-| Rtools / Xcode CLT / `build-essential` | latest | Required by `renv::restore()` for compiled packages (`RPostgres`, `RSQLite`, `glmmTMB`, `TMB`, `xml2`). |
+| Rtools / Xcode CLT / `build-essential` | latest | Required by `renv::restore()` for compiled packages (`RPostgres`, `RSQLite`, `TMB`, `xml2`). |
 
 The R side is read-only: it never writes to `vbd_cdm.db`. If the
 database doesn't exist yet, run the Python ingestion pipeline first:
@@ -18,8 +18,8 @@ cd ../data-integration
 python main.py --config base_config.yaml
 ```
 
-See the [CDM contract](../../data-integration/docs/cdm_contract.md) for
-what the database contains.
+See the `data-integration/docs/` directory for what the database
+contains.
 
 ---
 
@@ -45,7 +45,7 @@ renv::status()
 ```
 
 If `renv::restore()` fails, see
-[Troubleshooting -> `renv::restore()` fails](troubleshooting.md#renvrestore-fails).
+[Troubleshooting → `renv::restore()` fails](troubleshooting.md#renvrestore-fails).
 
 ### If `renv.lock` is missing or stale
 
@@ -61,12 +61,21 @@ before overwriting. Read the prompt.
 
 ## Verify the database is visible
 
-Before running the pipeline, confirm the R side can reach the CDM:
+Before running the pipeline, confirm the R side can reach the CDM. The
+database block in `config.yml` is read via `resolve_database()`:
 
 ```r
+source("R/config.R")
 source("R/db.R")
 
-con <- cdm_connect()
+db <- resolve_database(read_db_block())
+print(db)
+# $db_path
+# [1] "../data-integration/vbd_cdm.db"
+# $db_url
+# NULL
+
+con <- cdm_connect(db$db_path, db$db_url)
 DBI::dbListTables(con)
 #  [1] "alembic_version"                 "dim_concept"
 #  [3] "dim_disease"                     "dim_identification_method"
@@ -84,16 +93,17 @@ DBI::dbDisconnect(con)
 ```
 
 If `cdm_connect()` errors with `Database not found at '...'`, the
-`database` key in `config.yml` is wrong. It is resolved relative to the
-project root via `here::here()`, **not** the working directory. See
-[Configuration -> `database`](configuration.md#database).
+`sqlite.db_path` under the `database:` block in `config.yml` points
+somewhere that doesn't exist. It is resolved relative to the project root
+via `here::here()`, **not** the working directory. See
+[Configuration → the database block](configuration.md#the-database-block).
 
 ### Quick row-count sanity check
 
 Once connected, verify the tables you intend to analyse are non-empty:
 
 ```r
-con <- cdm_connect()
+con <- cdm_connect(db$db_path, db$db_url)
 
 DBI::dbGetQuery(con, "
   SELECT 'vectors'     AS tbl, COUNT(*) AS n FROM fact_vector_observation
@@ -179,13 +189,14 @@ The bundle contains:
 | `locations` | `dim_location` rows matching the study area |
 | `vectors`, `environment`, `resistance`, `bionomics`, `cases`, `burden` | Extraction outputs |
 | `vector_seasonal`, `vector_climate`, `resistance_summary`, `bionomics_summary`, `seasonal` | Analysis outputs |
-| `cases_available` | Boolean |
+| `cases_available`, `cases_n` | Boolean and count for the case-context report section |
 | `qa` | Data-availability summary |
 | `fig_*` | Character vector(s) of written figure paths |
 
 ### Open the reports
 
-Two HTML reports are rendered by the pipeline:
+Two HTML reports are rendered by the pipeline and copied into
+`outputs/analysis/reports/` by the `*_report_published` targets:
 
 ```r
 browseURL("outputs/analysis/reports/qa_report.html")
@@ -201,10 +212,10 @@ contains.
 
 ```r
 targets::tar_load(fig_vector_climate)
-# [1] "outputs/analysis/figures/Pan_African_Anopheles_vector_climate_correlations.png"
-# [2] "outputs/analysis/figures/Pan_African_Anopheles_vector_climate_t2m.png"
-# [3] "outputs/analysis/figures/Pan_African_Anopheles_vector_climate_tp.png"
-# [4] "outputs/analysis/figures/Pan_African_Anopheles_vector_climate_by_group.png"
+# [1] "outputs/analysis/figures/Case_Study_vector_climate_correlations.png"
+# [2] "outputs/analysis/figures/Case_Study_vector_climate_t2m.png"
+# [3] "outputs/analysis/figures/Case_Study_vector_climate_tp.png"
+# [4] "outputs/analysis/figures/Case_Study_vector_climate_by_group.png"
 
 browseURL(fig_vector_climate[2])
 ```
@@ -218,23 +229,25 @@ After a successful run, `outputs/analysis/` contains:
 ```
 outputs/analysis/
 |-- figures/
-|   |-- Pan_African_Anopheles_vector_seasonal.png
-|   |-- Pan_African_Anopheles_vector_climate_correlations.png
-|   |-- Pan_African_Anopheles_vector_climate_t2m.png
-|   |-- Pan_African_Anopheles_vector_climate_tp.png
-|   |-- Pan_African_Anopheles_vector_climate_by_group.png
-|   |-- Pan_African_Anopheles_resistance.png
-|   |-- Pan_African_Anopheles_bionomics.png
-|   `-- Pan_African_Anopheles_seasonal.png
-|-- reports/
-|   |-- qa_report.html
-|   `-- analysis_report.html
-`-- data/                     # reserved; currently unused
+|   |-- Case_Study_vector_seasonal.png
+|   |-- Case_Study_vector_climate_correlations.png
+|   |-- Case_Study_vector_climate_t2m.png
+|   |-- Case_Study_vector_climate_tp.png
+|   |-- Case_Study_vector_climate_by_group.png
+|   |-- Case_Study_resistance.png
+|   |-- Case_Study_bionomics.png
+|   `-- Case_Study_seasonal.png
+|-- data/
+|   |-- qa.rds
+|   `-- analysis_results.rds
+`-- reports/
+    |-- qa_report.html
+    `-- analysis_report.html
 ```
 
 The filenames are derived from `cfg$study_name`. If you change
 `study_name` in `config.yml`, the filenames change. See
-[Configuration -> `study_name`](configuration.md#study_name).
+[Configuration → `study_name`](configuration.md#study_name).
 
 ### Where the cache lives
 
@@ -245,7 +258,7 @@ root, not under `outputs/`. This is `targets`' default and the current
 ```
 data-analysis/
 |-- _targets/                 # the cache
-|-- outputs/analysis/         # the figures and reports
+|-- outputs/analysis/         # the figures, RDS, and reports
 |-- R/
 |-- _targets.R
 `-- config.yml
@@ -260,7 +273,7 @@ targets::tar_make()            # rebuilds from scratch
 ```
 
 If you want the cache under `outputs/analysis/` instead, see
-[Pipeline -> Cache location](pipeline.md#cache-location).
+[Pipeline → Cache location](pipeline.md#cache-location).
 
 ---
 
@@ -275,8 +288,9 @@ A successful first run should produce:
    only when `fact_disease_case` contains rows; on a database with no
    case data, `plot_seasonal` returns `invisible(NULL)` and no file is
    written.
-2. **Two HTML reports** under `outputs/analysis/reports/`.
-3. **No errors** in `targets::tar_progress()`.
+2. **Two RDS files** under `outputs/analysis/data/`.
+3. **Two HTML reports** under `outputs/analysis/reports/`.
+4. **No errors** in `targets::tar_progress()`.
 
 Check:
 
@@ -300,7 +314,7 @@ If any target errored, see [Troubleshooting](troubleshooting.md).
 | Understand the pipeline structure | [Pipeline](pipeline.md) |
 | Understand a specific figure | [Analysis modules](analysis-modules.md) |
 | Query the database directly | [Data access](data-access.md) |
-| Add a new analysis | [Pipeline -> extending](pipeline.md#extending) |
+| Add a new analysis | [Pipeline → extending](pipeline.md#extending) |
 | Debug an error | [Troubleshooting](troubleshooting.md) |
 | Look up a term | [Glossary](glossary.md) |
 

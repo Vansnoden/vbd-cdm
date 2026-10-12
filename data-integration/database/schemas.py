@@ -63,6 +63,8 @@ class DimLocationCreate(BaseModel):
     admin_level: Optional[str] = None
     centroid_lat: Optional[float] = None
     centroid_lon: Optional[float] = None
+    parent_location_id: Optional[int] = None
+    origin: Optional[str] = "source"
 
     @field_validator("centroid_lat")
     @classmethod
@@ -371,6 +373,7 @@ class FactDiseaseBurdenCreate(BaseModel):
     location_id: int
     year: int
     disease_code: str
+    pathogen_species: str
     source_code: str
     incidence_rate: Optional[float] = None
     prevalence_rate: Optional[float] = None
@@ -407,7 +410,7 @@ class FactEnvironmentalCreate(BaseModel):
 
 # Known environmental variable names used by the analysis pipeline.
 SUPPORTED_ENV_VARIABLES = frozenset({
-    "t2m", "tp", "d2m", "rh", "ndvi", "evi", "lst_day", "lst_night",
+    "2t", "t2m", "tp", "d2m", "rh", "ndvi", "evi", "lst_day", "lst_night",
     "temperature_mean", "temperature_min", "temperature_max",
     "rainfall_total", "relative_humidity", "aridity_index",
     "potential_breeding_sites",

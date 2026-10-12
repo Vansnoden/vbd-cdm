@@ -38,11 +38,22 @@ analyze_dlnm <- function(cases, environment, max_lag_months = 6) {
 }
 
 plot_dlnm <- function(dlnm_fit, study_name, out_dir) {
-  p <- dlnm::plot.crosspred(dlnm_fit$pred_temp, "overall",
-                            xlab = "Temperature (°C)",
-                            ylab = "Cumulative RR",
-                            main = glue::glue("Temperature-malaria DLNM: {study_name}"))
-  path <- file.path(out_dir, glue::glue("{study_name}_dlnm_temp_overall.png"))
-  ggplot2::ggsave(path, width = 8, height = 5, dpi = 300)
-  path
+  fs::dir_create(out_dir)
+  path <- file.path(out_dir,
+                    glue::glue("{study_name}_dlnm_temp_overall.png"))
+  
+  # dlnm::plot.crosspred() is a base R plotting function. ggplot2::ggsave()
+  # cannot capture base plots, so the previous version wrote an empty PNG.
+  # Wrap the call in an explicit device.
+  grDevices::png(path, width = 8, height = 5, units = "in", res = 300)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  
+  dlnm::plot.crosspred(
+    dlnm_fit$pred_temp, "overall",
+    xlab = "Temperature (°C)",
+    ylab = "Cumulative RR",
+    main = glue::glue("Temperature–malaria DLNM: {study_name}")
+  )
+  
+  invisible(path)
 }

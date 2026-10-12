@@ -26,8 +26,9 @@ Imports:
     patchwork,
     targets,
     tarchetypes,
-    config,
     here,
+    jsonlite,
+    yaml,
     glue,
     janitor,
     cli,
@@ -48,5 +49,6 @@ Imports:
 Suggests:
     testthat (>= 3.0.0),
     withr,
-    mockery
+    mockery,
+    INLA
 

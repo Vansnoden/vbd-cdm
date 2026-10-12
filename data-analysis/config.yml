@@ -1,24 +1,61 @@
-default:
-  study_name: "Pan_African_Anopheles"
-  location: "ALL"
-  country: "ALL"
-  location_ids: []
+# config.yml
+#
+# Analysis configuration for the VBD CDM.
+#
+# Two top-level blocks:
+#   vbd-cdm-analysis : what to analyse
+#   database         : where the CDM lives
+#
+# The `vbd-cdm-analysis:` block is read via read_cfg() / read_cfg_opt()
+# in R/config.R. The `database:` block is read as a whole by
+# read_db_block() and resolved by resolve_database(). Do not nest
+# `database:` inside `vbd-cdm-analysis:`.
 
-  start_year: 2019
-  end_year: 2025
-  disease_code: null
-  include_estimated_cases: false
+vbd-cdm-analysis:
+  study_name: "Case Study"
 
-  env_variables: ["t2m", "tp"]
+  # countries: ["ALL"]            # every country in dim_location
+  # countries: ["Kenya"]          # ISO alpha-2, or full country name
+  # countries: ["KE", "TZ", "UG"] # multiple
+  countries: ["KE"]
 
-  species_filter:
-    - "gambiae"
-    - "coluzzii"
-    - "arabiensis"
-    - "funestus"
-    - "melas"
-    - "quadriannulatus"
+  # locations: ["ALL"]                  # every location inside the country filter
+  # locations: ["Siaya County"]         # exact or substring match on dim_location.name
+  # locations: ["Siaya", "Mombasa"]     # multiple; OR-ed together
+  locations: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
+  # study_area:
+  #  admin_level: "admin2"
+  #  names: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
+
+  start_year: 2015
+  end_year:   2025
+
+  # diseases: ["ALL"]                     # no disease filter
+  # diseases: ["MAL"]                     # one code
+  # diseases: ["MAL", "DENGUE"]           # multiple; OR-ed
+  diseases: ["MAL"]
+
+  include_estimated_cases: true
+
+  env_variables: ["2t", "tp"]
+
+  # species_filter: ["All"]                                  # every species
+  # species_filter: ["Anopheles gambiae", "Anopheles funestus"]
+  species_filter: ["Anopheles gambiae", "Anopheles funestus"]
 
   max_lag_months: 6
-  database: "../data-integration/vbd_cdm.db"
   output_dir: "outputs/analysis"
+
+
+database:
+  # Uncomment to use PostgreSQL. If both blocks are present, postgres wins.
+  # postgres:
+  #   host:     "db-host"
+  #   port:     "5432"
+  #   username: "your-username"
+  #   password: "your-password"
+  #   dbname:   "vbd_cdm"
+
+  sqlite:
+    db_path: "../data-integration/vbd_cdm.db"
+

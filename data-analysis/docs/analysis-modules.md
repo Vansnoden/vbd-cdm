@@ -102,12 +102,18 @@ per climate variable:
 If `group_cols` is set, a per-group heatmap of correlations is written as
 `<study_name>_vector_climate_by_group.png`.
 
-**Caveat.** When environment is aggregated across many grid cells
-(`location_ids = NULL`, or larger than the SQLite parameter budget), the
-result is a *continental mean* - a placeholder, not a physically
-meaningful series. Per-site climate requires `R/spatial_join.R` to map
-vector sites to their nearest grid cell first. See
-[Data access -> What the queries don't do](data-access.md#what-the-queries-dont-do).
+**Caveat.** When the environment result has been aggregated across many
+grid cells — which happens whenever `query_environment()` is called with
+more than one `location_id`, including the case where
+`cfg$locations = ["ALL"]` — the result is a *continental mean*. It is a
+placeholder series, not a physically meaningful per-site climate trace.
+
+Per-site climate is possible via `R/spatial_join.R::attach_grid_cells()`,
+which maps each vector site to its nearest environment grid cell by
+centroid proximity. But the function expects its input to carry a
+`location_id` column, and `query_vectors()` does not return one. This is
+a known composition gap. See
+[Data access → What the queries don't do](data-access.md#what-the-queries-dont-do).
 
 ---
 
@@ -135,8 +141,9 @@ WHO-threshold classification of insecticide resistance tests.
 | Suspected Resistance | 90-97.99% |
 | Resistant | < 90% |
 
-The thresholds are applied by `fix_resistance_status.py` on the Python
-side, not computed here. This module only summarises what's already in
+The thresholds are applied by `fix_resistance_status.py` and by
+`DataConsolidator._compute_resistance_status()` on the Python side, not
+computed here. This module only summarises what's already in
 `fact_insecticide_resistance.resistance_status`.
 
 **Figure:** three-panel (status stack, mortality by insecticide with error
@@ -167,6 +174,26 @@ is `NULL` or empty.
 
 **Figure:** four-panel bar chart. Panels with no data render as a blank
 titled panel rather than aborting the figure.
+
+---
+
+## `analysis_intervention`
+
+**Functions:** `analyze_intervention_summary(interventions)`,
+`analyze_intervention_impact(interventions, outcome, outcome_col, ...)`
+**Targets:** `intervention_summary`, `intervention_burden`, `intervention_vector`
+**Figures:** `plot_intervention_summary(...)`, `plot_intervention_impact(...)`
+
+Two descriptive analyses. The summary tabulates intervention types, coverage,
+and temporal distribution. The impact analysis is a pre/post event study:
+for each intervention start date, it compares the mean outcome in the
+`window_months` before against the same window after, aligned as an
+event-study curve.
+
+**Not a causal estimate.** There is no control group, no counterfactual, and
+no adjustment for seasonality beyond the symmetry of the before/after
+windows. It answers "did the outcome change around intervention dates",
+not "did the intervention cause the change".
 
 ---
 
@@ -202,7 +229,7 @@ second panel is an empty placeholder titled *"Year-over-year
 
 Three modules are scaffolded but **not wired into `_targets.R`**. They
 are documented here for completeness. To activate one, see
-[Pipeline -> extending](pipeline.md#extending).
+[Pipeline → extending](pipeline.md#extending).
 
 ### `analysis_glm.R::analyze_negbin_glm`
 
@@ -239,7 +266,7 @@ dlnm::plot.crosspred(dlnm_fit$pred_temp, "overall")
 dev.off()
 ```
 
-See [Troubleshooting -> DLNM](troubleshooting.md#dlnm-plot-is-empty).
+See [Troubleshooting → DLNM](troubleshooting.md#dlnm-plot-is-empty).
 
 ### `analysis_inla.R::analyze_inla`
 
@@ -255,7 +282,7 @@ Spatial BYM2 model via INLA. Fits a negative-binomial model with a
 single variable can carry only one `f()` term per formula. Merge into a
 single term or use a different variable for the second effect.
 
-See [Troubleshooting -> INLA](troubleshooting.md#inla).
+See [Troubleshooting → INLA](troubleshooting.md#inla).
 
 ---
 

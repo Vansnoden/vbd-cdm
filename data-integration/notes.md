@@ -168,3 +168,21 @@ vocabularies/
   idomal_diseases.csv   (IDOMAL:xxxxxxxxx rows)
   ncbi_vectors.csv      (species + subspecies under the vector genera)
 ```
+
+
+##### Clip rasters of folder the shapefile bounds:
+
+```bash
+./clip_raster_data.sh --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/disease_incidence/Global_Pf_Incidence_Count_KEN --all --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp
+```
+
+##### inspect .nc variables or fields
+```bash
+cdo griddes /mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_2019.nc | head -20
+```
+
+##### building the DOC
+```bash
+rm -rf docs/_build
+sphinx-build -b markdown docs docs/_build/markdown
+```

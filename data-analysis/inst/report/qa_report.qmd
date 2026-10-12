@@ -4,8 +4,9 @@ format:
   html:
     toc: true
     code-fold: true
+    embed-resources: true
 params:
-  qa:  null
+  qa_path: null
   cfg: null
 ---
 
@@ -13,43 +14,67 @@ params:
 library(dplyr)
 library(tidyr)
 library(gt)
+library(here)
 
-qa  <- params$qa
+qa  <- readRDS(params$qa_path)
 cfg <- params$cfg
 
-# Safe accessor: returns NULL instead of erroring when a field is missing
-# or its parent is not a list.
 `%||%` <- function(a, b) if (is.null(a)) b else a
-safe <- function(expr) tryCatch(expr, error = function(e) NULL)
+safe  <- function(expr) tryCatch(expr, error = function(e) NULL)
+
+# Redact the password component of a connection URL before display.
+redact_url <- function(url) {
+  if (is.null(url) || !nzchar(url)) return(url)
+  sub("://([^:]+):[^@]+@", "://\\1:***@", url)
+}
+
+# Render a NULL/empty vector as "(all)", otherwise comma-joined.
+fmt_vec <- function(x) {
+  if (is.null(x) || length(x) == 0) "(all)"
+  else paste(x, collapse = ", ")
+}
 ```
 
 ## Configuration
 
 ```{r}
+db_display <- if (!is.null(cfg$db_url)) {
+  paste0(redact_url(cfg$db_url), "  (PostgreSQL)")
+} else if (!is.null(cfg$db_path)) {
+  cfg$db_path
+} else {
+  "(not set)"
+}
+
 cfg_tbl <- tibble::tibble(
   Setting = c(
-    "study_name", "location", "country",
-    "location_ids", "start_year", "end_year",
-    "disease_code", "include_estimated_cases",
-    "env_variables", "species_filter", "max_lag_months", "db_path"
+    "study_name",
+    "countries",
+    "locations",
+    "start_year",
+    "end_year",
+    "diseases",
+    "include_estimated_cases",
+    "env_variables",
+    "species_filter",
+    "max_lag_months",
+    "database"
   ),
   Value = c(
     cfg$study_name %||% "(missing)",
-    cfg$location    %||% "(missing)",
-    cfg$country     %||% "(missing)",
-    if (length(cfg$location_ids)) paste(cfg$location_ids, collapse = ", ")
-      else "(name-based resolution)",
+    fmt_vec(cfg$countries),
+    fmt_vec(cfg$locations),
     as.character(cfg$start_year %||% NA),
     as.character(cfg$end_year   %||% NA),
-    if (is.null(cfg$disease_code)) "(none)" else cfg$disease_code,
+    fmt_vec(cfg$diseases),
     as.character(isTRUE(cfg$include_estimated_cases)),
-    paste(cfg$env_variables %||% character(), collapse = ", "),
-    if (is.null(cfg$species_filter)) "(all)"
-      else paste(cfg$species_filter, collapse = ", "),
+    fmt_vec(cfg$env_variables),
+    fmt_vec(cfg$species_filter),
     as.character(cfg$max_lag_months %||% NA),
-    cfg$db_path %||% "(not set)"
+    db_display
   )
 )
+
 cfg_tbl |> gt::gt() |> gt::tab_header(title = "Analysis configuration")
 ```
 
@@ -70,7 +95,7 @@ sp <- qa$species
 if (is.data.frame(sp) && nrow(sp) > 0) {
   sp |> gt::gt() |> gt::tab_header(title = "Vector species present")
 } else {
-  cat("**No vector rows returned.** Verify `species_filter` and `location_ids`.")
+  cat("**No vector rows returned.** Verify `species_filter` and the location filter (`countries` / `locations`).")
 }
 ```
 
@@ -78,13 +103,16 @@ if (is.data.frame(sp) && nrow(sp) > 0) {
 
 ```{r}
 sp <- qa$species
-if (!is.null(cfg$species_filter) && is.data.frame(sp) && nrow(sp) > 0) {
+if (!is.null(cfg$species_filter) &&
+    is.data.frame(sp) && nrow(sp) > 0) {
   present <- tolower(sp$species_name)
   tibble::tibble(
     filter_value = cfg$species_filter,
-    matched      = vapply(cfg$species_filter,
-                          \(v) any(grepl(tolower(v), present, fixed = TRUE)),
-                          logical(1))
+    matched      = vapply(
+      cfg$species_filter,
+      \(v) any(grepl(tolower(v), present, fixed = TRUE)),
+      logical(1)
+    )
   ) |> gt::gt() |> gt::tab_header(title = "Species filter coverage")
 } else {
   cat("_Species filter coverage not applicable._")

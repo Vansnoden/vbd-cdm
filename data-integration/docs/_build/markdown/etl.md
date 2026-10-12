@@ -64,16 +64,18 @@ CSV. See [Mapping CSV format](mapping.md) for the format.
 
 Supported transforms:
 
-| Name           | Behaviour                                                                                                                             |
-|----------------|---------------------------------------------------------------------------------------------------------------------------------------|
-| `none`         | Pass through.                                                                                                                         |
-| `map`          | `{"value_a": "A", "value_b": "B"}` - dict lookup; a `"ref"` key<br/>triggers a dimension FK lookup (see mapping).                     |
-| `cast`         | `{"type": "int"}` - int, float, str.                                                                                                  |
-| `date_parse`   | `{"format": "%d/%m/%Y"}` - returns `YYYY-MM-DD`.                                                                                      |
-| `format_date`  | `{"columns": ["year","month","day"], "default": null}` - builds a<br/>date string from three integer columns. Handles missing values. |
-| `split`        | `{"delimiter": ",", "index": 0}` - take one field from a delimited<br/>string.                                                        |
-| `unit_convert` | `{"factor": 0.1, "offset": 0}` - linear transform.                                                                                    |
-| `concat`       | `{"columns": ["a","b"], "separator": " "}` - join string columns.                                                                     |
+| Name              | Behaviour                                                                                                                             |
+|-------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| `none`            | Pass through.                                                                                                                         |
+| `map`             | `{"value_a": "A", "value_b": "B"}` - dict lookup; a `"ref"` key<br/>triggers a dimension FK lookup (see mapping).                     |
+| `cast`            | `{"type": "int"}` - int, float, str.                                                                                                  |
+| `date_parse`      | `{"format": "%d/%m/%Y"}` - returns `YYYY-MM-DD`.                                                                                      |
+| `format_date`     | `{"columns": ["year","month","day"], "default": null}` - builds a<br/>date string from three integer columns. Handles missing values. |
+| `split`           | `{"delimiter": ",", "index": 0}` - take one field from a delimited<br/>string.                                                        |
+| `unit_convert`    | `{"factor": 0.1, "offset": 0}` - linear transform.                                                                                    |
+| `concat`          | `{"columns": ["a","b"], "separator": " "}` - join string columns.                                                                     |
+| `coalesce`        | `{"columns": ["a","b"], "default": null}` - first non-null value.                                                                     |
+| `derive_category` | Rule-based label from one or more numeric columns. See the class<br/>docstring in `mapping_transformer.py`.                           |
 
 ## Stage 4 - Load
 
@@ -88,6 +90,43 @@ Two backends:
 * **SQLite** - batched `INSERT ... ON CONFLICT DO UPDATE`.
   The loaders **never** use `INSERT OR REPLACE` (which would delete and
   reinsert the PK, breaking autoincrement IDs and cascade references).
+
+### Partial-update semantics
+
+An upsert updates only the columns the incoming batch actually carries
+values for. Formally, a column participates in the `DO UPDATE SET` clause
+only if at least one row in the batch has a non-null value for it.
+
+This is what allows several sources to share a natural key and each populate
+a distinct subset of columns. The six MAP burden sources, for example, all
+write to `fact_disease_burden` at key `(location_id, year, disease_code,
+pathogen_species)` but each writes exactly one of `cases_mean`,
+`incidence_rate`, or `prevalence_rate`. Before the loader was changed,
+the last source would overwrite the other two columns with NULL. Now each
+source touches only its own column.
+
+The rule is implemented in all three upsert paths
+(`_copy_upsert_postgresql`, `_upsert_postgresql`, `_upsert_sqlite`) as:
+
+```default
+update_cols = [
+    col for col in df.columns
+    if col not in pk_cols
+    and col not in conflict_targets
+    and df[col].notna().any()
+]
+```
+
+**Consequence.** A source that legitimately wants to clear an existing
+column back to NULL cannot do so through the standard upsert path. That
+case is not currently exercised by any mapping in `base_config.yaml`.
+
+### Autoincrement primary keys
+
+`load_table` exempts autoincrement PK columns from its NOT NULL guard. A
+missing autoincrement PK means “the database will assign one”, not “this
+row is malformed”. The upsert paths already pop None-valued PKs from each
+record before executing.
 
 ### Null sentinels
 
@@ -106,11 +145,11 @@ SQL treats NULLs as distinct in unique indexes. See
 4. Standardise vocabularies against GADM / IDOMAL / NCBI.
 5. Fix orphaned burden records specifically.
 6. Expand yearly burden to daily case rows.
-7. Compute resistance status from mortality counts.
-8. Consolidate locations (name-based, then DBSCAN-proximity-based).
-9. Consolidate vocabulary duplicates (disease, vector, insecticide, source).
-10. Detect and resolve fact-table duplicates.
-11. Final verification.
+7. Consolidate locations (name-based, then DBSCAN-proximity-based).
+8. Consolidate vocabulary duplicates (disease, vector, insecticide, source).
+9. Detect fact-table duplicates and, when any exist, resolve them.
+10. Compute resistance status from mortality counts.
+11. Final verification (country codes, remaining orphans).
 
 The FK-alignment pass is the most important - it can be run standalone:
 
@@ -119,3 +158,40 @@ from utilities.consolidation import DataConsolidator
 with DataConsolidator() as c:
     c.align_all_foreign_keys(dry_run=True)
 ```
+
+### Duplicate resolution is guarded
+
+Step 9 rebuilds three fact tables (`fact_environment`,
+`fact_insecticide_resistance`, `fact_disease_case`) with a
+delete-then-insert pattern, but only when genuine duplicates exist. On a
+clean database the log reads `No environment duplicates; fact_environment
+untouched` and no table is modified.
+
+This guard exists because the rebuild is destructive by construction: any
+column missing from the SELECT list is silently NULLed. The guard
+eliminates the failure mode where an empty or partially-populated temp
+table combined with an unconditional DELETE would silently wipe an entire
+fact table.
+
+## Stage 6 - Export (optional)
+
+`export_to_csv.py` is a standalone script that streams the CDM to CSV for
+sharing. It is not part of the ingest pipeline and does not modify the
+database.
+
+```bash
+# Single wide-union CSV (default: outputs/cdm_export.csv)
+python export_to_csv.py
+
+# Per-table CSVs bundled in a zip
+python export_to_csv.py --per-table
+
+# Raw FK codes, no dimension joins
+python export_to_csv.py --no-dims
+
+# Smoke test with capped row counts
+python export_to_csv.py --limit 5000
+```
+
+Peak memory is one chunk (default 50,000 rows), independent of database
+size. See [Utilities reference](utilities.md) for the exported column layout.

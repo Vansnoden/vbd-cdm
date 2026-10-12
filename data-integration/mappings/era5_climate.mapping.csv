@@ -1,19 +1,17 @@
 source_column,target_table,target_column,transform,transform_params,default_value,required,static_value,source_data_type
 
-lat,dim_location,centroid_lat,cast,"{""type"": ""float""}",0,False,,
-lon,dim_location,centroid_lon,cast,"{""type"": ""float""}",0,False,,
-,dim_location,name,concat,"{""columns"":[""lat"",""lon""],""separator"":""/""}",Siaya County,False,,
-,dim_location,location_code,concat,"{""columns"":[""lat"",""lon""],""separator"":""/""}",,False,,
-,dim_location,country_name,none,,Kenya,False,Kenya,
-,dim_location,country_code,none,,KE,False,KE,
-,dim_location,admin_level,none,,grid,False,grid,
+lat,dim_location,centroid_lat,cast,"{""type"": ""float""}",,False,,
+lon,dim_location,centroid_lon,cast,"{""type"": ""float""}",,False,,
+,dim_location,name,concat,"{""columns"":[""lon"",""lat""],""separator"":""/""}",,False,,
+,dim_location,location_code,concat,"{""columns"":[""lon"",""lat""],""separator"":""/""}",,False,,
+,dim_location,admin_level,none,,,False,grid,
 
 ,dim_source,source_code,none,,,False,ERA5,
 ,dim_source,source_name,none,,,False,ECMWF ERA5-Land,
 ,dim_source,source_url,none,,,False,https://cds.climate.copernicus.eu,
 
 time,fact_environment,date_id,date_parse,"{""format"":""%Y-%m-%d""}",,True,,
-,fact_environment,location_id,map,"{""ref"":""dim_location.location_code"",""columns"":[""lat"",""lon""],""separator"":""/""}",,False,,
+,fact_environment,location_id,map,"{""ref"":""dim_location.location_code"",""columns"":[""lon"",""lat""],""separator"":""/""}",,True,,
 variable,fact_environment,variable,none,,,True,,
-value,fact_environment,value,none,,,False,,
+value,fact_environment,value,cast,"{""type"":""float""}",,False,,
 ,fact_environment,source_code,none,,,False,ERA5,

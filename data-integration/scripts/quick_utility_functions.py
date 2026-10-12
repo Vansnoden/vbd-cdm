@@ -30,15 +30,15 @@ def convert_worldbank_data(df):
                 "Indicator Name": rec["Indicator Name"],
                 "Indicator Code": rec["Indicator Code"],
                 "Year": year,
-                "Value": v[str(year)] if v[str(year)] else 0.0
+                "Value": v.get(str(year))
             }
             new_data.append(new_data_row)
     res = pd.DataFrame.from_dict(new_data, orient='columns')
-    res = res = res.fillna(0)
+    # res = res = res.fillna(0)
     # print(res[:10])
     return res
 
 
 if __name__ == '__main__':
     df = convert_worldbank_data(pd.read_csv("/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_API_KEN_DS2_en_csv_v2_10008.csv"))
-    df.to_csv("/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv")
+    df.to_csv("/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/socio_economics/Clean_Reorganized_API_KEN_DS2_en_csv_v2_10008.csv", index=False)

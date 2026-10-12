@@ -19,6 +19,19 @@
 #'   - value_col, n_observations, n_species
 #'   On error: list(error = "...")
 #' @export
+#' Analyze vector species composition and seasonality
+#'
+#' @param vectors   Output of query_vectors().
+#' @param value_col Which abundance column to summarise. Auto-detected from
+#'                  "count" (preferred) or "density_per_trap".
+#' @return A list with:
+#'   - composition:        per-species totals and share
+#'   - monthly:            climatological monthly mean abundance (pooled)
+#'   - monthly_by_species: monthly mean by species
+#'   - yoy:                monthly by year (empty when only one year)
+#'   - value_col, n_observations, n_species
+#'   On error: list(error = "...")
+#' @export
 analyze_vector_seasonal <- function(vectors, value_col = NULL) {
   if (is.null(vectors) || nrow(vectors) == 0) {
     return(list(error = "No vector data available."))
@@ -31,6 +44,22 @@ analyze_vector_seasonal <- function(vectors, value_col = NULL) {
   }
   if (!value_col %in% names(vectors)) {
     return(list(error = glue::glue("value_col '{value_col}' not present in data.")))
+  }
+  
+  # Pool across locations if the input carries a location_id column.
+  # query_vectors() returns one row per (date, location, species); this
+  # function summarises a single per-species vector series. Summing
+  # counts and averaging derived rates across locations preserves the
+  # semantics of the previous per-date-per-species series.
+  if ("location_id" %in% names(vectors)) {
+    vectors <- vectors |>
+      dplyr::group_by(.data$date, .data$species_name, .data$vector_code) |>
+      dplyr::summarise(
+        count            = sum(.data$count, na.rm = TRUE),
+        density_per_trap = mean(.data$density_per_trap, na.rm = TRUE),
+        infection_rate   = mean(.data$infection_rate, na.rm = TRUE),
+        .groups          = "drop"
+      )
   }
   
   vectors <- vectors |>
@@ -47,8 +76,19 @@ analyze_vector_seasonal <- function(vectors, value_col = NULL) {
       total_count = sum(.data[[value_col]], na.rm = TRUE),
       .groups     = "drop"
     ) |>
-    dplyr::arrange(dplyr::desc(.data$total_count)) |>
-    dplyr::mutate(share = .data$total_count / sum(.data$total_count))
+    dplyr::arrange(dplyr::desc(.data$total_count))
+  
+  # Guard against a divide-by-zero when every count is NA or the value_col
+  # carries only missing values. Return NA_real_ in that case, so the plot
+  # renders as an empty panel rather than silently producing NaN bars.
+  total <- sum(composition$total_count, na.rm = TRUE)
+  composition <- composition |>
+    dplyr::mutate(
+      share = if (is.finite(total) && total > 0)
+        .data$total_count / total
+      else
+        NA_real_
+    )
   
   monthly <- vectors |>
     dplyr::group_by(.data$month) |>
