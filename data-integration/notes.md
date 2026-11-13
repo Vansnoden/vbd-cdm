@@ -12,6 +12,16 @@
     --verbose
 
 ./clip_timeseries_data \
+    --source=/home/void/Documents/research/phd/data/vbd-cdm/ERA5-Land/2018_2022_data.grib \
+    --bounds=/home/void/Documents/research/phd/data/shapefiles/nairobi_county/nairobi_county.shp \
+    --target=/home/void/Documents/research/phd/data/vbd-cdm/DummyData/nairobi_climate_t2m_tp_2018_2022.nc \
+    --daily \
+    --buffer=1.0 \
+    --variables=2t,tp \
+    --rename-t2m \
+    --verbose
+
+./clip_timeseries_data \
     --source=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/climatic_timeseries_data/2020_data.grib \
     --bounds=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/study_site/Siaya_County_KE.shp \
     --target=/mnt/monadworld/projects/phd/article_manuscripts/a_cdm_for_vector_of_vbds/data/datasets/siaya_county_data/climate/climate_t2m_tp_2020.nc \
@@ -62,6 +72,21 @@
     --verbose
 
 ```
+
+
+#### Tif to Cog
+
+##### Basic: foo.tif -> foo.cog
+./tif2cog.sh foo.tif
+
+##### Explicit output name
+./tif2cog.sh foo.tif -o nairobi_landcover.cog
+
+##### Overwrite an existing output, ZSTD compression, 256-pixel tiles
+./tif2cog.sh -f -c ZSTD -b 256 foo.tif
+
+##### See the exact gdal_translate command without running it
+./tif2cog.sh -n foo.tif
 
 
 #### Inspect clipped data:
