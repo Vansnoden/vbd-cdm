@@ -1,4 +1,4 @@
-# database/geoutils.py - Enhanced version
+#-*- coding: utf-8 -*-
 
 import reverse_geocode as rg
 import numpy as np

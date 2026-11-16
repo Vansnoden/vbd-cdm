@@ -37,7 +37,7 @@ vbd-cdm-analysis:
 
   include_estimated_cases: true
 
-  env_variables: ["2t", "tp"]
+  env_variables: ["t2m", "tp"]
 
   # species_filter: ["All"]                                  # every species
   # species_filter: ["Anopheles gambiae", "Anopheles funestus"]

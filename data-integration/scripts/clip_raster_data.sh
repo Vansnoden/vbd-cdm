@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------
-# clip_raster_data
+# clip_raster_data.sh
 # Clip GeoTIFF rasters to the actual borders of a shapefile.
 #
-# Approach:
-#   1. Optionally union + buffer the shapefile into a temp GeoJSON that
-#      is used as the cutline.  With no buffer, the shapefile itself is
-#      the cutline (gdalwarp reprojects it to the raster CRS on the fly).
-#   2. gdalwarp -cutline ... -crop_to_cutline, which keeps pixels whose
-#      CENTRE falls inside the polygon, sets everything else to nodata,
-#      and trims the raster extent to the polygon's bounding box.
-#   3. Output is written as a compressed, tiled GeoTIFF, then atomically
-#      moved into place.  The atomic replace is what makes in-place
-#      overwriting safe: a failed warp never leaves a half-written file.
-#
 # Modes
-#   Single file :  clip_raster_data --source=in.tif --bounds=study.shp --target=out.tif
+#   Single file :
+#     clip_raster_data.sh --source=in.tif --bounds=study.shp --target=out.tif
+#     clip_raster_data.sh --source=in.tif --bounds=study.shp            (in-place)
 #
-#   Folder      :  clip_raster_data --source=/data/rasters --bounds=study.shp --all
-#                  (overwrites each input file in place; this is the default)
+#   Folder      :
+#     clip_raster_data.sh --source=/data/rasters --bounds=study.shp --all
+#         → recursively clips every *.tif/*.tiff under /data/rasters,
+#           OVERWRITING each file in place (atomic: safe on crash).
 #
-#   Folder, keep
-#   originals   :  clip_raster_data --source=/data/rasters --bounds=study.shp --all --keep-originals
-#                  (writes <name>_clipped.tif next to each input)
+#     clip_raster_data.sh --source=/data/rasters --bounds=study.shp --all --shallow
+#         → same, but only the top-level folder (old behaviour).
 #
-#   Folder to
-#   a directory :  clip_raster_data --source=/data/rasters --bounds=study.shp --all --target-dir=/out
-#                  (writes each clipped file into /out, preserving names)
+#     clip_raster_data.sh --source=/data/rasters --bounds=study.shp --all --keep-originals
+#         → writes <name>_clipped.tif next to each input; re-runs skip
+#           files that already have their _clipped.tif neighbour.
+#
+#     clip_raster_data.sh --source=/data/rasters --bounds=study.shp --all --target-dir=/out
+#         → writes to /out preserving the source subdirectory structure.
+#
+#   Batch behaviour:
+#     --fail-fast        Abort on the first failed raster (default: continue).
+#     --dry-run          List what would be clipped; write nothing.
+#     --verbose          Show the underlying gdalwarp command lines.
 # ----------------------------------------------------------------------
 
 set -euo pipefail
@@ -44,6 +44,8 @@ target_dir=""             # optional output folder for folder mode
 all_mode=0
 inplace=1                 # folder mode overwrites inputs by default
 keep_originals=0          # --keep-originals flips this off
+recursive=1               # NEW: --all walks subdirectories by default
+fail_fast=0               # NEW: keep going after a failed raster
 dry_run=0
 verbose=0
 
@@ -64,14 +66,20 @@ Required:
                        For folder mode use --target-dir=DIR or leave unset.
 
 Folder mode:
-  --all                Process every *.tif / *.tiff in --source.
-                       DEFAULT BEHAVIOUR: overwrite each input file in place.
+  --all                Clip every *.tif / *.tiff under --source.
+                       RECURSIVE by default. Output is written IN PLACE
+                       (each input file is atomically overwritten).
+  --shallow            With --all: do not descend into subdirectories.
+                       (alias: --no-recursive)
   --keep-originals     Do not overwrite. Write <name>_clipped.tif next to
-                       each input instead. Mutually exclusive with --target-dir.
-  --target-dir=DIR     Write outputs to DIR (preserves input basenames).
+                       each input instead. Re-runs skip files that already
+                       have their _clipped.tif neighbour.
+  --target-dir=DIR     Write outputs to DIR, preserving the source
+                       subdirectory structure. Mutually exclusive with
+                       --keep-originals.
   --suffix=STR         Suffix for --keep-originals mode (default: _clipped).
-  --inplace            Accepted for backward compatibility. In-place
-                       overwrite is now the default; this flag is a no-op.
+  --inplace            Accepted for backward compatibility (no-op; in-place
+                       is already the default in folder mode).
 
 Geometry:
   --buffer=DEGREES     Buffer around the polygon. Units are those of the
@@ -86,36 +94,51 @@ Raster options:
   --compress=CODEC     DEFLATE (default), LZW, ZSTD or NONE.
   --alpha              Add an alpha band to the output.
 
-Misc:
-  --dry-run            Print what would be done, write nothing.
+Batch behaviour:
+  --fail-fast          Abort on the first failed raster (default: continue).
+  --dry-run            Print what would be done; write nothing.
   --verbose            Show the underlying gdalwarp command lines.
   --help               Show this message.
+
+Examples:
+  # Clip every TIFF under /data/rasters, recursively, in place:
+  $(basename "$0") --source=/data/rasters --bounds=kenya.shp --all
+
+  # Same but write to a separate tree:
+  $(basename "$0") --source=/data/rasters --bounds=kenya.shp --all --target-dir=/data/clipped
+
+  # Keep originals, only top-level folder:
+  $(basename "$0") --source=/data/rasters --bounds=kenya.shp --all --shallow --keep-originals
 EOF
 }
 
 # ---------------- Argument parsing ------------------------------------
-for arg in "$@"; do
-    case $arg in
-        --source=*)         source_file="${arg#*=}" ;;
-        --bounds=*)         bounds_file="${arg#*=}" ;;
-        --target=*)         target_file="${arg#*=}" ;;
-        --target-dir=*)     target_dir="${arg#*=}" ;;
-        --suffix=*)         suffix="${arg#*=}" ;;
-        --buffer=*)         buffer="${arg#*=}" ;;
-        --buffer-crs=*)     buffer_crs="${arg#*=}" ;;
-        --resampling=*)     resampling="${arg#*=}" ;;
-        --nodata=*)         nodata="${arg#*=}" ;;
-        --dst-crs=*)        dst_crs="${arg#*=}" ;;
-        --compress=*)       compress="${arg#*=}" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --source=*)         source_file="${1#*=}" ;;
+        --bounds=*)         bounds_file="${1#*=}" ;;
+        --target=*)         target_file="${1#*=}" ;;
+        --target-dir=*)     target_dir="${1#*=}" ;;
+        --suffix=*)         suffix="${1#*=}" ;;
+        --buffer=*)         buffer="${1#*=}" ;;
+        --buffer-crs=*)     buffer_crs="${1#*=}" ;;
+        --resampling=*)     resampling="${1#*=}" ;;
+        --nodata=*)         nodata="${1#*=}" ;;
+        --dst-crs=*)        dst_crs="${1#*=}" ;;
+        --compress=*)       compress="${1#*=}" ;;
         --all)              all_mode=1 ;;
+        --shallow|--no-recursive)
+                            recursive=0 ;;
         --inplace)          inplace=1 ;;      # no-op; kept for compat
         --keep-originals)   keep_originals=1; inplace=0 ;;
         --alpha)            alpha=1 ;;
+        --fail-fast)        fail_fast=1 ;;
         --dry-run)          dry_run=1 ;;
         --verbose)          verbose=1 ;;
         --help|-h)          usage; exit 0 ;;
-        *) echo "Unknown option: $arg"; usage; exit 1 ;;
+        *) echo "Unknown option: $1"; usage; exit 1 ;;
     esac
+    shift
 done
 
 # ---------------- Validation ------------------------------------------
@@ -127,6 +150,9 @@ fi
 if [[ ! -f "$bounds_file" ]]; then
     echo "ERROR: Bounds file not found: $bounds_file"; exit 1
 fi
+
+# Normalise the source folder path so ${f#$source_file/} works reliably.
+source_file="${source_file%/}"
 
 if [[ $all_mode -eq 1 ]]; then
     [[ -d "$source_file" ]] || { echo "ERROR: --all requires --source to be a directory."; exit 1; }
@@ -169,10 +195,6 @@ if [[ -z "$layer_name" ]]; then
 fi
 
 # ---------------- Build the cutline -----------------------------------
-# No buffer  -> use the shapefile directly and pass its layer name.
-# Buffer     -> build a temp GeoJSON with a single unioned + buffered
-#               geometry and use that.  gdalwarp automatically reprojects
-#               the cutline to the raster CRS either way.
 cutline="$bounds_file"
 cutline_layer="$layer_name"
 
@@ -180,8 +202,6 @@ if awk -v b="$buffer" 'BEGIN{exit !(b>0)}'; then
     cutline="$work_dir/cutline.geojson"
 
     if [[ -n "$buffer_crs" ]]; then
-        # Two-step: warp first, then buffer, so the buffer distance is in
-        # the units of the target CRS rather than the shapefile's.
         if [[ $verbose -eq 1 ]]; then
             echo "Projecting shapefile to $buffer_crs before buffering ..."
         fi
@@ -239,7 +259,6 @@ clip_one() {
     [[ -n "$dst_crs" ]]       && cmd+=(-t_srs "$dst_crs")
     [[ $alpha -eq 1 ]]        && cmd+=(-dstalpha)
 
-    # Predictor helps DEFLATE/LZW on continuous data; harmless elsewhere.
     case "${compress^^}" in
         DEFLATE|LZW) cmd+=(-co PREDICTOR=2) ;;
     esac
@@ -256,9 +275,6 @@ clip_one() {
         return 1
     fi
 
-    # Atomic replace: works whether $dst equals $src (in-place) or not.
-    # Same-directory rename is a single filesystem operation, so a crash
-    # between gdalwarp finishing and this mv cannot corrupt the original.
     mv -f "$tmp_out" "$dst"
 
     if [[ "$src" == "$dst" ]]; then
@@ -270,52 +286,94 @@ clip_one() {
 
 # ---------------- Dispatch --------------------------------------------
 if [[ $all_mode -eq 1 ]]; then
-    shopt -s nullglob
-    files=("$source_file"/*.tif "$source_file"/*.tiff \
-           "$source_file"/*.TIF "$source_file"/*.TIFF)
-    shopt -u nullglob
+    # ---- Discover inputs (recursive by default) ----
+    find_args=( "$source_file" -type f \( -iname '*.tif' -o -iname '*.tiff' \) ! -name '.*' )
+    [[ $recursive -eq 0 ]] && find_args=( "$source_file" -maxdepth 1 "${find_args[@]:1}" )
+
+    mapfile -t files < <(find "${find_args[@]}" | sort)
 
     if (( ${#files[@]} == 0 )); then
-        echo "ERROR: no .tif/.tiff files found in $source_file"; exit 1
+        echo "ERROR: no .tif/.tiff files found under $source_file${recursive:+ (recursive)}"
+        exit 1
     fi
 
-    # Summarise the mode up-front so the user knows what will happen.
+    # ---- Describe mode up-front ----
     if [[ -n "$target_dir" ]]; then
-        mode_label="write to $target_dir"
+        mode_label="write to $target_dir (preserving structure)"
     elif [[ $keep_originals -eq 1 ]]; then
         mode_label="keep originals, write <name>${suffix}.tif"
     else
         mode_label="OVERWRITE inputs in place"
     fi
 
+    scope="recursive"
+    [[ $recursive -eq 0 ]] && scope="shallow"
+
     if [[ $dry_run -eq 1 ]]; then
-        echo "DRY-RUN: ${#files[@]} raster(s) in $source_file; mode: $mode_label"
+        echo "DRY-RUN: ${#files[@]} raster(s) under $source_file [$scope; $mode_label]"
     else
-        echo "Clipping ${#files[@]} raster(s) in $source_file  [$mode_label]"
+        echo "Clipping ${#files[@]} raster(s) under $source_file  [$scope; $mode_label]"
     fi
+
+    # ---- Loop with counters ----
+    succeeded=0
+    failed=0
+    skipped=0
 
     for f in "${files[@]}"; do
         base=$(basename "$f")
         name="${base%.*}"
         ext="${base##*.}"
 
+        # Skip already-processed files in --keep-originals mode.
+        # Only skip when the corresponding source file exists alongside,
+        # so a real file literally named "foo_clipped.tif" is still processed.
+        if [[ $keep_originals -eq 1 && "$name" == *"$suffix" ]]; then
+            stem="${name%"$suffix"}"
+            original="$(dirname "$f")/${stem}.${ext}"
+            if [[ -f "$original" ]]; then
+                skipped=$((skipped + 1))
+                [[ $verbose -eq 1 ]] && echo "  [skip] $f (already has $suffix)"
+                continue
+            fi
+        fi
+
+        # ---- Determine output path ----
         if [[ -n "$target_dir" ]]; then
-            mkdir -p "$target_dir"
-            dst="$target_dir/$base"
+            rel="${f#"$source_file"/}"
+            [[ "$rel" == "$f" ]] && rel="$base"     # safety fallback
+            if [[ $dry_run -eq 0 ]]; then
+                mkdir -p "$target_dir/$(dirname "$rel")"
+            fi
+            dst="$target_dir/$rel"
         elif [[ $keep_originals -eq 1 ]]; then
             dst="$(dirname "$f")/${name}${suffix}.${ext}"
         else
-            # Default: overwrite in place.
-            dst="$f"
+            dst="$f"                                 # in-place
         fi
 
-        clip_one "$f" "$dst"
+        # ---- Clip; continue on error unless --fail-fast ----
+        if clip_one "$f" "$dst"; then
+            succeeded=$((succeeded + 1))
+        else
+            failed=$((failed + 1))
+            if [[ $fail_fast -eq 1 ]]; then
+                echo "ERROR: --fail-fast set; aborting after failure on $f" >&2
+                exit 1
+            fi
+        fi
     done
+
+    # ---- Summary ----
+    echo
+    echo "=== Summary ==="
+    printf '  discovered : %d\n' "${#files[@]}"
+    printf '  succeeded  : %d\n' "$succeeded"
+    printf '  skipped    : %d\n' "$skipped"
+    printf '  failed     : %d\n' "$failed"
+    [[ $dry_run -eq 1 ]] && echo "  (dry-run — no files were written)"
+    [[ $failed -gt 0 ]] && exit 1
 else
     clip_one "$source_file" "$target_file"
-fi
-
-# ---------------- Final report ----------------------------------------
-if [[ $dry_run -eq 0 ]]; then
-    echo "Done."
+    [[ $dry_run -eq 0 ]] && echo "Done."
 fi
