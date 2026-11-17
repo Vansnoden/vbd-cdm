@@ -2,7 +2,7 @@
 ========================================================================
 Analysis summary
 ========================================================================
-Generated:  2026-09-26 10:30:55 EAT
+Generated:  2026-11-17 12:03:26 EAT
 Host:       void-ThinkPad-T460
 R version:  R version 4.3.3 (2024-02-29)
 Project:    /home/void/Documents/codes/vbd-cdm/data-analysis
@@ -15,7 +15,7 @@ countries        : KE
 locations        : [7 values: Siaya, Busia, Bungoma, ...]
 years            :  2015 -  2025
 diseases         : MAL
-env_variables    : [2 values: 2t, tp]
+env_variables    : [2 values: t2m, tp]
 species_filter   : [2 values: Anopheles gambiae, Anopheles funestus]
 max_lag_months   :     6
 output_dir       : outputs/analysis
@@ -23,369 +23,193 @@ output_dir       : outputs/analysis
 ========================================================================
 Data availability
 ========================================================================
-Locations resolved:       322
+Locations resolved:       345
   by admin_level:
-       Var1 Freq
-     admin1    7
-     admin2   52
-     admin3  187
-     county    1
-   facility    4
-       site   71
-Grid locations resolved:  3021
-vectors:                         79 row(s)
+         Var1 Freq
+       admin1    7
+       admin2   52
+       admin3  187
+   occurrence   21
+         site   78
+Grid locations resolved:  2338
+vectors:                         93 row(s)
                            2015-01-01 to 2020-11-01
 environment:                   4018 row(s)
                            2015-01-01 to 2025-12-31
-resistance:                     173 row(s)
+resistance:                     139 row(s)
                            2015-01-01 to 2020-11-01
-bionomics:                      107 row(s)
+bionomics:                       66 row(s)
                            2015-01-01 to 2020-11-01
 cases:                       747348 row(s)
                            2015-01-01 to 2025-12-31
-burden:                        4092 row(s)
+burden:                           0 row(s)
 
 cases_available:         TRUE
 cases_n:                  4018
 
 -- QA table inventory ------------------------------------------------
        dataset n_records   date_min   date_max
-     locations       322                      
+     locations       345                      
          cases    747348 2015-01-01 2025-12-31
-       vectors        79 2015-01-01 2020-11-01
+       vectors        93 2015-01-01 2020-11-01
    environment      4018 2015-01-01 2025-12-31
 
 ========================================================================
 Vector seasonality  (analyze_vector_seasonal)
 ========================================================================
 value_col:        count
-n_observations:      33
+n_observations:      38
 n_species:            2
 
 composition:
          species_name n_obs total_count  share
-    Anopheles gambiae    16       32023 0.8245
-   Anopheles funestus    17        6814 0.1755
+    Anopheles gambiae    16       32456 0.8265
+   Anopheles funestus    22        6814 0.1735
 
 climatological monthly mean:
    month     mean       sd n
-     Jan   856.50  1431.08 8
+     Jan   902.62  1520.70 8
      Feb  1229.00  1300.63 3
      Mar     0.00     0.00 2
      Apr    62.33   107.96 3
      May    72.25   144.50 4
-     Jun   102.00       NA 1
-     Jul    67.00    58.51 3
+     Jun    34.00    58.89 3
+     Jul    40.20    55.30 5
      Sep 12513.00 12875.00 2
-     Oct   241.00       NA 1
-     Nov   375.33   561.99 6
+     Oct   305.00       NA 1
+     Nov   321.71   532.27 7
 
 year-over-year (first 24 rows):
-   year month    mean
-   2015     1  1941.0
-   2015     9 12513.0
-   2015    10   241.0
-   2015    11    34.0
-   2016     1     0.0
-   2017     1  1485.0
-   2017     2   121.0
-   2017     5     0.0
-   2017     6   102.0
-   2017     7    68.0
-   2018     1     0.0
-   2018     2  1783.0
-   2018     4     0.0
-   2018     5     0.0
-   2018    11     0.0
-   2019     3     0.0
-   2019     4    93.5
-   2019     5   144.5
-   2019    11  1092.0
-   2020     7    66.5
-   2020    11     0.0
+   year month     mean
+   2015     1  2075.50
+   2015     7     0.00
+   2015     9 12513.00
+   2015    10   305.00
+   2015    11    22.67
+   2016     1     0.00
+   2017     1  1535.00
+   2017     2   121.00
+   2017     5     0.00
+   2017     6    34.00
+   2017     7    34.00
+   2018     1     0.00
+   2018     2  1783.00
+   2018     4     0.00
+   2018     5     0.00
+   2018    11     0.00
+   2019     3     0.00
+   2019     4    93.50
+   2019     5   144.50
+   2019    11  1092.00
+   2020     7    66.50
+   2020    11     0.00
 
 ========================================================================
 Vector-climate associations  (analyze_vector_climate)
 ========================================================================
 aggregation:       monthly
 vector_col:        count
-climate_variables: [2 values: 2t, tp]
+climate_variables: [2 values: t2m, tp]
 group_cols:        species_name
-total_observations:   33
+total_observations:   34
 date_range:        2015-01-01 to 2020-11-01
-mean_vector:        1177
+mean_vector:        1155
 max_vector:        2.162e+04
 n_groups:              2
 
 Pearson correlations:
    climate_variable        r      p  n ci_lower ci_upper  p_adj
-                 2t  0.03771 0.8349 33  -0.3096   0.3762 0.8349
-                 tp -0.22523 0.2076 33  -0.5277   0.1280 0.4152
+                t2m  0.04785 0.7881 34  -0.2951   0.3799 0.7881
+                 tp -0.22418 0.2024 34  -0.5227   0.1233 0.4049
 
 optimal lags (max r):
    climate_variable lag       r      p  n ci_lower ci_upper
-                 2t   2 0.06365 0.7337 31  -0.2974   0.4088
-                 tp   4 0.23394 0.2219 29  -0.1450   0.5530
+                t2m   3 0.06015 0.7479 31  -0.3006   0.4058
+                 tp   5 0.21067 0.2727 29  -0.1689   0.5358
 
 lag correlations (first 24 rows):
-   climate_variable lag        r      p  n ci_lower ci_upper  p_adj
-                 2t   0  0.03771 0.8349 33  -0.3096  0.37615 0.8992
-                 2t   1  0.04022 0.8270 32  -0.3129  0.38353 0.8992
-                 2t   2  0.06365 0.7337 31  -0.2974  0.40877 0.8992
-                 2t   3  0.04564 0.8107 30  -0.3199  0.39934 0.8992
-                 2t   4 -0.27322 0.1515 29  -0.5815  0.10366 0.5178
-                 2t   5 -0.18407 0.3484 28  -0.5213  0.20295 0.6098
-                 2t   6  0.01845 0.9272 27  -0.3641  0.39569 0.9272
-                 tp   0 -0.22523 0.2076 33  -0.5277  0.12797 0.5178
-                 tp   1 -0.23367 0.1980 32  -0.5385  0.12523 0.5178
-                 tp   2 -0.28428 0.1212 31  -0.5802  0.07791 0.5178
-                 tp   3 -0.25366 0.1762 30  -0.5625  0.11734 0.5178
-                 tp   4  0.23394 0.2219 29  -0.1450  0.55303 0.5178
-                 tp   5  0.21898 0.2629 28  -0.1678  0.54734 0.5258
-                 tp   6  0.12996 0.5182 27  -0.2630  0.48597 0.8061
+   climate_variable lag         r      p  n ci_lower ci_upper  p_adj
+                t2m   0  0.047850 0.7881 34  -0.2951  0.37987 0.9710
+                t2m   1  0.012944 0.9430 33  -0.3318  0.35468 0.9710
+                t2m   2 -0.180641 0.3225 32  -0.4980  0.17935 0.7568
+                t2m   3  0.060151 0.7479 31  -0.3006  0.40584 0.9710
+                t2m   4  0.006926 0.9710 30  -0.3542  0.36628 0.9710
+                t2m   5 -0.159327 0.4091 29  -0.4968  0.22003 0.8181
+                t2m   6  0.036872 0.8522 28  -0.3409  0.40439 0.9710
+                 tp   0 -0.224183 0.2024 34  -0.5227  0.12333 0.7568
+                 tp   1 -0.205966 0.2502 33  -0.5130  0.14779 0.7568
+                 tp   2 -0.105462 0.5657 32  -0.4380  0.25252 0.8799
+                 tp   3 -0.284032 0.1215 31  -0.5800  0.07818 0.7568
+                 tp   4 -0.186276 0.3243 30  -0.5122  0.18651 0.7568
+                 tp   5  0.210665 0.2727 29  -0.1689  0.53580 0.7568
+                 tp   6  0.131507 0.5047 28  -0.2540  0.48099 0.8799
 
 per-group correlations:
          species_name climate_variable        r      p  n ci_lower ci_upper
-   Anopheles funestus               2t  0.04251 0.8713 17  -0.4473   0.5127
-   Anopheles funestus               tp -0.17049 0.5130 17  -0.6018   0.3378
-    Anopheles gambiae               2t  0.03068 0.9102 16  -0.4722   0.5185
-    Anopheles gambiae               tp -0.30848 0.2450 16  -0.6975   0.2210
+   Anopheles funestus              t2m  0.06575 0.7955 18  -0.4138   0.5168
+   Anopheles funestus               tp -0.16058 0.5244 18  -0.5837   0.3311
+    Anopheles gambiae              t2m  0.03312 0.9031 16  -0.4703   0.5203
+    Anopheles gambiae               tp -0.31326 0.2374 16  -0.7002   0.2160
 
 ========================================================================
 Insecticide resistance  (analyze_resistance)
 ========================================================================
-n_observations:   173
+n_observations:   139
 n_insecticides:     7
 
 status by chemical class:
    chemical_class    resistance_status  n  share
-       pyrethroid            Resistant 15 0.6522
-       pyrethroid          Susceptible  4 0.1739
-       pyrethroid Suspected Resistance  4 0.1739
+       pyrethroid            Resistant 21 0.6774
+       pyrethroid          Susceptible  4 0.1290
+       pyrethroid Suspected Resistance  6 0.1935
 
 mortality by insecticide:
    insecticide_name  n mean_mort sd_mort
-       deltamethrin  9     61.10    18.4
-         permethrin 14     74.05    28.0
+       deltamethrin 13     64.02   20.05
+         permethrin 18     68.10   32.07
 
 temporal trend:
    year  n mean_mort
-   2015 23     68.98
+   2015 31     66.39
 
 ========================================================================
 Vector bionomics  (analyze_bionomics)
 ========================================================================
-n_observations:   107
+n_observations:    66
 
 feeding:
-            value   n   share
-   anthropophagic   4 0.03738
-            mixed 103 0.96262
+            value  n   share
+   anthropophagic  3 0.04545
+            mixed 63 0.95455
 
 biting_loc:
-   value   n share
-   mixed 107     1
+   value  n share
+   mixed 66     1
 
 resting:
-       value   n    share
-   exophilic   1 0.009346
-       mixed 106 0.990654
+       value  n   share
+   exophilic  1 0.01515
+       mixed 65 0.98485
 
 larval:
-         value n  share
-   borrow pits 9 0.6429
-          pond 5 0.3571
+         value n share
+   borrow pits 6   0.6
+          pond 4   0.4
 
 ========================================================================
 Intervention summary  (analyze_intervention_summary)
 ========================================================================
-n_interventions:  6120
-n_types:             4
-date_range:      2015-01-01 to 2025-01-01
-
-by type:
-      intervention_type    n
-             itn_access 2047
-   itn_use_access_ratio 2047
-                itn_use 2025
-          itn_ownership    1
-
-by year and type:
-   year    intervention_type   n
-   2015           itn_access 186
-   2015              itn_use 184
-   2015 itn_use_access_ratio 186
-   2016           itn_access 186
-   2016              itn_use 184
-   2016 itn_use_access_ratio 186
-   2017           itn_access 186
-   2017              itn_use 184
-   2017 itn_use_access_ratio 186
-   2018           itn_access 186
-   2018              itn_use 184
-   2018 itn_use_access_ratio 186
-   2019           itn_access 186
-   2019              itn_use 184
-   2019 itn_use_access_ratio 186
-   2020           itn_access 186
-   2020              itn_use 184
-   2020 itn_use_access_ratio 186
-   2021           itn_access 186
-   2021              itn_use 184
-   2021 itn_use_access_ratio 186
-   2022           itn_access 187
-   2022        itn_ownership   1
-   2022              itn_use 185
-   2022 itn_use_access_ratio 187
-   2023           itn_access 186
-   2023              itn_use 184
-   2023 itn_use_access_ratio 186
-   2024           itn_access 186
-   2024              itn_use 184
-   2024 itn_use_access_ratio 186
-   2025           itn_access 186
-   2025              itn_use 184
-   2025 itn_use_access_ratio 186
-
-coverage by type:
-      intervention_type    n mean_cov median_cov
-          itn_ownership    1  87.0000    87.0000
-   itn_use_access_ratio 2047   0.8798     0.9059
-             itn_access 2047   0.7165     0.7060
-                itn_use 2025   0.6428     0.6267
+error: No intervention data available.
 
 ========================================================================
 Intervention impact on cases  (analyze_intervention_impact)
 ========================================================================
-outcome_col:      case_count
-window_months:       24
-n_events:          6120
-n_events_usable:   5550
-
-per-event pre/post:
-   intervention_id    intervention_type location_id coverage       date n_before n_after
-             28322           itn_access        7395   0.6096 2016-01-01      365     732
-             28323              itn_use        7395   0.5415 2016-01-01      365     732
-             28324 itn_use_access_ratio        7395   0.8768 2016-01-01      365     732
-             28674           itn_access        7396   0.5967 2016-01-01      365     732
-             28675              itn_use        7396   0.5540 2016-01-01      365     732
-             28676 itn_use_access_ratio        7396   0.8709 2016-01-01      365     732
-             28651           itn_access        7397   0.6252 2016-01-01      365     732
-             28652 itn_use_access_ratio        7397   0.8822 2016-01-01      365     732
-             27706           itn_access        7398   0.5897 2016-01-01      365     732
-             27707              itn_use        7398   0.5375 2016-01-01      365     732
-             27708 itn_use_access_ratio        7398   0.8971 2016-01-01      365     732
-             27574           itn_access        7399   0.5482 2016-01-01      365     732
-             27575              itn_use        7399   0.4968 2016-01-01      365     732
-             27576 itn_use_access_ratio        7399   0.9033 2016-01-01      365     732
-             28355           itn_access        7400   0.5897 2016-01-01      365     732
-             28356              itn_use        7400   0.5201 2016-01-01      365     732
-             28357 itn_use_access_ratio        7400   0.8791 2016-01-01      365     732
-             28069           itn_access        7401   0.5795 2016-01-01      365     732
-             28070              itn_use        7401   0.5089 2016-01-01      365     732
-             28071 itn_use_access_ratio        7401   0.8938 2016-01-01      365     732
-             27343           itn_access        7402   0.5256 2016-01-01      365     732
-             27344              itn_use        7402   0.4801 2016-01-01      365     732
-             27345 itn_use_access_ratio        7402   0.8952 2016-01-01      365     732
-             27211           itn_access        7403   0.5002 2016-01-01      365     732
-             27212              itn_use        7403   0.4645 2016-01-01      365     732
-             27213 itn_use_access_ratio        7403   0.9110 2016-01-01      365     732
-             26914           itn_access        7404   0.4876 2016-01-01      365     732
-             26915              itn_use        7404   0.4581 2016-01-01      365     732
-             26916 itn_use_access_ratio        7404   0.9194 2016-01-01      365     732
-             27607           itn_access        7405   0.5289 2016-01-01      365     732
-             27608              itn_use        7405   0.4864 2016-01-01      365     732
-             27609 itn_use_access_ratio        7405   0.8917 2016-01-01      365     732
-             27772           itn_access        7406   0.5560 2016-01-01      365     732
-             27773              itn_use        7406   0.4952 2016-01-01      365     732
-             27774 itn_use_access_ratio        7406   0.8836 2016-01-01      365     732
-             28135           itn_access        7407   0.5568 2016-01-01      365     732
-             28136              itn_use        7407   0.4919 2016-01-01      365     732
-             28137 itn_use_access_ratio        7407   0.8786 2016-01-01      365     732
-             28421           itn_access        7408   0.5854 2016-01-01      365     732
-             28422              itn_use        7408   0.5217 2016-01-01      365     732
-             28423 itn_use_access_ratio        7408   0.8711 2016-01-01      365     732
-             28102           itn_access        7409   0.6049 2016-01-01      365     732
-             28103              itn_use        7409   0.5474 2016-01-01      365     732
-             28104 itn_use_access_ratio        7409   0.8852 2016-01-01      365     732
-             27739           itn_access        7410   0.5484 2016-01-01      365     732
-             27740              itn_use        7410   0.4927 2016-01-01      365     732
-             27741 itn_use_access_ratio        7410   0.8921 2016-01-01      365     732
-             28388           itn_access        7413   0.5833 2016-01-01      365     732
-             28389              itn_use        7413   0.5207 2016-01-01      365     732
-             28390 itn_use_access_ratio        7413   0.8753 2016-01-01      365     732
-   pre_mean post_mean pct_change
-      3.126     2.831    -9.4505
-      3.126     2.831    -9.4505
-      3.126     2.831    -9.4505
-      3.186     2.874    -9.7914
-      3.186     2.874    -9.7914
-      3.186     2.874    -9.7914
-      3.389     3.052    -9.9476
-      3.389     3.052    -9.9476
-      2.871     2.649    -7.7432
-      2.871     2.649    -7.7432
-      2.871     2.649    -7.7432
-      2.663     2.600    -2.3765
-      2.663     2.600    -2.3765
-      2.663     2.600    -2.3765
-      3.085     2.852    -7.5357
-      3.085     2.852    -7.5357
-      3.085     2.852    -7.5357
-      2.899     2.768    -4.5149
-      2.899     2.768    -4.5149
-      2.899     2.768    -4.5149
-      1.805     1.816     0.5591
-      1.805     1.816     0.5591
-      1.805     1.816     0.5591
-      1.915     2.046     6.8603
-      1.915     2.046     6.8603
-      1.915     2.046     6.8603
-      1.600     1.743     8.9481
-      1.600     1.743     8.9481
-      1.600     1.743     8.9481
-      2.225     2.253     1.2620
-      2.225     2.253     1.2620
-      2.225     2.253     1.2620
-      1.748     1.628    -6.8383
-      1.748     1.628    -6.8383
-      1.748     1.628    -6.8383
-      2.142     1.995    -6.9047
-      2.142     1.995    -6.9047
-      2.142     1.995    -6.9047
-      2.285     1.973   -13.6658
-      2.285     1.973   -13.6658
-      2.285     1.973   -13.6658
-      2.819     2.407   -14.6168
-      2.819     2.407   -14.6168
-      2.819     2.407   -14.6168
-      2.671     2.623    -1.8075
-      2.671     2.623    -1.8075
-      2.671     2.623    -1.8075
-      2.668     2.366   -11.3312
-      2.668     2.366   -11.3312
-      2.668     2.366   -11.3312
-  ... 5500 more row(s)
-
-by intervention type:
-      intervention_type n_events mean_pct_change median_pct_change sd_pct_change
-             itn_access     1860          -5.348            -2.290         13.79
-   itn_use_access_ratio     1860          -5.348            -2.290         13.79
-                itn_use     1830          -5.311            -2.197         13.76
+error: No intervention data available.
 
 ========================================================================
 Intervention impact on vectors  (analyze_intervention_impact)
 ========================================================================
-outcome_col:      count
-window_months:       24
-n_events:          6120
-n_events_usable:      0
-
-per-event pre/post:
-  (empty)
-
-by intervention type:
-  (empty)
+error: No intervention data available.
 
 ========================================================================
 Case seasonality  (analyze_seasonal)
@@ -393,45 +217,45 @@ Case seasonality  (analyze_seasonal)
 
 monthly mean / sd / n:
    month  mean     sd   n month_name
-     Jan 246.6  33.18 341        Jan
-     Feb 233.8  28.68 311        Feb
-     Mar 277.4  41.37 341        Mar
-     Apr 510.2  98.28 330        Apr
-     May 588.1 107.08 341        May
-     Jun 558.6  99.72 330        Jun
-     Jul 519.1  92.98 341        Jul
-     Aug 434.0  75.57 341        Aug
-     Sep 341.2  55.73 330        Sep
-     Oct 277.1  40.83 341        Oct
-     Nov 247.8  33.21 330        Nov
-     Dec 228.9  27.28 341        Dec
+     Jan 248.4  34.05 341        Jan
+     Feb 234.8  29.14 311        Feb
+     Mar 281.5  42.49 341        Mar
+     Apr 522.2 101.52 330        Apr
+     May 597.8 108.36 341        May
+     Jun 570.2  99.56 330        Jun
+     Jul 527.6  93.03 341        Jul
+     Aug 444.0  75.35 341        Aug
+     Sep 348.4  58.00 330        Sep
+     Oct 280.2  42.41 341        Oct
+     Nov 250.7  34.24 330        Nov
+     Dec 230.7  28.11 341        Dec
 
 year-over-year (first 24 rows):
    year month  mean
-   2015     1 284.6
-   2015     2 269.0
-   2015     3 322.5
-   2015     4 612.7
-   2015     5 700.5
-   2015     6 669.5
-   2015     7 629.4
-   2015     8 519.7
-   2015     9 407.6
-   2015    10 326.8
-   2015    11 285.9
-   2015    12 261.3
-   2016     1 264.8
-   2016     2 252.1
-   2016     3 303.3
-   2016     4 556.8
-   2016     5 635.9
-   2016     6 609.9
-   2016     7 563.5
-   2016     8 473.4
-   2016     9 374.7
-   2016    10 300.7
-   2016    11 269.3
-   2016    12 246.5
+   2015     1 289.1
+   2015     2 270.9
+   2015     3 328.7
+   2015     4 623.0
+   2015     5 708.6
+   2015     6 675.9
+   2015     7 630.9
+   2015     8 523.4
+   2015     9 416.9
+   2015    10 330.3
+   2015    11 290.9
+   2015    12 265.1
+   2016     1 266.8
+   2016     2 252.9
+   2016     3 305.5
+   2016     4 565.6
+   2016     5 642.0
+   2016     6 618.2
+   2016     7 566.7
+   2016     8 480.0
+   2016     9 378.2
+   2016    10 303.8
+   2016    11 271.1
+   2016    12 250.4
   ... 108 more row(s)
 decomposition:  decomposed.ts (frequency = 12)
 
@@ -439,12 +263,12 @@ decomposition:  decomposed.ts (frequency = 12)
 Figures written (paths only, not embedded)
 ========================================================================
 fig_vector_seasonal:         /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_seasonal.png
-fig_vector_climate:          /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_correlations.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_2t.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_tp.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_by_group.png
+fig_vector_climate:          /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_correlations.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_t2m.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_tp.png, /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_vector_climate_by_group.png
 fig_resistance:              /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_resistance.png
 fig_bionomics:               /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_bionomics.png
-fig_intervention_summary:    /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_intervention_summary.png
-fig_intervention_burden:     /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_intervention_cases.png
-fig_intervention_vector:     /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_intervention_vectors.png
+fig_intervention_summary:    (none)
+fig_intervention_burden:     (none)
+fig_intervention_vector:     (none)
 fig_seasonal:                /home/void/Documents/codes/vbd-cdm/data-analysis/outputs/analysis/figures/Case Study_seasonal.png
 
 ========================================================================

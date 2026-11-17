@@ -169,6 +169,14 @@ data_sources:
     matching: "mappings/era5_climate.mapping.csv"
     extract_mode: "timeseries"
 
+  climate_timeseries_2015_2017:
+    source_name: "ERA5-Land Climate"
+    type: "file"
+    extension: "nc"
+    path: "/home/void/Documents/research/phd/data/vbd-cdm/ERA5-Land/CaseStudy/climate_t2m_tp_2015_2017.nc"
+    matching: "mappings/era5_climate.mapping.csv"
+    extract_mode: "timeseries"
+
   map_pf_incidence_count_ken:
     source_name: "MAP Pf Incidence Count (Kenya)"
     type: "folder"
@@ -255,41 +263,6 @@ data_sources:
     matching: "mappings/worldbank_indicator.mapping.csv"
     extract_mode: "single"
 
-  map_itn_access_ken:
-    source_name: "MAP ITN Access (Kenya)"
-    type: "folder"
-    extension: "tiff"
-    path: "/home/void/Documents/research/phd/data/vbd-cdm/MAP/Africa_Insecticide_Treated_Net_Access_KEN"
-    matching: "mappings/map_itn_access.mapping.csv"
-    extract_mode: "chunked"
-    extension_options:
-      band: 1
-      window_size: 512
-      nodata_threshold: -9999.0
-
-  map_itn_use_ken:
-    source_name: "MAP ITN Use (Kenya)"
-    type: "folder"
-    extension: "tiff"
-    path: "/home/void/Documents/research/phd/data/vbd-cdm/MAP/Africa_Insecticide_Treated_Net_Use_KEN"
-    matching: "mappings/map_itn_use.mapping.csv"
-    extract_mode: "chunked"
-    extension_options:
-      band: 1
-      window_size: 512
-      nodata_threshold: -9999.0
-
-  map_itn_use_rate_ken:
-    source_name: "MAP ITN Use/Access Ratio (Kenya)"
-    type: "folder"
-    extension: "tiff"
-    path: "/home/void/Documents/research/phd/data/vbd-cdm/MAP/Africa_Insecticide_Treated_Net_Use_Rate_KEN"
-    matching: "mappings/map_itn_use_rate.mapping.csv"
-    extract_mode: "chunked"
-    extension_options:
-      band: 1
-      window_size: 512
-      nodata_threshold: -9999.0
 
 process:
   steps:

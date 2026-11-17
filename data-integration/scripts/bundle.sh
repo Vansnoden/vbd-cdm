@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ---------- defaults ---------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-ROOT="$SCRIPT_DIR"
+ROOT="$SCRIPT_DIR/.."
 OUTPUT="data_integration_bundle.txt"
 
 usage() {
