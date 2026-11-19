@@ -54,6 +54,7 @@ from utilities.vocabulary.registry import VocabularyRegistry
 logger = logging.getLogger(__name__)
 
 MAX_IN_VARS = 900
+_GRID_NAME_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$")
 
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
 
@@ -564,6 +565,35 @@ def _or_where(pairs: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return (" AND ".join(clauses) or "1=1"), params
 
 
+def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
+    """Index of the nearest candidate for each point. Equirectangular, chunked.
+
+    ``dlat^2 + (dlon * cos(mean_lat))^2``. Adequate for nearest-neighbour at
+    regional scale, deterministic, and free of a projection dependency. Ties
+    resolve to the first candidate, and candidates arrive ordered by
+    ``location_id``, so the winner is the lowest id.
+    """
+    n = len(glat)
+    out = np.zeros(n, dtype=int)
+    if n == 0 or len(alat) == 0:
+        return out
+
+    glat = np.asarray(glat, dtype=float)
+    glon = np.asarray(glon, dtype=float)
+    alat = np.asarray(alat, dtype=float)
+    alon = np.asarray(alon, dtype=float)
+
+    scale = float(np.cos(np.radians(np.mean(np.concatenate([glat, alat])))))
+    glon_s, alon_s = glon * scale, alon * scale
+
+    for start in range(0, n, chunk):
+        end = min(start + chunk, n)
+        d2 = ((glat[start:end, None] - alat[None, :]) ** 2
+              + (glon_s[start:end, None] - alon_s[None, :]) ** 2)
+        out[start:end] = np.argmin(d2, axis=1)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # DataConsolidator
 # ---------------------------------------------------------------------------
@@ -677,7 +707,8 @@ class DataConsolidator:
             group_extra=("country_code", "admin_level"),
         )
         rebuilt = self._rebuild_admin_hierarchy_from_standard_code(dry_run=dry_run)
-
+        grid_parents = self._assign_grid_parents(dry_run=dry_run)
+        
         grid_level = None
         if registry is not None:
             try:
@@ -705,6 +736,7 @@ class DataConsolidator:
             "repaired_parents": repaired,
             "hierarchy_rebuilt": rebuilt,
             "grid_count": grid_count,
+            "grid_parents": grid_parents,
             "non_grid_count": max(0, after - grid_count),
             "cluster_results": {"merged_count": merged_count,
                                 "group_count": len(merged_groups),
@@ -818,6 +850,191 @@ class DataConsolidator:
             logger.info("  hierarchy: placed %d/%d location(s) from standard_code%s",
                         len(updates), len(rows), " (dry run)" if dry_run else "")
         return {"examined": len(rows), "placed": len(updates)}
+
+
+    def _assign_grid_parents(self, *, force: bool = False,
+                             dry_run: bool = False) -> Dict[str, Any]:
+        """Set ``parent_location_id`` on every grid cell.
+
+        A grid cell is a raster pixel: its ``location_code`` is "<lon>/<lat>", it
+        appears in no boundary product, and it carries no ``standard_code``. So
+        neither the GID join nor the ``standard_code`` rebuild can place it, and
+        it stays orphaned — unreachable from the R analysis, which finds
+        study-area cells by walking ``parent_location_id`` downward from the
+        administrative rows the config names by name.
+
+        A cell is recognised by **either** signal, so the pass cannot be disabled
+        by a missing manifest key:
+
+        * ``admin_level == pack.grid_level``, when the pack declares one;
+        * ``location_code`` matching "<lon>/<lat>", which is what every raster
+          mapping writes.
+
+        Each cell is assigned to the deepest administrative level that carries
+        centroid coordinates, restricted to the cell's own ``country_code`` so a
+        Kenyan pixel is never filed under a Ugandan district. When the pack
+        declares no ``admin_level_map``, the target level is the deepest one by
+        observed parent-chain depth instead.
+
+        Idempotent: by default only cells with a NULL parent are considered, so a
+        re-run is cheap and a manual override survives. ``force=True`` recomputes
+        every cell.
+        """
+        registry = _load_registry(getattr(self, "registry", None))
+        pack = None
+        if registry is not None:
+            try:
+                pack = registry.select_pack("dim_location.name")
+            except Exception as exc:  # noqa: BLE001 - no pack is not a failure
+                logger.debug("no location pack for the grid pass: %s", exc)
+
+        grid_level = getattr(pack, "grid_level", None)
+        admin_levels = tuple((getattr(pack, "admin_level_map", {}) or {}).values())
+
+        rows = self.session.execute(text(
+            "SELECT location_id, name, admin_level, country_code, centroid_lat, "
+            "       centroid_lon, parent_location_id "
+            "FROM dim_location ORDER BY location_id")).fetchall()
+
+        parent_of = {int(r[0]): r[6] for r in rows}
+
+        def _depth(loc_id: int, seen: Optional[Set[int]] = None) -> int:
+            """Ancestor count, with a cycle guard."""
+            seen = seen or set()
+            if loc_id in seen:
+                return 0
+            seen.add(loc_id)
+            parent = parent_of.get(loc_id)
+            return 0 if parent is None else 1 + _depth(int(parent), seen)
+
+        # record = (location_id, country, lat, lon, parent, label)
+        grid: List[Tuple[int, str, float, float, Any, str]] = []
+        admin_records: List[Tuple[int, str, float, float, Any, str]] = []
+        no_coords = 0
+        by_pattern = 0
+
+        for loc_id, name, level, country, lat, lon, parent in rows:
+            label = "" if level is None else str(level).strip()
+            is_grid = bool(grid_level) and label == grid_level
+            if not is_grid and _GRID_NAME_RE.match(str(name or "")):
+                is_grid = True
+                by_pattern += 1
+
+            try:
+                flat, flon = float(lat), float(lon)
+            except (TypeError, ValueError):
+                if is_grid:
+                    no_coords += 1
+                continue
+            if flat != flat or flon != flon:  # NaN
+                if is_grid:
+                    no_coords += 1
+                continue
+            if not (-90.0 <= flat <= 90.0) or not (-180.0 <= flon <= 180.0):
+                if is_grid:
+                    no_coords += 1
+                continue
+
+            code = (country or "").strip().upper()
+            if is_grid:
+                grid.append((int(loc_id), code, flat, flon, parent, label))
+            elif not label:
+                continue
+            elif admin_levels:
+                if label in admin_levels:
+                    admin_records.append(
+                        (int(loc_id), code, flat, flon, parent, label))
+            else:
+                admin_records.append(
+                    (int(loc_id), code, flat, flon, parent, label))
+
+        if not grid:
+            logger.info("  no grid cells found (grid_level=%r, %d row(s) examined); "
+                        "no parent assigned", grid_level, len(rows))
+            return {"status": "no_grid", "grid_level": grid_level,
+                    "grid_cells": 0, "assigned": 0}
+
+        # ---- pick the target level --------------------------------------
+        candidates: List[Tuple[int, str, float, float, Any, str]] = []
+        target_level: Optional[str] = None
+
+        if admin_levels:
+            for level_label in reversed(admin_levels):
+                pool = [r for r in admin_records if r[5] == level_label]
+                if pool:
+                    candidates, target_level = pool, level_label
+                    break
+        else:
+            depths = {r[0]: _depth(r[0]) for r in admin_records}
+            max_depth = max(depths.values(), default=0)
+            candidates = [r for r in admin_records if depths.get(r[0]) == max_depth]
+            target_level = f"depth={max_depth}"
+
+        if not candidates:
+            logger.warning(
+                "  %d grid cell(s) found but no administrative row carries "
+                "coordinates (%s requested), so no parent can be assigned. %d "
+                "cell(s) also lack their own coordinates.",
+                len(grid), list(admin_levels) or "any level", no_coords)
+            return {"status": "no_candidates", "grid_level": grid_level,
+                    "grid_cells": len(grid), "assigned": 0,
+                    "no_coordinates": no_coords}
+
+        by_country: Dict[str, List[Tuple[int, str, float, float, Any, str]]] = {}
+        for record in candidates:
+            by_country.setdefault(record[1], []).append(record)
+
+        kept = 0
+        updates: List[Dict[str, Any]] = []
+        pending: Dict[str, List[Tuple[int, str, float, float, Any, str]]] = {}
+        for record in grid:
+            if record[4] is not None and not force:
+                kept += 1
+                continue
+            pending.setdefault(record[1], []).append(record)
+
+        for country in sorted(pending):
+            group = pending[country]
+            pool = by_country.get(country) or candidates
+            nearest = _nearest_index(
+                [r[2] for r in group], [r[3] for r in group],
+                [r[2] for r in pool], [r[3] for r in pool])
+            for offset, record in enumerate(group):
+                parent_id = pool[int(nearest[offset])][0]
+                if parent_id == record[0]:
+                    continue
+                updates.append({"location_id": record[0],
+                                "parent_location_id": parent_id})
+
+        if updates and not dry_run:
+            statement = text(
+                "UPDATE dim_location SET parent_location_id = :parent_location_id "
+                "WHERE location_id = :location_id")
+            for start in range(0, len(updates), MAX_IN_VARS):
+                self.session.execute(statement, updates[start:start + MAX_IN_VARS])
+            self.session.commit()
+
+        by_country_counts: Dict[str, int] = {}
+        for record in grid:
+            by_country_counts[record[1] or "(none)"] = (
+                by_country_counts.get(record[1] or "(none)", 0) + 1)
+
+        logger.info(
+            "  grid parents: %d/%d cell(s) assigned to %r (%d recognised by "
+            "location_code pattern, %d already parented, %d without coordinates; "
+            "countries: %s)%s",
+            len(updates), len(grid), target_level, by_pattern, kept, no_coords,
+            ", ".join(f"{c}={n}" for c, n in sorted(by_country_counts.items())),
+            " (dry run)" if dry_run else "")
+
+        return {"status": "dry_run" if dry_run else "ok",
+                "grid_level": grid_level, "admin_level": target_level,
+                "grid_cells": len(grid), "candidates": len(candidates),
+                "assigned": len(updates), "kept": kept,
+                "no_coordinates": no_coords,
+                "matched_by_pattern": by_pattern,
+                "by_country": by_country_counts,
+                "dry_run": bool(dry_run)}
 
     # -- dimension merge ---------------------------------------------------
 

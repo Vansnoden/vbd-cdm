@@ -1,24 +1,11 @@
-
 core:
-  vocabulary:
-    gadm_gpkg: "vocabularies/gadm41_KEN.gpkg"
-    ncbi_csv:  "vocabularies/ncbi_vectors.csv"
-    idomal_csv: "vocabularies/idomal_diseases.csv"
-    diagnostic_methods_csv:  "vocabularies/diagnostic_methods.csv"
-    collection_methods_csv:  "vocabularies/collection_methods.csv"
+  admin_boundaries:
+    path: "vocabularies/gadm41_KEN.gpkg"
   countries: ["KEN"]
-  study_area:
-    admin_level: "admin2"
-    names:
-      - "Siaya"
-      - "Busia"
-      - "Bungoma"
-      - "Kakamega"
-      - "Kisumu"
-      - "Nandi"
-      - "Vihiga"
-  grid_scope: "study_area"
 
+# -----------------------------------------------------------------------------
+# data_sources
+# -----------------------------------------------------------------------------
 data_sources:
 
   vectoratlas:
@@ -30,7 +17,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "warn"      # 'warn' requires engine: python
       engine: "python"
     matching: "mappings/vectoratlas.mapping.csv"
     extract_mode: "single"
@@ -49,6 +36,7 @@ data_sources:
     matching: "mappings/gbif_occurrence.mapping.csv"
     extract_mode: "single"
 
+  # ---- IR Mapper ------------------------------------------------------------
   irmapper_ir_1:
     source_name: "IRMapper 1: WHO susceptibility, complex/subgroup"
     type: "file"
@@ -161,22 +149,16 @@ data_sources:
     matching: "mappings/irmapper_8.mapping.csv"
     extract_mode: "single"
 
+  # ---- Climate ---------------------------------------------------------------
   climate_timeseries:
-    source_name: "ERA5-Land Climate"
+    source_name: "ERA5-Land Climate (folder)"
     type: "folder"
     extension: "nc"
     path: "/home/void/Documents/research/phd/data/vbd-cdm/ERA5-Land/CaseStudy"
     matching: "mappings/era5_climate.mapping.csv"
     extract_mode: "timeseries"
 
-  climate_timeseries_2015_2017:
-    source_name: "ERA5-Land Climate"
-    type: "file"
-    extension: "nc"
-    path: "/home/void/Documents/research/phd/data/vbd-cdm/ERA5-Land/CaseStudy/climate_t2m_tp_2015_2017.nc"
-    matching: "mappings/era5_climate.mapping.csv"
-    extract_mode: "timeseries"
-
+  # ---- MAP rasters -----------------------------------------------------------
   map_pf_incidence_count_ken:
     source_name: "MAP Pf Incidence Count (Kenya)"
     type: "folder"

@@ -134,8 +134,27 @@ class MappingTransformer:
 
             self.mapping["required"] = self.mapping["required"].map(_as_bool)
 
+
     def _validate_mapping(self) -> None:
-        """Validate the mapping table for whichever input shape produced it."""
+        """Validate the mapping table for whichever input shape produced it.
+
+        A row needs a value source, and there are five kinds:
+
+        1. ``source_column`` — a cell from the source frame;
+        2. ``static_value`` — a literal for every row;
+        3. ``default_value`` — what ``_apply_default_transform`` writes when the
+           source column is absent or null;
+        4. a transform that builds its value from ``transform_params["columns"]``:
+           ``concat``, ``coalesce``, ``format_date``, ``derive_category``, and
+           ``map`` with a ``ref`` (``_build_lookup_value`` reads those columns
+           from the row context);
+        5. ``resolve``, whose value is the cell the resolver is asked about.
+
+        Anything else writes a literal NULL for every record, which is the defect
+        this check exists to catch. ``default_value`` is deliberately included:
+        a column with a fixed fallback and no source column is a legitimate
+        constant (GBIF's ``admin_level: occurrence``), not an empty mapping.
+        """
         required_cols = {
             "source_column", "target_table", "target_column", "transform", "required",
         }
@@ -161,23 +180,48 @@ class MappingTransformer:
                         f"({', '.join(sorted(known))})"
                     )
 
-        context_transforms = {"format_date", "coalesce", "concat", "derive_category"}
+        params_sourced = {"concat", "coalesce", "format_date", "derive_category"}
+
         for index, row in self.mapping.iterrows():
-            source_column = row.get("source_column")
-            static_value = row.get("static_value")
             transform = str(row.get("transform") or "none").strip().lower()
-            if (
-                pd.isna(source_column)
-                and pd.isna(static_value)
-                and transform not in context_transforms
-            ):
-                raise ValueError(
-                    f"mapping row {index} writes "
-                    f"{row.get('target_table')}.{row.get('target_column')} but "
-                    f"names no source_column, no static_value, and uses "
-                    f"transform {transform!r}, which does not read one. That "
-                    f"row would write NULL for every record."
-                )
+
+            def _present(column: str) -> bool:
+                value = row.get(column)
+                return not (value is None or (isinstance(value, float) and pd.isna(value)))
+
+            if _present("source_column") or _present("static_value") or _present("default_value"):
+                continue
+            if transform in params_sourced or transform == "resolve":
+                continue
+
+            if transform == "map":
+                raw_params = row.get("transform_params")
+                parsed: dict = {}
+                if _present("transform_params") and str(raw_params).strip():
+                    try:
+                        candidate = json.loads(str(raw_params))
+                        parsed = candidate if isinstance(candidate, dict) else {}
+                    except (TypeError, ValueError):
+                        parsed = {}
+                if parsed.get("columns"):
+                    continue
+                if parsed.get("ref") and not parsed.get("columns"):
+                    logger.warning(
+                        "mapping row %d writes %s.%s with a `map` ref but no "
+                        "`columns`, so there is no value to look up; the row will "
+                        "write NULL. Add `columns`, or a `source_column`.",
+                        index, row.get("target_table"), row.get("target_column"),
+                    )
+                    continue
+
+            raise ValueError(
+                f"mapping row {index} writes "
+                f"{row.get('target_table')}.{row.get('target_column')} but names no "
+                f"`source_column`, no `static_value`, no `default_value`, and uses "
+                f"transform {transform!r}, which reads no column. That row would "
+                f"write NULL for every record."
+            )
+
 
     def _group_by_target_table(self) -> None:
         """Group mapping rows by target table name."""

@@ -1,14 +1,24 @@
 # R/db_queries.R
 #
 # All SQL lives here. Each function returns a tibble. Nothing in this file
-# knows about analysis; it is purely a data-access layer.
+# knows about analysis.
 #
-# Every query that accepts `location_ids` builds its location filter via
-# .loc_clause(). That helper returns an empty SQL fragment (and no bind
-# parameters) only when the ID vector is NULL or empty. It imposes no
-# upper bound on the number of IDs: the full set is passed as a single
-# JSON parameter and expanded server-side by the database's JSON array
-# function (json_each on SQLite, jsonb_array_elements_text on PostgreSQL).
+# Location filters are built by .loc_clause(), which passes the ID vector as
+# one JSON parameter expanded server-side (json_each on SQLite,
+# jsonb_array_elements_text on PostgreSQL). No upper bound on ID count.
+#
+# Administrative units and grid cells are resolved separately:
+#
+#   resolve_location_ids()       -> administrative rows only
+#   resolve_grid_location_ids()  -> grid cells only
+#
+# A grid cell is a raster pixel with a name of "<lon>/<lat>" and no boundary
+# code, so it can never be matched by a name filter. Its parent_location_id is
+# assigned once, during Python consolidation
+# (DataConsolidator._assign_grid_parents), and the study area is then whichever
+# cells descend from the administrative units the config names. This file does
+# not compute proximity: if a cell has no parent it is unreachable, and that is
+# reported rather than worked around.
 
 # ---------------------------------------------------------------------------
 # Location resolution
@@ -16,277 +26,172 @@
 
 #' Resolve administrative location IDs from country and location-name filters.
 #'
-#' Grid cells (admin_level = 'grid') are excluded. The Python consolidation
-#' step labels every environment pixel "<region> (Climate Grid)", so a
-#' substring filter like "Siaya" matches both the admin row and hundreds of
-#' pixel rows. Grid cells carry climate data only — no vector observation,
-#' case, or resistance test ever points at one. Passing grid IDs to a fact
-#' query silently fans out the filter and empties the result.
+#' Grid cells are excluded: a substring filter like "Siaya" would otherwise
+#' match hundreds of environment pixels, and no vector, case or resistance row
+#' ever points at one.
 #'
-#' When `descendants = TRUE` (the default), each name-matched location is
-#' expanded to include every descendant in the parent chain. So
-#' `locations = ["Siaya"]` returns the Siaya admin1 county, its admin2
-#' sub-counties (Alego Usonga, Bondo, Gem, ...), and their admin3 wards —
-#' everything a fact query would need to see study-area rows regardless of
-#' the level the ETL filed them at.
+#' With `descendants = TRUE` (default) each matched location is expanded to its
+#' full subtree, so `locations = ["Siaya"]` returns the county, its sub-counties
+#' and their wards. The walk uses UNION, so a cyclic parent chain cannot loop.
 #'
-#' The recursive expansion uses UNION rather than UNION ALL, so a
-#' self-referencing or cyclic parent chain cannot cause an infinite loop.
-#' The same admin_filter is applied to both the roots and the descendants,
-#' which keeps grid cells out of administrative queries and vice versa.
-#'
-#' @param countries   Character vector of ISO alpha-2 country codes, or NULL.
-#' @param locations   Character vector of location names (matched exactly or
-#'                    as substrings), or NULL.
-#' @param db_path     Optional SQLite database path.
+#' @param countries   ISO alpha-2 codes, or NULL.
+#' @param locations   Location names, matched exactly or as substrings, or NULL.
+#' @param db_path     Optional SQLite path.
 #' @param db_url      Optional full connection URL.
-#' @param descendants When TRUE, expand matched locations to include their
-#'                    full subtree. Default TRUE — the pipeline almost
-#'                    always wants "everything inside the study area".
-#' @return Tibble with `location_id`, `name`, `country_code`, `admin_level`.
+#' @param descendants Expand matched locations to their subtree. Default TRUE.
+#' @return Tibble with location_id, name, country_code, admin_level.
 #' @export
 resolve_location_ids <- function(countries = NULL, locations = NULL,
                                  db_path = NULL, db_url = NULL,
                                  descendants = TRUE) {
-  .resolve_locations(
+  countries <- normalize_all_list(countries)
+  if (!is.null(countries)) countries <- toupper(countries)
+  locations <- normalize_all_list(locations)
+  
+  base <- .loc_rows(
     countries    = countries,
     locations    = locations,
     db_path      = db_path,
     db_url       = db_url,
-    admin_filter = "COALESCE(admin_level, '') <> 'grid'",
-    descendants  = descendants
+    admin_filter = "COALESCE(admin_level, '') <> 'grid'"
   )
+  
+  if (nrow(base) == 0) {
+    cli::cli_abort(c(
+      "No locations matched the configured filter.",
+      "i" = paste0("countries = ", .fmt_vals(countries)),
+      "i" = paste0("locations = ", .fmt_vals(locations)),
+      "i" = paste0(
+        "Check: SELECT name, admin_level, country_code FROM dim_location ",
+        "WHERE COALESCE(admin_level,'') <> 'grid' LIMIT 30;"
+      )
+    ))
+  }
+  
+  if (!descendants) {
+    .warn_many(base)
+    return(base[order(base$name), , drop = FALSE])
+  }
+  
+  out <- .expand_subtree(
+    seed         = base,
+    db_path      = db_path,
+    db_url       = db_url,
+    backend      = cdm_backend(db_path, db_url),
+    admin_filter = "COALESCE(l.admin_level, '') <> 'grid'"
+  )
+  
+  if (nrow(out) > 20) {
+    cli::cli_warn(c(
+      paste0("Location filter expanded to ", nrow(out), " rows in dim_location."),
+      "i" = paste0(nrow(base), " matched by name; ",
+                   nrow(out) - nrow(base), " added as descendants."),
+      "i" = "If this is unexpected, narrow `locations` or `countries` in config.yml."
+    ))
+  }
+  out
 }
 
-#' Resolve grid-cell location IDs.
+#' Resolve grid-cell location IDs for the environment query.
 #'
-#' A companion to `resolve_location_ids()` for the environment query.
-#' Returns only rows with `admin_level = 'grid'`.
+#' Walks `parent_location_id` downward from the study's administrative units and
+#' keeps the rows with `admin_level = 'grid'`. Nothing else: a grid cell's parent
+#' is assigned once during Python consolidation, and a cell that has none cannot
+#' belong to a study area by any definition this side is entitled to invent.
 #'
-#' Grid cells are leaves — they have no descendants. The `descendants`
-#' argument is present for symmetry but is a no-op in practice.
-#'
-#' @inheritParams resolve_location_ids
-#' @export
-#' Resolve grid-cell location IDs inside the study area.
-#'
-#' Grid cells are named `<lon>/<lat>`, so a country-and-name filter cannot
-#' match them directly. This function finds the administrative units whose
-#' name matches, expands the parent chain downward, and returns the grid
-#' cells that fall under them.
-#'
-#' If `locations` is NULL, every grid cell in the country is returned,
-#' which is what the environment query wants when the study area is the
-#' whole country.
+#' Fails with a diagnosis rather than an empty tibble, because the three causes
+#' of zero rows need three different fixes.
 #'
 #' @inheritParams resolve_location_ids
+#' @return Tibble with location_id, name, country_code, admin_level.
 #' @export
 resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
                                       db_path = NULL, db_url = NULL) {
   countries <- normalize_all_list(countries)
   if (!is.null(countries)) countries <- toupper(countries)
   locations <- normalize_all_list(locations)
+  backend   <- cdm_backend(db_path, db_url)
   
-  # No name filter: return every grid cell in the country.
-  if (is.null(locations)) {
-    return(.resolve_locations(
-      countries    = countries,
-      locations    = NULL,
-      db_path      = db_path,
-      db_url       = db_url,
-      admin_filter = "admin_level = 'grid'",
-      descendants  = FALSE
-    ))
-  }
-  
-  backend <- cdm_backend(db_path, db_url)
-  
-  # ---- Root selection: admin units matching the name filter. ----
-  where  <- c("COALESCE(admin_level, '') <> 'grid'")
-  params <- list()
-  
-  if (length(countries) > 0) {
-    ph <- .placeholders(length(countries))
-    where <- c(where, glue::glue("country_code IN ({ph})"))
-    params <- c(params, as.list(countries))
-  }
-  
-  loc_parts <- character()
-  for (loc in locations) {
-    loc_parts <- c(loc_parts, "(name = ? OR name LIKE ?)")
-    params <- c(params, list(loc, paste0("%", loc, "%")))
-  }
-  where <- c(where, paste0("(", paste(loc_parts, collapse = " OR "), ")"))
-  
-  root_sql <- paste0(
-    "SELECT location_id FROM dim_location WHERE ",
-    paste(where, collapse = " AND ")
+  roots <- .loc_rows(
+    countries    = countries,
+    locations    = locations,
+    db_path      = db_path,
+    db_url       = db_url,
+    admin_filter = "COALESCE(admin_level, '') <> 'grid'"
   )
-  roots <- cdm_query(root_sql, params, db_path = db_path, db_url = db_url)
   
   if (nrow(roots) == 0) {
     cli::cli_abort(c(
       "No administrative locations matched the configured filter.",
-      "i" = "countries = {.val {countries}}",
-      "i" = "locations = {.val {locations}}",
-      "i" = "Check `SELECT name, admin_level FROM dim_location " %+%
-        "WHERE admin_level <> 'grid';`"
+      "i" = paste0("countries = ", .fmt_vals(countries)),
+      "i" = paste0("locations = ", .fmt_vals(locations)),
+      "i" = paste0(
+        "Check: SELECT name, admin_level, country_code FROM dim_location ",
+        "WHERE COALESCE(admin_level,'') <> 'grid' LIMIT 30;"
+      )
     ))
   }
   
-  json_expand <- switch(
-    backend,
-    sqlite     = "SELECT value      FROM json_each(?)",
-    postgresql = "SELECT value::int FROM jsonb_array_elements_text(?::jsonb)",
-    stop("Unsupported backend: ", backend)
+  admin <- .expand_subtree(
+    seed         = roots,
+    db_path      = db_path,
+    db_url       = db_url,
+    backend      = backend,
+    admin_filter = "COALESCE(l.admin_level, '') <> 'grid'"
   )
   
-  ids  <- roots$location_id
-  json <- jsonlite::toJSON(as.integer(ids), auto_unbox = FALSE)
+  grid <- .grid_descendants(as.integer(admin$location_id), db_path, db_url, backend)
   
-  # ---- Descendant expansion, filtered to grid cells. ----
-  # UNION (not UNION ALL) makes the walk safe against any cycle in the
-  # parent chain. The outer WHERE restricts the result to grid cells
-  # only; intermediate admin levels are traversed but not returned.
-  grid_sql <- glue::glue("
-    WITH RECURSIVE subtree(location_id) AS (
-        SELECT location_id FROM dim_location
-        WHERE location_id IN ({json_expand})
-        UNION
-        SELECT l.location_id
-        FROM dim_location l
-        JOIN subtree s ON l.parent_location_id = s.location_id
+  if (nrow(grid) > 0) {
+    cli::cli_inform(c(
+      "v" = paste0("Grid cells under the study area: ", nrow(grid), " cell(s), ",
+                   "reached through parent_location_id."),
+      "i" = paste0(nrow(admin), " administrative unit(s) in scope.")
+    ))
+    return(grid)
+  }
+  
+  n_grid <- cdm_query(
+    "SELECT COUNT(*) AS n FROM dim_location
+      WHERE COALESCE(admin_level, '') = 'grid'",
+    db_path = db_path, db_url = db_url)$n[[1]]
+  
+  n_orphan <- cdm_query(
+    "SELECT COUNT(*) AS n FROM dim_location
+      WHERE COALESCE(admin_level, '') = 'grid' AND parent_location_id IS NULL",
+    db_path = db_path, db_url = db_url)$n[[1]]
+  
+  cause <- if (n_grid == 0) {
+    paste0(
+      "dim_location holds no admin_level = 'grid' rows. The MAP and ERA5 ",
+      "sources have not been ingested, so there is no environment grid to read."
     )
-    SELECT DISTINCT
-           l.location_id, l.name, l.country_code, l.admin_level
-    FROM dim_location l
-    JOIN subtree s ON l.location_id = s.location_id
-    WHERE l.admin_level = 'grid'
-    ORDER BY l.name
-  ")
-  
-  df <- cdm_query(grid_sql, list(json), db_path = db_path, db_url = db_url)
-  
-  if (nrow(df) == 0) {
-    cli::cli_abort(c(
-      "No grid cells found under the study area.",
-      "i" = "countries = {.val {countries}}",
-      "i" = "locations = {.val {locations}}",
-      "i" = "{nrow(roots)} admin units matched by name; " %+%
-        "none of their descendants is a grid cell.",
-      "i" = "Check whether `parent_location_id` is populated on the " %+%
-        "grid cells under those admin units."
-    ))
-  }
-  
-  df
-}
-
-#' @noRd
-.resolve_locations <- function(countries, locations, db_path, db_url,
-                               admin_filter, descendants = FALSE) {
-  countries <- normalize_all_list(countries)
-  if (!is.null(countries)) countries <- toupper(countries)
-  locations <- normalize_all_list(locations)
-  
-  # -------------------------------------------------------------------
-  # Base selection: rows that directly match the filters.
-  # -------------------------------------------------------------------
-  where  <- c(admin_filter)
-  params <- list()
-  
-  if (length(countries) > 0) {
-    ph <- .placeholders(length(countries))
-    where  <- c(where, glue::glue("country_code IN ({ph})"))
-    params <- c(params, as.list(countries))
-  }
-  
-  if (length(locations) > 0) {
-    loc_parts <- character()
-    for (loc in locations) {
-      loc_parts <- c(loc_parts, "(name = ? OR name LIKE ?)")
-      params <- c(params, list(loc, paste0("%", loc, "%")))
-    }
-    where <- c(where, paste0("(", paste(loc_parts, collapse = " OR "), ")"))
-  }
-  
-  base_sql <- paste0(
-    "SELECT location_id, name, country_code, admin_level FROM dim_location",
-    " WHERE ", paste(where, collapse = " AND ")
-  )
-  base <- cdm_query(base_sql, params, db_path = db_path, db_url = db_url)
-  
-  if (nrow(base) == 0) {
-    cli::cli_abort(c(
-      "No locations matched the configured filter.",
-      "i" = "countries = {.val {countries}}",
-      "i" = "locations = {.val {locations}}",
-      "i" = "admin_filter = {admin_filter}",
-      "i" = "Check `SELECT DISTINCT country_code FROM dim_location;`, " %+%
-        "`SELECT name, admin_level FROM dim_location LIMIT 30;`"
-    ))
-  }
-  
-  if (!descendants) {
-    if (nrow(base) > 20) {
-      cli::cli_warn(c(
-        "Location filter matched {nrow(base)} rows in dim_location.",
-        "i" = "If this is unexpected, narrow `locations` or `countries` " %+%
-          "in config.yml."
-      ))
-    }
-    return(base[order(base$name), , drop = FALSE])
-  }
-  
-  # -------------------------------------------------------------------
-  # Descendant expansion: walk the parent_location_id chain downward
-  # from each matched root, and return everything reachable.
-  # -------------------------------------------------------------------
-  backend <- cdm_backend(db_path, db_url)
-  json_expand <- switch(
-    backend,
-    sqlite     = "SELECT value      FROM json_each(?)",
-    postgresql = "SELECT value::int FROM jsonb_array_elements_text(?::jsonb)",
-    stop("Unsupported backend: ", backend)
-  )
-  
-  ids  <- base$location_id
-  json <- jsonlite::toJSON(as.integer(ids), auto_unbox = FALSE)
-  
-  # The recursive term re-applies `admin_filter` so descendants respect
-  # the same level restriction as the roots. For an admin query this
-  # excludes grid cells; for a grid query it excludes admin units.
-  subtree_sql <- glue::glue("
-    WITH RECURSIVE subtree(location_id) AS (
-        SELECT location_id FROM dim_location
-        WHERE location_id IN ({json_expand})
-        UNION
-        SELECT l.location_id
-        FROM dim_location l
-        JOIN subtree s ON l.parent_location_id = s.location_id
-        WHERE {admin_filter}
+  } else if (n_orphan > 0) {
+    paste0(
+      n_orphan, " of ", n_grid, " grid cell(s) have parent_location_id = NULL. ",
+      "A grid cell is placed by the Python consolidation step ",
+      "(DataConsolidator._assign_grid_parents), which assigns each cell to its ",
+      "administrative unit. Re-run consolidation with the ingest skipped: ",
+      "`python main.py --skip-ingest`."
     )
-    SELECT DISTINCT
-           l.location_id, l.name, l.country_code, l.admin_level
-    FROM dim_location l
-    JOIN subtree s ON l.location_id = s.location_id
-    ORDER BY l.admin_level, l.name
-  ")
-  
-  df <- cdm_query(subtree_sql, list(json),
-                  db_path = db_path, db_url = db_url)
-  
-  if (nrow(df) > 20) {
-    cli::cli_warn(c(
-      "Location filter expanded to {nrow(df)} rows in dim_location.",
-      "i" = "{nrow(base)} matched by name; " %+%
-        "{nrow(df) - nrow(base)} added as descendants.",
-      "i" = "If this is unexpected, narrow `locations` or `countries` " %+%
-        "in config.yml."
-    ))
+  } else {
+    paste0(
+      "All ", n_grid, " grid cell(s) are parented, but none of their ancestors ",
+      "is in the study area. Widen `locations` or `countries` in config.yml, or ",
+      "check that the cells fall under the named administrative units: ",
+      "SELECT p.name AS parent, COUNT(*) FROM dim_location g ",
+      "JOIN dim_location p ON g.parent_location_id = p.location_id ",
+      "WHERE g.admin_level = 'grid' GROUP BY p.name ORDER BY 2 DESC LIMIT 20;"
+    )
   }
   
-  df
+  cli::cli_abort(c(
+    "No grid cells found under the study area.",
+    "i" = paste0("countries = ", .fmt_vals(countries)),
+    "i" = paste0("locations = ", .fmt_vals(locations)),
+    "i" = paste0(nrow(admin), " administrative unit(s) in scope."),
+    "x" = cause
+  ))
 }
 
 # ---------------------------------------------------------------------------
@@ -295,13 +200,119 @@ resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
 
 .placeholders <- function(n) paste(rep("?", n), collapse = ",")
 
+#' Render a filter value for a cli message. Never returns NULL.
+#' @noRd
+.fmt_vals <- function(x) {
+  if (is.null(x) || length(x) == 0) return("(all)")
+  paste0("(", paste(sprintf('"%s"', x), collapse = ", "), ")")
+}
+
+#' Warn when a filter matched more rows than a name filter should.
+#' @noRd
+.warn_many <- function(df, limit = 20L) {
+  if (nrow(df) > limit) {
+    cli::cli_warn(c(
+      paste0("Location filter matched ", nrow(df), " rows in dim_location."),
+      "i" = "If this is unexpected, narrow `locations` or `countries` in config.yml."
+    ))
+  }
+  invisible(df)
+}
+
+#' The JSON-array expansion expression for a backend.
+#' @noRd
+.json_expand_sql <- function(backend) {
+  switch(
+    backend,
+    sqlite     = "SELECT value      FROM json_each(?)",
+    postgresql = "SELECT value::int FROM jsonb_array_elements_text(?::jsonb)",
+    stop("Unsupported backend: ", backend)
+  )
+}
+
+#' Base selection of dim_location rows matching the filters.
+#' @noRd
+.loc_rows <- function(countries, locations, db_path, db_url, admin_filter) {
+  where  <- c(admin_filter)
+  params <- list()
+  
+  if (length(countries) > 0) {
+    where  <- c(where, glue::glue("country_code IN ({.placeholders(length(countries))})"))
+    params <- c(params, as.list(countries))
+  }
+  
+  if (length(locations) > 0) {
+    parts <- character()
+    for (loc in locations) {
+      parts  <- c(parts, "(name = ? OR name LIKE ?)")
+      params <- c(params, list(loc, paste0("%", loc, "%")))
+    }
+    where <- c(where, paste0("(", paste(parts, collapse = " OR "), ")"))
+  }
+  
+  sql <- paste0(
+    "SELECT location_id, name, country_code, admin_level FROM dim_location WHERE ",
+    paste(where, collapse = " AND ")
+  )
+  cdm_query(sql, params, db_path = db_path, db_url = db_url)
+}
+
+#' Expand a set of locations to everything reachable down the parent chain.
+#' @noRd
+.expand_subtree <- function(seed, db_path, db_url, backend, admin_filter) {
+  if (nrow(seed) == 0) return(seed)
+  
+  json <- jsonlite::toJSON(as.integer(seed$location_id), auto_unbox = FALSE)
+  sql  <- glue::glue("
+    WITH RECURSIVE subtree(location_id) AS (
+        SELECT location_id FROM dim_location
+        WHERE location_id IN ({.json_expand_sql(backend)})
+        UNION
+        SELECT l.location_id
+        FROM dim_location l
+        JOIN subtree s ON l.parent_location_id = s.location_id
+        WHERE {admin_filter}
+    )
+    SELECT DISTINCT l.location_id, l.name, l.country_code, l.admin_level
+    FROM dim_location l
+    JOIN subtree s ON l.location_id = s.location_id
+    ORDER BY l.admin_level, l.name
+  ")
+  cdm_query(sql, list(json), db_path = db_path, db_url = db_url)
+}
+
+#' Grid cells reachable down the parent chain from the given roots.
+#' @noRd
+.grid_descendants <- function(study_ids, db_path, db_url, backend) {
+  empty <- tibble::tibble(
+    location_id = integer(), name = character(),
+    country_code = character(), admin_level = character()
+  )
+  if (length(study_ids) == 0) return(empty)
+  
+  json <- jsonlite::toJSON(as.integer(study_ids), auto_unbox = FALSE)
+  sql  <- glue::glue("
+    WITH RECURSIVE subtree(location_id) AS (
+        SELECT location_id FROM dim_location
+        WHERE location_id IN ({.json_expand_sql(backend)})
+        UNION
+        SELECT l.location_id
+        FROM dim_location l
+        JOIN subtree s ON l.parent_location_id = s.location_id
+    )
+    SELECT DISTINCT l.location_id, l.name, l.country_code, l.admin_level
+    FROM dim_location l
+    JOIN subtree s ON l.location_id = s.location_id
+    WHERE l.admin_level = 'grid'
+    ORDER BY l.name
+  ")
+  cdm_query(sql, list(json), db_path = db_path, db_url = db_url)
+}
+
 #' Build a location-filter SQL fragment.
 #'
-#' Returns list(sql = , params = ). When `location_ids` is NULL or empty,
-#' returns an empty fragment. There is no upper bound on the number of IDs:
-#' they are passed as a single JSON-encoded parameter and expanded
-#' server-side by the database's JSON array function.
-#'
+#' Returns list(sql, params). Empty fragment when `location_ids` is NULL or
+#' empty. IDs travel as one JSON parameter and are expanded server-side.
 #' @noRd
 .loc_clause <- function(location_ids, alias = NULL, column = "location_id",
                         backend = "sqlite") {
@@ -317,14 +328,8 @@ resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
   prefix <- if (is.null(alias)) column else paste0(alias, ".", column)
   json   <- jsonlite::toJSON(as.integer(location_ids), auto_unbox = FALSE)
   
-  inner <- switch(backend,
-                  sqlite     = "SELECT value      FROM json_each(?)",
-                  postgresql = "SELECT value::int FROM jsonb_array_elements_text(?::jsonb)",
-                  stop("Unsupported backend: ", backend)
-  )
-  
   list(
-    sql    = glue::glue("AND {prefix} IN ({inner})"),
+    sql    = glue::glue("AND {prefix} IN ({.json_expand_sql(backend)})"),
     params = list(json)
   )
 }
@@ -339,8 +344,6 @@ resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
   )
 }
 
-#' Build a disease-code filter SQL fragment.
-#' @noRd
 .disease_filter <- function(cfg, alias = "c", column = "disease_code") {
   if (length(cfg$diseases) == 0) {
     return(list(sql = "", params = list()))
@@ -356,12 +359,12 @@ resolve_grid_location_ids <- function(countries = NULL, locations = NULL,
 # Cases
 # ---------------------------------------------------------------------------
 
-#' Aggregate daily case counts from fact_disease_case
+#' Daily case counts from fact_disease_case, per location.
 #'
-#' Excludes synthetic burden-expansion rows (identification_method_code =
-#' 'ESTIMATE') unless `cfg$include_estimated_cases` is TRUE.
+#' Excludes synthetic rows (identification_method_code = 'ESTIMATE') unless
+#' cfg$include_estimated_cases is TRUE. location_id is preserved so per-site
+#' analyses can use it; pooled consumers re-aggregate.
 #'
-#' @export
 #' @export
 query_cases <- function(cfg, location_ids = NULL) {
   backend <- cdm_backend(cfg$db_path, cfg$db_url)
@@ -376,10 +379,6 @@ query_cases <- function(cfg, location_ids = NULL) {
     method_filter <- "AND c.identification_method_code <> 'ESTIMATE'"
   }
   
-  # location_id is preserved so that per-site analyses (intervention
-  # pre/post, spatial comparisons) can filter to the study unit rather
-  # than a pooled continental average. Pooled consumers (case seasonality,
-  # QA summary) re-aggregate across location before use.
   sql <- glue::glue("
     SELECT t.date          AS date,
            t.year          AS year,
@@ -402,15 +401,15 @@ query_cases <- function(cfg, location_ids = NULL) {
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
+
 # ---------------------------------------------------------------------------
 # Vectors
 # ---------------------------------------------------------------------------
 
-#' Vector observations aggregated by date and species
+#' Vector observations aggregated by date, location and species.
 #'
 #' The species filter matches exactly (case-insensitive) against
-#' dim_vector.species_name. Unknown names abort with a list of what's
-#' actually available.
+#' dim_vector.species_name. Unknown names abort with what is available.
 #'
 #' @export
 query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
@@ -435,8 +434,8 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
     if (length(unknown) > 0) {
       cli::cli_abort(c(
         "species_filter contains names not present in dim_vector.species_name.",
-        "!" = "Unknown: {.val {unknown}}",
-        "i" = "Available: {.val {sort(catalogue)}}",
+        "!" = paste0("Unknown: ", .fmt_vals(unknown)),
+        "i" = paste0("Available: ", .fmt_vals(sort(catalogue))),
         "i" = "Use `species_filter: [All]` to include every species."
       ))
     }
@@ -450,18 +449,14 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
   yf     <- .year_filter(cfg, list(), alias = "t")
   params <- c(loc$params, species_params, yf$params)
   
-  # location_id is preserved for the same reason as in query_cases():
-  # per-site intervention analysis needs it. Pooled consumers
-  # (vector seasonality, vector-climate) re-aggregate across location
-  # before use.
   sql <- glue::glue("
     SELECT t.date, t.year, t.month,
            o.location_id,
            COALESCE(v.species_name, o.vector_code) AS species_name,
            o.vector_code,
-           SUM(o.count)             AS count,
-           AVG(o.density_per_trap)  AS density_per_trap,
-           AVG(o.infection_rate)    AS infection_rate
+           SUM(o.count)            AS count,
+           AVG(o.density_per_trap) AS density_per_trap,
+           AVG(o.infection_rate)   AS infection_rate
     FROM fact_vector_observation o
     JOIN dim_time t ON o.date_id = t.date_id
     LEFT JOIN dim_vector v ON o.vector_code = v.vector_code
@@ -477,57 +472,73 @@ query_vectors <- function(cfg, location_ids = NULL, species_filter = NULL) {
   if (nrow(df)) df$date <- as.Date(df$date)
   df
 }
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
 
-#' Environment: long format -> wide
+#' Environment in wide format: one row per date, one column per variable.
 #'
-#' The pivot collapses across whatever location_ids were matched. When
-#' location_ids is NULL, this is a mean over every environment row in the
-#' year window — a placeholder, not a per-site series.
+#' Aggregated **in SQL** to the spatial mean per (date, variable). The previous
+#' version selected every grid-cell row and pivoted in R — 2338 cells x ~4000
+#' days x 2 variables is ~19M rows and several GB, for 8036 distinct values.
+#' The mean is identical either way.
 #'
-#' Aborts if any requested variable is entirely absent from the result.
-#' A partial miss (some variables present, some not) otherwise surfaces
-#' as a downstream `all_of()` error in `analyze_vector_climate()`, which
-#' is much harder to read.
+#' This is a mean over the grid cells in scope. Pass one cell to `location_ids`
+#' for a per-site series, or use `query_environment_cells()`.
+#'
+#' Aborts if any requested variable is entirely absent, so a partial miss
+#' surfaces here rather than as an opaque `all_of()` error downstream.
 #'
 #' @export
 query_environment <- function(cfg, location_ids = NULL) {
   backend <- cdm_backend(cfg$db_path, cfg$db_url)
-  loc    <- .loc_clause(location_ids, alias = "e", backend = backend)
-  var_ph <- .placeholders(length(cfg$env_variables))
-  yf     <- .year_filter(cfg, list(), alias = "t")
+  loc     <- .loc_clause(location_ids, alias = "e", backend = backend)
+  yf      <- .year_filter(cfg, list(), alias = "t")
   
   params <- c(loc$params, as.list(cfg$env_variables), yf$params)
   
   sql <- glue::glue("
-    SELECT t.date, t.year, t.month, e.variable, e.value
+    SELECT t.date       AS date,
+           t.year       AS year,
+           t.month      AS month,
+           e.variable   AS variable,
+           AVG(e.value) AS value
     FROM fact_environment e
     JOIN dim_time t ON e.date_id = t.date_id
     WHERE 1=1
       {loc$sql}
-      AND e.variable IN ({var_ph})
+      AND e.variable IN ({.placeholders(length(cfg$env_variables))})
       {yf$sql}
+    GROUP BY t.date, t.year, t.month, e.variable
+    ORDER BY t.date, e.variable
   ")
   df <- cdm_query_cfg(cfg, sql, params)
+  
+  if (nrow(df) == 0) {
+    cli::cli_abort(c(
+      "query_environment() returned no rows.",
+      "i" = paste0("env_variables = ", .fmt_vals(cfg$env_variables)),
+      "i" = paste0(length(location_ids), " grid location(s) in scope."),
+      "i" = paste0(
+        "Check: SELECT variable, COUNT(*) FROM fact_environment GROUP BY variable;"
+      )
+    ))
+  }
   df$date <- as.Date(df$date)
   
-  # --- Partial-miss guard ---------------------------------------------------
-  # Whatever of cfg$env_variables exist in fact_environment for the matched
-  # locations and years comes back; the rest is silently absent. Report the
-  # gap here rather than letting `dplyr::across(all_of(...))` trip on it
-  # inside analyze_vector_climate().
   present_vars <- unique(df$variable)
   missing_vars <- setdiff(cfg$env_variables, present_vars)
   if (length(missing_vars) > 0) {
     cli::cli_abort(c(
       "query_environment() returned no rows for some requested variables.",
-      "!" = "Missing: {.val {missing_vars}}",
-      "i" = "Requested: {.val {cfg$env_variables}}",
-      "i" = "Present:   {.val {sort(present_vars)}}",
-      "i" = "Run `SELECT DISTINCT variable FROM fact_environment;` and " %+%
-        "adjust `env_variables` in config.yml."
+      "!" = paste0("Missing:  ", .fmt_vals(missing_vars)),
+      "i" = paste0("Requested: ", .fmt_vals(cfg$env_variables)),
+      "i" = paste0("Present:   ", .fmt_vals(sort(present_vars))),
+      "i" = paste0(
+        "Run `SELECT DISTINCT variable FROM fact_environment;` and adjust ",
+        "`env_variables` in config.yml."
+      )
     ))
   }
   
@@ -540,11 +551,46 @@ query_environment <- function(cfg, location_ids = NULL) {
   )
 }
 
+#' Environment per grid cell, in long format.
+#'
+#' The per-site counterpart to `query_environment()`: keeps `location_id` so a
+#' vector site can be paired with its own climate trace via
+#' `attach_grid_cells()`. Not wired into the pipeline — it exists so the
+#' per-site join has a query to draw on.
+#'
+#' @export
+query_environment_cells <- function(cfg, location_ids = NULL) {
+  backend <- cdm_backend(cfg$db_path, cfg$db_url)
+  loc     <- .loc_clause(location_ids, alias = "e", backend = backend)
+  yf      <- .year_filter(cfg, list(), alias = "t")
+  
+  params <- c(loc$params, as.list(cfg$env_variables), yf$params)
+  
+  sql <- glue::glue("
+    SELECT e.location_id AS location_id,
+           t.date        AS date,
+           t.year        AS year,
+           t.month       AS month,
+           e.variable    AS variable,
+           AVG(e.value)  AS value
+    FROM fact_environment e
+    JOIN dim_time t ON e.date_id = t.date_id
+    WHERE 1=1
+      {loc$sql}
+      AND e.variable IN ({.placeholders(length(cfg$env_variables))})
+      {yf$sql}
+    GROUP BY e.location_id, t.date, t.year, t.month, e.variable
+    ORDER BY e.location_id, t.date
+  ")
+  df <- cdm_query_cfg(cfg, sql, params)
+  if (nrow(df)) df$date <- as.Date(df$date)
+  df
+}
+
 # ---------------------------------------------------------------------------
 # Interventions
 # ---------------------------------------------------------------------------
 
-#' @export
 #' @export
 query_interventions <- function(cfg, location_ids = NULL) {
   backend <- cdm_backend(cfg$db_path, cfg$db_url)
@@ -565,10 +611,10 @@ query_interventions <- function(cfg, location_ids = NULL) {
            d.disease_name,
            d.disease_code
     FROM fact_intervention i
-    JOIN dim_time  t  ON i.date_start          = t.date_id
-    LEFT JOIN dim_time te ON i.date_end        = te.date_id
+    JOIN dim_time t ON i.date_start = t.date_id
+    LEFT JOIN dim_time te ON i.date_end = te.date_id
     LEFT JOIN dim_disease  d ON i.target_disease_code = d.disease_code
-    LEFT JOIN dim_location l ON i.location_id  = l.location_id
+    LEFT JOIN dim_location l ON i.location_id = l.location_id
     WHERE 1=1
       {loc$sql}
       {yf$sql}
@@ -581,6 +627,7 @@ query_interventions <- function(cfg, location_ids = NULL) {
   }
   df
 }
+
 # ---------------------------------------------------------------------------
 # Resistance
 # ---------------------------------------------------------------------------
@@ -725,8 +772,7 @@ query_socioeconomic <- function(cfg, location_ids = NULL) {
            i.unit,
            l.name AS location_name
     FROM fact_socioeconomic_condition s
-    JOIN dim_socioeconomic_indicator i
-         ON s.indicator_code = i.indicator_code
+    JOIN dim_socioeconomic_indicator i ON s.indicator_code = i.indicator_code
     LEFT JOIN dim_location l ON s.location_id = l.location_id
     WHERE 1=1
       {loc$sql}
