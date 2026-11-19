@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional, Sequence
 
 import pandas as pd
 from sqlalchemy import inspect, text
+from typing import Any, Dict, List, Optional
 
 from utilities.vocabulary import normalizers
 

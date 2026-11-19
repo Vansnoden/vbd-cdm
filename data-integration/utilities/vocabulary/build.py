@@ -13,6 +13,10 @@ from pathlib import Path
 from utilities.vocabulary.locations import build_location_vocabulary
 from utilities.vocabulary.diseases  import build_disease_vocabulary
 from utilities.vocabulary.species   import build_species_vocabulary
+from typing import Any, Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

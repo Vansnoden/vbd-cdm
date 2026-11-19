@@ -2,28 +2,30 @@
 """The CDM's resolution surface: which target fields a vocabulary may govern.
 
 ``FIELD_CATALOG`` maps a target field (``dim_vector.species_name``) to its
-domain, dimension table, dimension key and value type. It is derived from the
-schema, never from user configuration.
+domain, table, key and value type. It is derived from the schema, never from
+user configuration.
 
-A field belongs here when it is either
+A field belongs here when it is one of
 
 * a human-readable label column on a ``dim_*`` table that carries a
   ``concept_id`` **foreign key** — the column a resolved concept is stamped
   onto; or
-* a discriminating key column whose values are themselves vocabulary
-  (``dim_location.country_code`` is the only current example).
+* a free-text category column on a ``fact_*`` table. Those carry no
+  ``concept_id``, so a decision about one is recorded in ``fact_concept_map`` and
+  the value itself is rewritten to the canonical name. They are in the catalog so
+  a pack manifest may name them: ``ConceptPack.from_manifest`` rejects a
+  ``field_scope`` entry that is not here.
 
-The tables' own natural-code columns (``vector_code``, ``disease_code``, ...)
-are deliberately absent. Codes are *assigned* by ``DimensionKeyIndex`` and
-rewritten by ``_update_fact_references``; they are never resolved *to* a
-concept, and listing them would invite a mapper to try.
+Natural-code columns (``vector_code``, ``disease_code``, ...) are deliberately
+absent. Codes are *assigned* by ``DimensionKeyIndex`` and rewritten by
+``_update_fact_references``; they are never resolved *to* a concept, and listing
+them would invite a mapper to try.
 
-``_assert_concept_id_coverage()`` runs at import and refuses to load the module
-if a dimension that can be stamped has no binding. The test is "holds a foreign
-key to ``dim_concept.concept_id``", not "has a column called concept_id":
-``dim_concept`` itself has such a column and it is that table's primary key, so
-counting it demanded a catalog entry for the vocabulary table — which resolves
-nothing and is not a dimension.
+``_assert_concept_id_coverage()`` runs at import and refuses to load the module if
+a dimension that can be stamped has no binding. The test is "holds a foreign key
+to ``dim_concept.concept_id``", not "has a column called concept_id":
+``dim_concept`` itself has such a column and it is the primary key of the concept
+dictionary, so counting it demanded a catalog entry for the vocabulary table.
 """
 
 from __future__ import annotations
@@ -39,11 +41,14 @@ from database.session import Base
 _CONCEPT_TABLE = "dim_concept"
 _CONCEPT_COLUMN = "concept_id"
 
+#: Columns a dimension needs before a concept can be stamped onto it.
+_STAMP_COLUMNS = ("concept_id", "standard_code")
+
 
 class FieldNotInCatalog(KeyError):
     """Raised when a target field is not a resolvable CDM field.
 
-    Carries ``difflib`` candidates so the message can suggest what the caller
+    Carries ``difflib`` candidates so the message suggests what the caller
     probably meant instead of only saying no.
     """
 
@@ -80,78 +85,76 @@ class FieldBinding:
         }
 
 
+def _dim(target_field: str, domain: str, table: str, key: str,
+         value_type: str = "text") -> FieldBinding:
+    return FieldBinding(target_field=target_field, domain=domain,
+                        dimension_table=table, dimension_key=key,
+                        value_type=value_type)
+
+
+def _fact(table: str, column: str, domain: str, key: str) -> FieldBinding:
+    """A free-text fact column. Its key is the fact table's own primary key."""
+    return FieldBinding(target_field=f"{table}.{column}", domain=domain,
+                        dimension_table=table, dimension_key=key,
+                        value_type="text")
+
+
 _BINDINGS: tuple[FieldBinding, ...] = (
     # ---- location ----------------------------------------------------
-    FieldBinding(
-        target_field="dim_location.name",
-        domain="location",
-        dimension_table="dim_location",
-        dimension_key="location_id",
-        value_type="text",
-    ),
-    FieldBinding(
-        target_field="dim_location.country_code",
-        domain="location",
-        dimension_table="dim_location",
-        dimension_key="location_id",
-        value_type="iso3166_alpha2",
-    ),
+    _dim("dim_location.name", "location", "dim_location", "location_id"),
+    _dim("dim_location.country_code", "location", "dim_location", "location_id",
+         value_type="iso3166_alpha2"),
     # ---- vector ------------------------------------------------------
-    FieldBinding(
-        target_field="dim_vector.species_name",
-        domain="vector",
-        dimension_table="dim_vector",
-        dimension_key="vector_code",
-        value_type="text",
-    ),
+    _dim("dim_vector.species_name", "vector", "dim_vector", "vector_code"),
     # ---- disease -----------------------------------------------------
-    FieldBinding(
-        target_field="dim_disease.disease_name",
-        domain="disease",
-        dimension_table="dim_disease",
-        dimension_key="disease_code",
-        value_type="text",
-    ),
+    _dim("dim_disease.disease_name", "disease", "dim_disease", "disease_code"),
     # ---- insecticide -------------------------------------------------
-    FieldBinding(
-        target_field="dim_insecticide.insecticide_name",
-        domain="insecticide",
-        dimension_table="dim_insecticide",
-        dimension_key="insecticide_code",
-        value_type="text",
-    ),
+    _dim("dim_insecticide.insecticide_name", "insecticide", "dim_insecticide",
+         "insecticide_code"),
     # ---- diagnostic method -------------------------------------------
-    FieldBinding(
-        target_field="dim_identification_method.method_name",
-        domain="diagnostic_method",
-        dimension_table="dim_identification_method",
-        dimension_key="method_code",
-        value_type="text",
-    ),
+    _dim("dim_identification_method.method_name", "diagnostic_method",
+         "dim_identification_method", "method_code"),
     # ---- resistance test type ----------------------------------------
-    FieldBinding(
-        target_field="dim_resistance_test_type.test_type_name",
-        domain="resistance_test_type",
-        dimension_table="dim_resistance_test_type",
-        dimension_key="test_type_code",
-        value_type="text",
-    ),
+    _dim("dim_resistance_test_type.test_type_name", "resistance_test_type",
+         "dim_resistance_test_type", "test_type_code"),
     # ---- socioeconomic indicator -------------------------------------
-    FieldBinding(
-        target_field="dim_socioeconomic_indicator.indicator_name",
-        domain="socioeconomic_indicator",
-        dimension_table="dim_socioeconomic_indicator",
-        dimension_key="indicator_code",
-        value_type="text",
-    ),
+    _dim("dim_socioeconomic_indicator.indicator_name",
+         "socioeconomic_indicator", "dim_socioeconomic_indicator",
+         "indicator_code"),
     # ---- data source -------------------------------------------------
-    FieldBinding(
-        target_field="dim_source.source_name",
-        domain="source",
-        dimension_table="dim_source",
-        dimension_key="source_code",
-        value_type="text",
-    ),
+    _dim("dim_source.source_name", "source", "dim_source", "source_code"),
+
+    # ---- vector observation, free text -------------------------------
+    _fact("fact_vector_observation", "life_stage", "life_stage",
+          "observation_id"),
+    _fact("fact_vector_observation", "sex", "vector_sex", "observation_id"),
+    _fact("fact_vector_observation", "collection_method", "collection_method",
+          "observation_id"),
+    _fact("fact_vector_observation", "tested_for_pathogen", "pathogen_tested",
+          "observation_id"),
+    _fact("fact_vector_observation", "infection_status", "infection_status",
+          "observation_id"),
+    # ---- resistance, free text ---------------------------------------
+    _fact("fact_insecticide_resistance", "vgsc_generation", "vgsc_generation",
+          "resistance_id"),
+    # ---- bionomics, free text ----------------------------------------
+    _fact("fact_bionomics", "feeding_preference", "feeding_preference",
+          "bionomics_id"),
+    _fact("fact_bionomics", "biting_location", "biting_location",
+          "bionomics_id"),
+    _fact("fact_bionomics", "resting_behavior", "resting_behavior",
+          "bionomics_id"),
+    _fact("fact_bionomics", "larval_site_type", "larval_site_type",
+          "bionomics_id"),
+    # ---- disease case, free text -------------------------------------
+    _fact("fact_disease_case", "case_status", "case_status", "case_id"),
+    _fact("fact_disease_case", "host_type", "host_type", "case_id"),
+    _fact("fact_disease_case", "age_group", "age_group", "case_id"),
+    _fact("fact_disease_case", "sex", "case_sex", "case_id"),
+    _fact("fact_disease_case", "outcome", "case_outcome", "case_id"),
+    # ---- intervention, free text -------------------------------------
+    _fact("fact_intervention", "intervention_type", "intervention_type",
+          "intervention_id"),
 )
 
 _BY_FIELD: dict[str, FieldBinding] = {b.target_field: b for b in _BINDINGS}
@@ -171,21 +174,28 @@ FIELD_CATALOG: dict[str, dict[str, str]] = {
 
 
 def _build_domain_map() -> dict[str, str]:
-    """Derive domain -> dimension table, asserting the mapping is a function."""
+    """Derive domain -> table, asserting the mapping is a function.
+
+    Every domain must name exactly one table: a pack declares one ``domain``, and
+    ``ConceptPack.from_manifest`` refuses a ``field_scope`` entry whose catalog
+    domain disagrees. Two tables under one domain would make that check
+    unanswerable, so the two ``sex`` columns are ``vector_sex`` and ``case_sex``
+    rather than both ``sex``.
+    """
     reverse: dict[str, str] = {}
     for binding in _BINDINGS:
         existing = reverse.get(binding.domain)
         if existing is not None and existing != binding.dimension_table:
             raise RuntimeError(
-                f"domain {binding.domain!r} maps to more than one dimension "
-                f"table ({existing!r} and {binding.dimension_table!r}); "
+                f"domain {binding.domain!r} maps to more than one table "
+                f"({existing!r} and {binding.dimension_table!r}); "
                 f"DOMAIN_TO_DIM_TABLE must be a function"
             )
         reverse[binding.domain] = binding.dimension_table
     return reverse
 
 
-#: domain -> the single dim table a resolved concept for that domain lives in.
+#: domain -> the single table a resolved concept for that domain lives in.
 DOMAIN_TO_DIM_TABLE: dict[str, str] = _build_domain_map()
 
 
@@ -209,6 +219,25 @@ def resolve_field(target_field: str) -> FieldBinding:
     raise FieldNotInCatalog(key, candidates)
 
 
+def can_stamp(target_field: str) -> bool:
+    """Whether ``target_field``'s table can hold ``concept_id`` and
+    ``standard_code``.
+
+    True for every ``dim_*`` dimension, False for every ``fact_*`` table. A
+    resolution still gets recorded for a fact column — ``fact_concept_map`` is
+    the provenance — but nothing is stamped, so a writer must not emit an
+    ``UPDATE ... SET concept_id`` against it.
+    """
+    try:
+        binding = resolve_field(target_field)
+    except FieldNotInCatalog:
+        return False
+    table = Base.metadata.tables.get(binding.dimension_table)
+    if table is None:
+        return False
+    return all(column in table.columns for column in _STAMP_COLUMNS)
+
+
 def fields_for_domain(domain: str) -> tuple[str, ...]:
     """Catalog fields bound to ``domain``, sorted. Deterministic."""
     return tuple(sorted(b.target_field for b in _BINDINGS if b.domain == domain))
@@ -219,6 +248,18 @@ def fields_for_dimension_table(table_name: str) -> tuple[str, ...]:
     return tuple(
         sorted(b.target_field for b in _BINDINGS if b.dimension_table == table_name)
     )
+
+
+def dimension_fields() -> tuple[str, ...]:
+    """Catalog fields on a ``dim_*`` table, sorted. These can be stamped."""
+    return tuple(sorted(b.target_field for b in _BINDINGS
+                        if b.dimension_table.startswith("dim_")))
+
+
+def fact_value_fields() -> tuple[str, ...]:
+    """Catalog fields on a ``fact_*`` table, sorted. These cannot be stamped."""
+    return tuple(sorted(b.target_field for b in _BINDINGS
+                        if b.dimension_table.startswith("fact_")))
 
 
 def domains() -> tuple[str, ...]:
@@ -254,7 +295,7 @@ def _references_concept(table) -> bool:
 
 
 def _concept_reference_tables() -> tuple[str, ...]:
-    """Every ``dim_*`` table that carries a ``concept_id`` FK to ``dim_concept``.
+    """Every ``dim_*`` table carrying a ``concept_id`` FK to ``dim_concept``.
 
     Excludes ``dim_concept`` itself. Sorted, so the diagnostic is stable.
     """
@@ -272,11 +313,7 @@ _concept_id_tables = _concept_reference_tables
 
 
 def _assert_concept_id_coverage() -> None:
-    """Fail import if a concept-stampable dimension has no catalog binding.
-
-    This is the drift guard: add a ``dim_*`` table with a ``concept_id`` foreign
-    key and forget the catalog, and the process will not start.
-    """
+    """Fail import if a concept-stampable dimension has no catalog binding."""
     bound_tables = {b.dimension_table for b in _BINDINGS}
     uncovered = [
         table for table in _concept_reference_tables()
@@ -300,7 +337,10 @@ __all__ = [
     "FIELD_CATALOG",
     "FieldBinding",
     "FieldNotInCatalog",
+    "can_stamp",
+    "dimension_fields",
     "domains",
+    "fact_value_fields",
     "fields_for_dimension_table",
     "fields_for_domain",
     "iter_bindings",

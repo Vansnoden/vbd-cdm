@@ -50,6 +50,7 @@ import logging
 import re
 import unicodedata
 from typing import Callable, Iterable, Mapping, Sequence
+from typing import Any, Dict, List, Optional
 
 import pandas as pd  # noqa: F401  required by _norm_species; see module note
 

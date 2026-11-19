@@ -10,6 +10,8 @@ GADM 4.1 layout (verified against gadm41_KEN.gpkg):
 import geopandas as gpd
 import pandas as pd
 from typing import Optional
+from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 
 # Column/class spec per administrative level.

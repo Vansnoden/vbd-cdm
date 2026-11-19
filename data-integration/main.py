@@ -18,15 +18,32 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from dotenv import load_dotenv
 from sqlalchemy import text
 
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Loaded before any `database` import. `database.session` resolves its URL once,
+# at import time, from DATABASE_URL / the DB_* tuple / a SQLite fallback. Calling
+# load_dotenv() later — which this module used to do inside
+# setup_environment() — changes nothing for this process, so an operator with a
+# working `.env` silently got the fallback path, and SQLite created an empty file
+# with the full schema next to a populated database.
+try:
+    from dotenv import load_dotenv
+    for _candidate in (PROJECT_ROOT / ".env", Path.cwd() / ".env"):
+        if _candidate.is_file():
+            load_dotenv(_candidate)
+            break
+    load_dotenv()
+except Exception:  # noqa: BLE001 - python-dotenv is optional
+    pass
+
 from database import models                                    # noqa: E402
 from database.geoutils import get_iso_country_code              # noqa: E402
-from database.session import SessionLocal                       # noqa: E402
+from database.session import (                                  # noqa: E402
+    DATABASE_URL, SessionLocal, engine,
+)
 from etl.extractors.file_extractor import FileExtractor         # noqa: E402
 from etl.loaders.db_loader import DBLoader                      # noqa: E402
 from etl.transformers.mapping_transformer import MappingTransformer  # noqa: E402
@@ -107,7 +124,17 @@ def load_run_registry(path: Optional[Path] = None) -> Optional[VocabularyRegistr
 # ---------------------------------------------------------------------------
 
 def setup_environment() -> None:
-    load_dotenv()
+    """Seed ``dim_time`` and make sure the output directories exist.
+
+    ``load_dotenv()`` already ran at import time, before ``database.session``
+    resolved its URL; calling it again here is a harmless no-op kept so a caller
+    that imports this module for its helpers gets the same environment.
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:  # noqa: BLE001
+        pass
     (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
     (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
     init_dim_time(DIM_TIME_START, DIM_TIME_END)
@@ -275,9 +302,13 @@ def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
             continue
         frame = fact_dfs[table_name]
         # Non-nullable columns the loader cannot rescue must be dropped here, with
-        # the count logged, rather than failing the whole insert.
-        for column in ("value", "location_id"):
-            if table_name == "fact_environment" and column in frame.columns:
+        # the count logged, rather than failing the whole insert. ERA5-Land is
+        # land-only, so an ocean or off-mask pixel arrives as NaN and
+        # `fact_environment.value` is NOT NULL by design.
+        if table_name == "fact_environment":
+            for column in ("value", "location_id"):
+                if column not in frame.columns:
+                    continue
                 before = len(frame)
                 frame = frame.dropna(subset=[column])
                 if len(frame) < before:
@@ -419,15 +450,61 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
     if isinstance(loc, dict):
         clusters = loc.get("cluster_results") or {}
         logger.info(
-            "  Locations:     %d -> %d (%d merged across %d group(s)), "
-            "%d country code(s) filled, %d parent(s) repaired",
+            "  Locations:     %d -> %d (%d merged across %d group(s) by "
+            "standard_code), %d country code(s) filled, %d parent(s) repaired",
             loc.get("original_count", 0), loc.get("final_count", 0),
             clusters.get("merged_count", 0), clusters.get("group_count", 0),
             loc.get("country_codes_filled", 0),
             (loc.get("repaired_parents") or {}).get("total", 0))
-        logger.info("                 %d duplicate name group(s), %d grid cell(s)",
-                    len(loc.get("name_duplicate_groups") or []),
-                    loc.get("grid_count", 0))
+
+        rebuilt = loc.get("hierarchy_rebuilt") or {}
+        parents_resolved = loc.get("parents_resolved") or {}
+        logger.info(
+            "                 %d location(s) placed from standard_code, "
+            "%d placed by the spatial pass, %d grid cell(s) total",
+            rebuilt.get("placed", 0),
+            parents_resolved.get("placed_by_geometry", 0),
+            loc.get("grid_count", 0))
+
+        grid_parents = loc.get("grid_parents") or {}
+        if isinstance(grid_parents, dict) and grid_parents.get("grid_cells"):
+            logger.info(
+                "                 %d/%d grid cell(s) parented at %r "
+                "(%d recognised by name pattern, %d without coordinates)",
+                grid_parents.get("assigned", 0), grid_parents.get("grid_cells", 0),
+                grid_parents.get("admin_level"),
+                grid_parents.get("matched_by_pattern", 0),
+                grid_parents.get("no_coordinates", 0))
+        elif isinstance(grid_parents, dict):
+            logger.warning("                 no grid cell was parented (%s): %s",
+                           grid_parents.get("status"), grid_parents.get("reason")
+                           or "the R analysis cannot reach a study-area cell "
+                              "until this is fixed")
+
+        same_name = loc.get("name_duplicate_groups") or []
+        if same_name:
+            logger.info("                 %d same-name group(s) kept as distinct "
+                        "places, e.g. %s", len(same_name),
+                        ", ".join(f"{g['name']}×{g['count']}"
+                                  for g in same_name[:4]))
+
+    vload = results.get("vocabulary_load") or {}
+    if isinstance(vload, dict) and vload.get("packs"):
+        logger.info("  Vocabularies:  %d loaded (%d concept(s)), %d already "
+                    "present, %d without a CSV",
+                    vload.get("loaded", 0), vload.get("concepts", 0),
+                    vload.get("skipped", 0), vload.get("no_csv", 0))
+        for pack_id, entry in sorted(vload["packs"].items()):
+            if entry.get("status") in ("no_csv", "error"):
+                logger.warning("    %-12s %s%s — every value in domain %r stays "
+                               "unresolved",
+                               pack_id, entry.get("status"),
+                               (f": {entry['reason']}" if entry.get("reason") else ""),
+                               entry.get("domain"))
+            elif entry.get("status") == "loaded":
+                logger.info("    %-12s %d concept(s) from %s", pack_id,
+                            entry.get("concepts", 0),
+                            Path(entry.get("csv") or "?").name)
 
     for key, stats in sorted((results.get("vocabulary_standard") or {}).items()):
         if isinstance(stats, dict):
@@ -438,6 +515,32 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
                         stats.get("normalized", 0), stats.get("alias", 0),
                         stats.get("fuzzy", 0), stats.get("needs_review", 0),
                         stats.get("unresolved", 0))
+
+    dim_align = results.get("value_alignment") or {}
+    fact_align = results.get("fact_value_alignment") or {}
+    if dim_align or fact_align:
+        rewritten = [
+            f"{entry['table']}.{entry['column']}={entry['updated']}"
+            for entry in list((dim_align.get("fields") or {}).values()) +
+                               list((fact_align.get("fields") or {}).values())
+            if isinstance(entry, dict) and entry.get("updated")
+        ]
+        logger.info("  Value align:   %d dimension row(s) + %d fact row(s) "
+                    "renamed to the canonical concept name%s",
+                    dim_align.get("updated", 0), fact_align.get("updated", 0),
+                    (f" ({', '.join(rewritten[:6])})" if rewritten else ""))
+
+    report = results.get("alignment_report") or {}
+    ungoverned = report.get("ungoverned") or []
+    if ungoverned:
+        logger.warning("  %d field(s) have NO governing vocabulary; values kept "
+                       "exactly as written and merged on a normalised key only:",
+                       len(ungoverned))
+        for entry in ungoverned[:12]:
+            logger.warning("    %-50s %d distinct", entry["field"],
+                           entry["distinct_values"])
+        if len(ungoverned) > 12:
+            logger.warning("    ... and %d more", len(ungoverned) - 12)
 
     for table, stats in sorted((results.get("vocabulary_consolidate") or {}).items()):
         if isinstance(stats, dict) and stats.get("duplicates_found"):
@@ -493,9 +596,12 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
                        "spatial pass did not produce", results["conflicts"])
 
     close_report = results.get("close") or {}
-    if isinstance(close_report, dict) and close_report.get("flushed"):
-        logger.info("  Resolutions:   %d flushed into the ledger",
-                    close_report["flushed"])
+    if isinstance(close_report, dict):
+        if close_report.get("flushed"):
+            logger.info("  Resolutions:   %d flushed into the ledger",
+                        close_report["flushed"])
+        for message in close_report.get("errors") or ():
+            logger.warning("  Resolution drain: %s", message)
 
     logger.info("-" * 60)
 
@@ -569,6 +675,12 @@ def main() -> None:
     logger.info("run id %s | registry %s | %d pack(s)",
                 context.run_id, context.registry_digest[:12] or "(none)",
                 len(context.registry.packs()) if context.registry else 0)
+    # Printed because the most expensive misdiagnosis available here is reading a
+    # database nothing has ever written to: `database.session` fixes the URL at
+    # import time, so a missing .env silently yields a fresh SQLite file with the
+    # full schema and no rows.
+    logger.info("database %s (file: %s)", DATABASE_URL,
+                engine.url.database or "(in memory)")
 
     run_ingest = not args.skip_ingest and "ingest_data" in steps
     run_consolidate = not args.skip_consolidation and "consolidate" in steps

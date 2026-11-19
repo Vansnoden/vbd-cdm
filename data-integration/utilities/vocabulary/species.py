@@ -16,7 +16,7 @@ via `Entrez.api_key`, you can raise this to 10 req/s (sleep 0.11).
 import time
 import pandas as pd
 from Bio import Entrez
-
+from typing import Any, Dict, List, Optional
 
 # Curated list of vector genera relevant to VBD surveillance.
 VECTOR_TAXA = [

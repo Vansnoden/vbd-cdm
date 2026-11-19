@@ -8,6 +8,11 @@ Download: http://purl.obolibrary.org/obo/idomal.obo
 import pronto
 import pandas as pd
 from typing import Optional
+from typing import Any, Dict, List, Optional
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def build_disease_vocabulary(
