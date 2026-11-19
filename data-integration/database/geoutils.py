@@ -2,10 +2,11 @@
 
 import reverse_geocode as rg
 import numpy as np
-from typing import Tuple, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List, Any
 import pandas as pd
 from functools import lru_cache
 import logging
+import re
 from math import radians, sin, cos, sqrt, asin
 
 from database.constants import COUNTRY_LOOKUP
@@ -45,6 +46,51 @@ COUNTRY_NAME_TO_ISO = {
     'South Sudan': 'SS', 'Sudan': 'SD', 'Togo': 'TG', 'Tunisia': 'TN',
     'Zambia': 'ZM', 'Zimbabwe': 'ZW'
 }
+
+COUNTRY_ALIASES: Dict[str, str] = {
+    "IVORY COAST": "CI",
+    "COTE D IVOIRE": "CI",
+    "CÔTE D'IVOIRE": "CI",
+    "SWAZILAND": "SZ",
+    "CAPE VERDE": "CV",
+    "CABO VERDE": "CV",
+    "UNITED REPUBLIC OF TANZANIA": "TZ",
+    "TANZANIA UNITED REPUBLIC OF": "TZ",
+    "THE GAMBIA": "GM",
+    "GAMBIA THE": "GM",
+    "SAO TOME AND PRINCIPE": "ST",
+    "SÃO TOMÉ AND PRÍNCIPE": "ST",
+    "EGYPT ARAB REPUBLIC OF": "EG",
+    "LIBYA STATE OF": "LY",
+    "CONGO REPUBLIC OF": "CG",
+    "CONGO BRAZZAVILLE": "CG",
+}
+
+
+def _fold_country(value: Any) -> str:
+    """Fold a country name or code to its comparison form.
+
+    Upper-case, punctuation (commas and full stops) turned into spaces, runs of
+    whitespace collapsed. Accents are preserved rather than stripped: the source
+    table spells two names with them, and stripping here would make
+    ``'Côte d'Ivoire'`` and a mangled ``'Cote d Ivoire'`` compare equal only in
+    one direction, which is exactly the kind of half-match this function exists
+    to remove. The unaccented spelling is in ``COUNTRY_ALIASES`` instead, where
+    it is visible.
+
+    ``None`` folds to ``''``. Never raises.
+    """
+    if value is None:
+        return ""
+    text_value = str(value).upper()
+    text_value = text_value.replace(",", " ").replace(".", " ")
+    return re.sub(r"\s+", " ", text_value).strip()
+
+
+_FOLDED_COUNTRY_NAMES: Dict[str, str] = {
+    _fold_country(name): code for name, code in COUNTRY_NAME_TO_ISO.items()
+}
+
 
 # ISO code to country name mapping
 ISO_TO_COUNTRY_NAME = {v: k for k, v in COUNTRY_NAME_TO_ISO.items()}
@@ -225,43 +271,76 @@ def _get_country_from_bounding_box(lat: float, lon: float) -> Tuple[Optional[str
 
 
 def get_iso_country_code(country: str) -> Optional[str]:
-    """
-    Get ISO alpha-2 country code from a country name or code.
-    
-    Args:
-        country: Country name or code (e.g., 'Kenya', 'KE', 'KEN')
-        
-    Returns:
-        ISO alpha-2 code or None if not found
-    """
-    if not country:
-        return None
-    
-    country = str(country).strip().upper()
-    
-    # If it's already a valid ISO code
-    if country in ISO_COUNTRY_CODES:
-        return country
-    if country in ISO_COUNTRY_CODES.values():
-        # Reverse lookup: code is alpha-3, find alpha-2
-        for iso2, iso3 in ISO_COUNTRY_CODES.items():
-            if iso3 == country:
-                return iso2
-    
-    # Try to match by name
-    country_names = {
-        name.upper(): code for name, code in COUNTRY_NAME_TO_ISO.items()
-    }
-    if country in country_names:
-        return country_names[country]
-    
-    # Try partial match
-    for name, code in COUNTRY_NAME_TO_ISO.items():
-        if country in name.upper():
-            return code
-    
-    return None
+    """Get the ISO 3166-1 alpha-2 country code from a name, alias or code.
 
+    Resolution order — deterministic, and the earlier a rule is, the less
+    guessing it does:
+
+    1. the folded value is an alpha-2 code already (``'KE'``);
+    2. it is an alpha-3 code (``'KEN'``);
+    3. it is a declared alias (``'Ivory Coast'``, ``'Swaziland'``);
+    4. it is a country name, folded (``"Côte d'Ivoire"``, ``'kenya'``);
+    5. it *contains* a country name, and the longest such name wins, with an
+       alphabetical tie-break.
+
+    Step 5 is the only heuristic, and it is last for a reason: it is what turns
+    ``'Kenya (Siaya)'`` into ``KE``. Ranking by length first keeps
+    ``'Guinea-Bissau'`` from resolving to ``GN`` through ``'Guinea'``, which is
+    the bug the previous first-match loop had.
+
+    Parameters
+    ----------
+    country : str
+        A country name, an alias, or an alpha-2 / alpha-3 code. ``None`` and
+        blank return ``None``.
+
+    Returns
+    -------
+    str or None
+        The ISO alpha-2 code, or ``None`` when nothing matched.
+
+    Examples
+    --------
+    ``'Kenya'``, ``'KEN'``, ``'ke'``, ``'Kenya (Siaya)'`` all give ``'KE'``;
+    ``'Ivory Coast'`` gives ``'CI'``; ``'Ruritania'`` gives ``None``.
+    """
+    if country is None:
+        return None
+
+    folded = _fold_country(country)
+    if not folded:
+        return None
+
+    # 1. already alpha-2
+    if folded in ISO_COUNTRY_CODES:
+        return folded
+
+    # 2. already alpha-3
+    for iso2, iso3 in ISO_COUNTRY_CODES.items():
+        if iso3 == folded:
+            return iso2
+
+    # 3. a declared alias
+    alias = COUNTRY_ALIASES.get(folded)
+    if alias:
+        return alias
+
+    # 4. an exact country name
+    exact = _FOLDED_COUNTRY_NAMES.get(folded)
+    if exact:
+        return exact
+
+    # 5. the longest country name contained in the value
+    best: Optional[str] = None
+    for folded_name in sorted(_FOLDED_COUNTRY_NAMES):
+        if not folded_name or folded_name not in folded:
+            continue
+        if best is None or len(folded_name) > len(best):
+            best = folded_name
+    if best is None:
+        return None
+    return _FOLDED_COUNTRY_NAMES[best]
+    
 
 def get_country_name(code: str) -> Optional[str]:
     """

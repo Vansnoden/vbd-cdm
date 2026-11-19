@@ -1,443 +1,597 @@
-# utilities/admin_alignment.py
-#
-# Coordinate-driven GADM alignment.
-#
-# Every location — admin unit, site, facility, or grid cell — is placed
-# into the GADM hierarchy by point-in-polygon lookup against its
-# centroid. Admin units (level 0 through 3) become first-class rows in
-# dim_location with a parent chain. Non-admin rows get a parent_location_id
-# pointing at the finest GADM unit that contains them.
-#
-# No code in this module contains the name of any country, region, or
-# admin unit. All inputs come from the caller, which reads them from
-# base_config.yaml.
+# -*- coding: utf-8 -*-
+"""Coordinate- and GID-driven boundary alignment.
+
+Which layers to open, which column holds the GID and which hold the name all come
+from the active location pack's ``layers`` block. Nothing here contains the name
+of a country, region or admin unit.
+"""
+
+from __future__ import annotations
 
 import logging
-from typing import List, Optional
+import re
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import geopandas as gpd
-import pandas as pd
-from shapely.geometry import Point
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import bindparam, text
+
+from database.geoutils import haversine_distance
+from database.session import require_identifier
+from utilities.vocabulary.registry import ConceptPack, VocabularyRegistry
 
 logger = logging.getLogger(__name__)
 
+MAX_IN_VARS = 900
 
-# ---------------------------------------------------------------------------
-# GADM layer specification.
-#
-# GADM 4.x ships each administrative level as a separate vector layer
-# inside one .gpkg file. The layer names are stable across releases. The
-# name column varies by level: level 0 uses COUNTRY (there is no NAME_0);
-# levels 1+ use NAME_<n>. The GID column is stable: GID_<n>.
-#
-# The parent GID column lets us link level N to level N-1 without
-# recomputing spatial containment — GADM already encodes that hierarchy
-# in the data.
-# ---------------------------------------------------------------------------
+DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
 
-_GADM_LAYERS = [
-    {
-        "level":          0,
-        "layer":          "ADM_ADM_0",
-        "name_columns":   ["COUNTRY", "NAME_0"],
-        "gid_column":     "GID_0",
-        "parent_gid":     None,
-        "admin_level":    "admin0",
-    },
-    {
-        "level":          1,
-        "layer":          "ADM_ADM_1",
-        "name_columns":   ["NAME_1"],
-        "gid_column":     "GID_1",
-        "parent_gid":     "GID_0",
-        "admin_level":    "admin1",
-    },
-    {
-        "level":          2,
-        "layer":          "ADM_ADM_2",
-        "name_columns":   ["NAME_2"],
-        "gid_column":     "GID_2",
-        "parent_gid":     "GID_1",
-        "admin_level":    "admin2",
-    },
-    {
-        "level":          3,
-        "layer":          "ADM_ADM_3",
-        "name_columns":   ["NAME_3"],
-        "gid_column":     "GID_3",
-        "parent_gid":     "GID_2",
-        "admin_level":    "admin3",
-    },
-]
+_REGISTRY_CACHE: dict = {}
+_WARNED: set = set()
+
+_SAFE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-# ---------------------------------------------------------------------------
-# Step 1 — load the admin hierarchy into dim_location
-# ---------------------------------------------------------------------------
+def _text(value: Any) -> str:
+    """``str(value).strip()`` with None/NaN/NA mapped to ''. Never raises."""
+    if value is None:
+        return ""
+    if type(value).__name__ in ("NAType", "NaTType"):
+        return ""
+    try:
+        if value != value:
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(value).strip()
 
-def load_admin_hierarchy(
-    session: Session,
-    gadm_gpkg: str,
-    country_codes: Optional[List[str]] = None,
-) -> dict:
+
+def _warn_once(marker: str, message: str, *args: Any) -> None:
+    if marker in _WARNED:
+        return
+    _WARNED.add(marker)
+    logger.warning(message, *args)
+
+
+def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
+    """Return ``registry``, or load the shipped packs once. Missing dir -> None."""
+    if registry is not None:
+        return registry
+    key = str(DEFAULT_REGISTRY_PATH)
+    cached = _REGISTRY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if not DEFAULT_REGISTRY_PATH.is_dir():
+        return None
+    loaded = VocabularyRegistry.load_from(DEFAULT_REGISTRY_PATH)
+    _REGISTRY_CACHE[key] = loaded
+    return loaded
+
+
+def _active_location_pack(pack_id: Optional[str] = None,
+                          registry: Any = None) -> ConceptPack:
+    """The pack that declares the boundary layout.
+
+    With ``pack_id`` it is fetched by id and checked for layers. Without one, the
+    winner is the highest ``rank_key()`` among packs that *declare* ``layers``, so
+    a non-boundary pack can never win by accident. No silent fallback to a
+    hard-coded layout.
     """
-    Read the GADM levels 0-3 from `gadm_gpkg`, upsert one row per
-    administrative unit into dim_location, and set parent_location_id
-    so the hierarchy is a chain.
+    loaded = _load_registry(registry)
+    if loaded is None:
+        raise RuntimeError(
+            f"admin alignment needs the vocabulary registry, and none was supplied "
+            f"and none exists at {DEFAULT_REGISTRY_PATH}. Pass a registry, or "
+            f"build the packs.")
 
-    Parameters
-    ----------
-    session : Session
-        Active SQLAlchemy session.
-    gadm_gpkg : str
-        Path to the GADM GeoPackage.
-    country_codes : list[str], optional
-        GADM GID_0 codes to keep (e.g. ['KEN']). If None, every country
-        in the file is loaded.
+    if pack_id is not None:
+        pack = loaded.get(pack_id)
+        if not getattr(pack, "layers", ()):
+            raise RuntimeError(
+                f"pack {pack_id!r} declares no `layers` block, so it cannot "
+                f"describe a boundary hierarchy.")
+        return pack
 
-    Returns
-    -------
-    dict
-        {'levels_loaded': {level: row_count}, 'total_rows': int}
+    candidates = [p for p in loaded.packs() if getattr(p, "layers", ())]
+    if not candidates:
+        raise RuntimeError(
+            "no loaded vocabulary pack declares a `layers` block, so there is no "
+            "boundary layout to read.")
+    return max(candidates, key=ConceptPack.rank_key)
+
+
+def _layer_specs(pack: ConceptPack,
+                 levels: Optional[Iterable[int]] = None) -> Tuple[Dict[str, Any], ...]:
+    """The pack's layer specs, normalised and ordered by level.
+
+    Each returned dict carries the four declared fields plus the ``admin_level``
+    the pack maps that level to, so a caller cannot forget to consult
+    ``admin_level_map`` separately.
     """
-    loaded: dict = {}
-    total = 0
+    wanted = None if levels is None else {int(level) for level in levels}
+    specs: List[Dict[str, Any]] = []
 
-    for spec in _GADM_LAYERS:
-        try:
-            gdf = gpd.read_file(gadm_gpkg, layer=spec["layer"])
-        except Exception as e:
-            logger.info(
-                f"  GADM layer {spec['layer']} not present in {gadm_gpkg} "
-                f"({e}); skipping."
-            )
+    for spec in pack.layers:
+        level = int(spec["level"])
+        if wanted is not None and level not in wanted:
             continue
-
-        if country_codes and "GID_0" in gdf.columns:
-            gdf = gdf[gdf["GID_0"].isin(country_codes)]
-
-        if gdf.empty:
-            logger.info(
-                f"  GADM {spec['admin_level']}: no rows matched "
-                f"countries={country_codes}"
-            )
-            continue
-
-        name_col = next(
-            (c for c in spec["name_columns"] if c in gdf.columns), None
-        )
-        if name_col is None:
-            logger.warning(
-                f"  GADM {spec['admin_level']}: no name column "
-                f"among {spec['name_columns']}; columns are "
-                f"{list(gdf.columns)}"
-            )
-            continue
-
-        # Build a {GID: location_id} map from the parent level already loaded.
-        # Admin0 has no parent.
-        parent_map = {}
-        if spec["parent_gid"]:
-            rows = session.execute(text(
-                "SELECT location_code, location_id FROM dim_location "
-                "WHERE origin = 'gadm' AND location_code IS NOT NULL"
-            )).fetchall()
-            parent_map = dict(rows)
-
-        rows_written = _upsert_admin_rows(
-            session, gdf, spec, name_col, parent_map
-        )
-        loaded[spec["admin_level"]] = rows_written
-        total += rows_written
-        session.commit()
-
-        logger.info(
-            f"  GADM {spec['admin_level']}: upserted {rows_written} rows"
-        )
-
-    return {"levels_loaded": loaded, "total_rows": total}
-
-
-def _upsert_admin_rows(
-    session: Session,
-    gdf: gpd.GeoDataFrame,
-    spec: dict,
-    name_col: str,
-    parent_map: dict,
-) -> int:
-    """
-    Upsert one row per polygon. Uses `location_code = GID_<n>` as the
-    natural key so the operation is idempotent across runs.
-    """
-    gid_col = spec["gid_column"]
-    parent_gid_col = spec["parent_gid"]
-    admin_level = spec["admin_level"]
-
-    written = 0
-    for _, row in gdf.iterrows():
-        gid = row.get(gid_col)
-        if gid is None:
-            continue
-
-        name = row.get(name_col)
-        centroid = row.geometry.centroid
-        lat, lon = float(centroid.y), float(centroid.x)
-
-        # Country code/name from the GID_0 column on any level.
-        country_code = row.get("GID_0")
-        country_name = None
-        if country_code:
-            # GID_0 is the ISO-3 country code (KEN, TZA, ...). Read the
-            # name from the admin0 record if we can, else use the code.
-            admin0_row = session.execute(text(
-                "SELECT name FROM dim_location "
-                "WHERE location_code = :gid AND admin_level = 'admin0'"
-            ), {"gid": country_code}).first()
-            if admin0_row:
-                country_name = admin0_row[0]
-
-        parent_id = None
-        if parent_gid_col:
-            parent_gid = row.get(parent_gid_col)
-            parent_id = parent_map.get(parent_gid)
-
-        session.execute(text("""
-            INSERT INTO dim_location
-                (location_code, name, country_code, country_name,
-                 admin_level, centroid_lat, centroid_lon,
-                 parent_location_id, standard_code, origin)
-            VALUES
-                (:code, :name, :cc, :cn,
-                 :al, :lat, :lon,
-                 :parent, :std, 'gadm')
-            ON CONFLICT (location_code) DO UPDATE SET
-                name               = EXCLUDED.name,
-                country_code       = EXCLUDED.country_code,
-                country_name       = EXCLUDED.country_name,
-                admin_level        = EXCLUDED.admin_level,
-                centroid_lat       = EXCLUDED.centroid_lat,
-                centroid_lon       = EXCLUDED.centroid_lon,
-                parent_location_id = EXCLUDED.parent_location_id,
-                standard_code      = EXCLUDED.standard_code,
-                origin             = 'gadm'
-        """), {
-            "code":   gid,
-            "name":   name,
-            "cc":     country_code,
-            "cn":     country_name,
-            "al":     admin_level,
-            "lat":    lat,
-            "lon":    lon,
-            "parent": parent_id,
-            "std":    gid,
+        admin_level = pack.admin_level_for(level)
+        if not admin_level:
+            raise RuntimeError(
+                f"pack {pack.pack_id!r} declares layer level {level} but has no "
+                f"entry for it in admin_level_map; the rows could not be labelled.")
+        specs.append({
+            "level": level,
+            "layer": str(spec["layer"]),
+            "gid_column": str(spec["gid_column"]),
+            "name_columns": tuple(str(n) for n in spec["name_columns"]),
+            "admin_level": admin_level,
         })
-        written += 1
 
-    return written
+    if wanted is not None:
+        missing = sorted(wanted - {s["level"] for s in specs})
+        if missing:
+            raise ValueError(
+                f"pack {pack.pack_id!r} does not declare layer level(s) {missing}; "
+                f"it declares {sorted(int(s['level']) for s in pack.layers)}.")
+    if not specs:
+        raise ValueError(
+            f"pack {pack.pack_id!r} yields no layer specs for levels {levels!r}.")
+
+    specs.sort(key=lambda s: s["level"])
+    return tuple(specs)
+
+
+def _parent_gid(gid: str) -> Optional[str]:
+    """The GID of ``gid``'s parent, or None for a top-level GID.
+
+    GADM-style identifiers are hierarchical: ``GID_2_KEN.3.1``'s parent is
+    ``GID_1_KEN.3`` — decrement the level, drop the last dotted segment. This is
+    the only place the hierarchy rule lives.
+    """
+    value = _text(gid)
+    if not value:
+        return None
+
+    head, _, remainder = value.partition("_")
+    number, _, path = remainder.partition("_")
+    if not head or not path:
+        return None
+    try:
+        level = int(number)
+    except (TypeError, ValueError):
+        return None
+    if level <= 0:
+        return None
+
+    parent_path = path.rsplit(".", 1)[0] if "." in path else path
+    return f"{head}_{level - 1}_{parent_path}"
+
+
+def _location_fact_tables() -> Tuple[str, ...]:
+    """Every ``fact_*`` table carrying a ``location_id`` FK, sorted.
+
+    Derived from ``Base.metadata`` so a new fact table needs no edit here.
+    """
+    from database.session import Base
+
+    return tuple(sorted(
+        table.name for table in Base.metadata.tables.values()
+        if table.name.startswith("fact_") and "location_id" in table.columns))
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — place every non-admin location into the hierarchy
+# load_admin_hierarchy
 # ---------------------------------------------------------------------------
 
-def resolve_parent_locations(
-    session: Session,
-    gadm_gpkg: str,
-    country_codes: Optional[List[str]] = None,
-    finest_level: int = 3,
-) -> dict:
+def load_admin_hierarchy(gpkg_path: Union[str, Path], *,
+                         pack_id: Optional[str] = None,
+                         levels: Optional[Iterable[int]] = None,
+                         registry: Any = None) -> Dict[int, "gpd.GeoDataFrame"]:
+    """Open the boundary file and return ``{level: GeoDataFrame}``, keys ascending.
+
+    A layer absent from the file, or lacking a declared column, is reported by
+    name and skipped; a file from which no declared layer opens raises.
     """
-    For every non-GADM location that has coordinates and no parent, find
-    the finest GADM polygon that contains it and set parent_location_id.
+    path = Path(gpkg_path)
+    if not path.exists():
+        raise ValueError(f"boundary file not found: {path}")
 
-    Walks the hierarchy from finest to coarsest (admin3 -> admin2 -> admin1
-    -> admin0). A point that falls outside every admin3 polygon is tried
-    against admin2, then admin1, then admin0. This is the fallback the
-    previous single-level version lacked: on the Kenya case study, 509 of
-    762 grid cells were left unparented because their centroid landed in
-    an admin3 gap (protected area, water body, urban boundary) that a
-    coarser level would have covered.
+    pack = _active_location_pack(pack_id, registry)
+    specs = _layer_specs(pack, levels=levels)
 
-    Parameters
-    ----------
-    session : Session
-    gadm_gpkg : str
-    country_codes : list[str], optional
-        GID_0 filter for the GADM polygons.
-    finest_level : int
-        Start at this level and walk down (default 3).
+    available: Optional[set] = None
+    try:
+        listing = gpd.list_layers(path)
+        column = "name" if "name" in listing.columns else listing.columns[0]
+        available = {str(value) for value in listing[column]}
+    except Exception as exc:  # noqa: BLE001 - older geopandas / no driver
+        logger.debug("could not list layers in %s: %s", path, exc)
 
-    Returns
-    -------
-    dict
-        {'assigned': int, 'unplaced': int, 'levels_used': {level: n}}
-    """
-    # ---- Load every GADM level once, finest to coarsest. ----
-    levels: list = []
-    for level in range(finest_level, -1, -1):
-        spec = next(s for s in _GADM_LAYERS if s["level"] == level)
+    hierarchy: Dict[int, "gpd.GeoDataFrame"] = {}
+    skipped: List[str] = []
+
+    for spec in specs:
+        level, layer = spec["level"], spec["layer"]
+        if available is not None and layer not in available:
+            skipped.append(f"level {level}: no layer {layer!r} in {path.name}")
+            continue
         try:
-            gdf = gpd.read_file(gadm_gpkg, layer=spec["layer"])
-        except Exception as e:
-            logger.info(
-                f"  GADM layer {spec['layer']} not available ({e}); skipping."
-            )
-            continue
-        if country_codes and "GID_0" in gdf.columns:
-            gdf = gdf[gdf["GID_0"].isin(country_codes)]
-        if gdf.empty:
+            frame = gpd.read_file(path, layer=layer)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append(f"level {level}: could not read {layer!r} "
+                           f"({type(exc).__name__}: {exc})")
             continue
 
-        gid_col = spec["gid_column"]
-        if gid_col not in gdf.columns:
+        required = (spec["gid_column"],) + tuple(spec["name_columns"])
+        absent = [c for c in required if c not in frame.columns]
+        if absent:
+            skipped.append(f"level {level}: layer {layer!r} is missing {absent}")
+            continue
+        if frame.empty:
+            skipped.append(f"level {level}: layer {layer!r} is empty")
             continue
 
-        admin_map = dict(session.execute(text(
-            "SELECT location_code, location_id FROM dim_location "
-            "WHERE admin_level = :al AND location_code IS NOT NULL"
-        ), {"al": spec["admin_level"]}).fetchall())
+        hierarchy[level] = frame
+        logger.info("  %s level %d -> %r: %d row(s), GID %r",
+                    pack.pack_id, level, layer, len(frame), spec["gid_column"])
 
-        gdf = gdf.to_crs("EPSG:4326")
-        levels.append((spec, gdf, admin_map))
+    for note in skipped:
+        _warn_once(f"layer:{path.name}:{note}", "  skipped %s", note)
 
-    if not levels:
-        logger.warning("  No GADM polygon layer available; skipping.")
-        return {"assigned": 0, "unplaced": 0, "levels_used": {}}
+    if not hierarchy:
+        raise ValueError(
+            f"no declared layer could be opened from {path}. Pack "
+            f"{pack.pack_id!r} declares {[s['layer'] for s in specs]}. Reasons: "
+            + "; ".join(skipped))
 
-    # ---- Load every non-GADM location with coordinates and no parent. ----
-    rows = session.execute(text("""
-        SELECT location_id, centroid_lat, centroid_lon
-        FROM dim_location
-        WHERE parent_location_id IS NULL
-          AND (origin IS NULL OR origin <> 'gadm')
-          AND centroid_lat IS NOT NULL
-          AND centroid_lon IS NOT NULL
-    """)).fetchall()
+    return {level: hierarchy[level] for level in sorted(hierarchy)}
 
-    if not rows:
-        logger.info("  No unplaced locations to resolve.")
-        return {"assigned": 0, "unplaced": 0, "levels_used": {}}
 
-    pending = gpd.GeoDataFrame(
-        {"location_id": [r[0] for r in rows]},
-        geometry=[Point(r[2], r[1]) for r in rows],
-        crs="EPSG:4326",
-    )
+# ---------------------------------------------------------------------------
+# resolve_parent_locations
+# ---------------------------------------------------------------------------
 
-    # ---- Cascade through levels, finest first. ----
-    levels_used: dict = {}
-    updates: list = []
+def resolve_parent_locations(session, *,
+                             gpkg_path: Optional[Union[str, Path]] = None,
+                             hierarchy: Optional[Dict[int, "gpd.GeoDataFrame"]] = None,
+                             pack_id: Optional[str] = None,
+                             registry: Any = None,
+                             country_codes: Optional[Iterable[str]] = None,
+                             levels: Optional[Iterable[int]] = None,
+                             dry_run: bool = False) -> Dict[str, Any]:
+    """Set ``admin_level`` and ``parent_location_id`` from GIDs.
 
-    for spec, gdf, admin_map in levels:
-        if pending.empty:
-            break
+    Each boundary row is indexed by GID; each ``dim_location`` row whose
+    ``location_code`` is a known GID gets its ``admin_level`` and its parent's
+    ``location_id``. The parent is found through the identifier, not a name or a
+    geometry, so two districts called "Central" cannot be confused.
+    """
+    pack = _active_location_pack(pack_id, registry)
+    specs = {spec["level"]: spec for spec in _layer_specs(pack, levels=levels)}
 
-        gid_col = spec["gid_column"]
-        joined = gpd.sjoin(
-            pending[["location_id", "geometry"]],
-            gdf[[gid_col, "geometry"]],
-            how="left",
-            predicate="within",
-        )
+    if hierarchy is None:
+        if gpkg_path is None:
+            raise ValueError(
+                "resolve_parent_locations needs `hierarchy` or `gpkg_path`.")
+        hierarchy = load_admin_hierarchy(
+            gpkg_path, pack_id=pack.pack_id, levels=levels, registry=registry)
 
-        # Deduplicate by location_id: a point can be within more than one
-        # polygon at the same level if the polygons overlap slightly.
-        placed: dict = {}
-        for _, jrow in joined.iterrows():
-            parent_gid = jrow.get(gid_col)
-            if pd.isna(parent_gid):
+    allowed_countries = None
+    if country_codes:
+        allowed_countries = {_text(c).upper() for c in country_codes if _text(c)}
+
+    boundary: Dict[str, Dict[str, Any]] = {}
+    countries_skipped = 0
+
+    for level in sorted(hierarchy):
+        spec = specs.get(level) or _layer_specs(pack, levels=[level])[0]
+        for record in hierarchy[level].to_dict("records"):
+            gid = _text(record.get(spec["gid_column"]))
+            if not gid:
                 continue
-            parent_id = admin_map.get(parent_gid)
-            if parent_id is None:
-                continue
-            loc_id = int(jrow["location_id"])
-            if loc_id in placed:
-                continue
-            placed[loc_id] = int(parent_id)
+            if allowed_countries is not None:
+                country = gid.split("_", 2)[-1].split(".", 1)[0].upper()
+                if country not in allowed_countries:
+                    countries_skipped += 1
+                    continue
 
-        for loc_id, parent_id in placed.items():
-            updates.append({"loc_id": loc_id, "parent": parent_id})
+            name = next((_text(record.get(c)) for c in spec["name_columns"]
+                         if _text(record.get(c))), None)
+            boundary[gid] = {"level": level,
+                             "admin_level": spec["admin_level"], "name": name}
 
-        levels_used[spec["admin_level"]] = len(placed)
+    empty = {"rows_examined": 0, "admin_level_set": 0, "parents_set": 0,
+             "unmatched": 0, "countries_skipped": countries_skipped,
+             "dry_run": bool(dry_run)}
+    if not boundary:
+        logger.warning("  no boundary rows indexed (pack %r, levels %s)",
+                       pack.pack_id, sorted(specs))
+        return empty
 
-        if placed:
-            pending = pending[~pending["location_id"].isin(list(placed.keys()))].copy()
+    rows = session.execute(text(
+        "SELECT location_id, location_code, admin_level, parent_location_id "
+        "FROM dim_location WHERE location_code IS NOT NULL")).fetchall()
 
-    # ---- Write. ----
-    if updates:
-        for chunk in _chunked(updates, 500):
-            session.execute(
-                text("""
-                    UPDATE dim_location SET parent_location_id = :parent
-                    WHERE location_id = :loc_id
-                """),
-                chunk,
-            )
-        session.commit()
-
-    assigned = len(updates)
-    unplaced = int(len(pending))
-
-    logger.info(
-        f"  Placed {assigned} locations across "
-        f"{len(levels_used)} admin level(s); {unplaced} unplaced"
-    )
-    for lvl in ("admin3", "admin2", "admin1", "admin0"):
-        n = levels_used.get(lvl, 0)
-        if n:
-            logger.info(f"    {lvl}: {n}")
-
-    return {
-        "assigned":    assigned,
-        "unplaced":    unplaced,
-        "levels_used": levels_used,
+    id_by_gid = {
+        _text(code): int(loc_id) for loc_id, code, _a, _p in rows
+        if _text(code) and _text(code) in boundary
     }
 
+    updates: List[Dict[str, Any]] = []
+    unmatched = admin_level_set = parents_set = 0
+
+    for location_id, location_code, admin_level, parent_location_id in rows:
+        gid = _text(location_code)
+        info = boundary.get(gid)
+        if info is None:
+            unmatched += 1
+            continue
+
+        new_level = info["admin_level"]
+        parent_gid = _parent_gid(gid)
+        new_parent_id = id_by_gid.get(parent_gid) if parent_gid else None
+
+        fields: Dict[str, Any] = {}
+        if new_level and new_level != _text(admin_level):
+            fields["admin_level"] = new_level
+            admin_level_set += 1
+        if new_parent_id is not None and new_parent_id != parent_location_id:
+            fields["parent_location_id"] = new_parent_id
+            parents_set += 1
+        if not fields:
+            continue
+        fields["location_id"] = int(location_id)
+        updates.append(fields)
+
+    if updates and not dry_run:
+        statement = text(
+            "UPDATE dim_location "
+            "SET admin_level = COALESCE(:admin_level, admin_level), "
+            "    parent_location_id = COALESCE(:parent_location_id, parent_location_id) "
+            "WHERE location_id = :location_id")
+        for start in range(0, len(updates), MAX_IN_VARS):
+            chunk = updates[start:start + MAX_IN_VARS]
+            session.execute(statement, [
+                {"location_id": row["location_id"],
+                 "admin_level": row.get("admin_level"),
+                 "parent_location_id": row.get("parent_location_id")}
+                for row in chunk])
+        session.commit()
+
+    logger.info("  parent resolution (pack %r): %d examined, %d labelled, %d "
+                "parented, %d unmatched%s", pack.pack_id, len(rows),
+                admin_level_set, parents_set, unmatched,
+                " (dry run)" if dry_run else "")
+    return {"rows_examined": len(rows), "admin_level_set": admin_level_set,
+            "parents_set": parents_set, "unmatched": unmatched,
+            "countries_skipped": countries_skipped, "dry_run": bool(dry_run)}
+
+
 # ---------------------------------------------------------------------------
-# Step 3 — attach GADM concepts to locations that resolved
+# attach_admin_concepts
 # ---------------------------------------------------------------------------
 
-def attach_admin_concepts(session: Session) -> int:
+def attach_admin_concepts(session, pack_id: str = "", *, registry: Any = None,
+                          dry_run: bool = False) -> Dict[str, Any]:
+    """Stamp ``concept_id`` and ``standard_code`` on ``dim_location``.
+
+    ``location_code`` *is* the boundary GID, which is also the vocabulary's
+    ``concept_code``, so attachment is a key join: no name comparison, no fuzzy
+    matching, no ambiguity. This is the **only** writer of
+    ``dim_location.concept_id`` — string matching is unsafe for place names, so
+    the reconciliation pass records those matches as ``needs_review`` and never
+    stamps the column.
     """
-    For every admin-origin location, set concept_id to the matching
-    GADM concept, if the vocabulary loader has populated dim_concept
-    with that GID.
+    pack = _active_location_pack(pack_id or None, registry)
+    vocabulary_id = pack.vocabulary_id
 
-    Returns the number of rows updated.
+    concept_rows = session.execute(text(
+        "SELECT concept_code, concept_id FROM dim_concept "
+        "WHERE vocabulary_id = :v ORDER BY concept_code"), {"v": vocabulary_id}
+    ).fetchall()
+    concept_id_by_code = {
+        _text(code): int(concept_id) for code, concept_id in concept_rows
+        if _text(code) and concept_id is not None}
+
+    if not concept_id_by_code:
+        _warn_once(
+            f"admin-concepts-empty:{vocabulary_id}",
+            "  %r has no concepts in dim_concept (vocabulary_id=%r), so no "
+            "location can be stamped. Load that vocabulary under its "
+            "version-qualified id.", pack.pack_id, vocabulary_id)
+        return {"pack_id": pack.pack_id, "vocabulary_id": vocabulary_id,
+                "concepts": 0, "rows_examined": 0, "attached": 0,
+                "unchanged": 0, "unmatched": 0, "dry_run": bool(dry_run)}
+
+    rows = session.execute(text(
+        "SELECT location_id, location_code, concept_id, standard_code "
+        "FROM dim_location WHERE location_code IS NOT NULL")).fetchall()
+
+    updates: List[Dict[str, Any]] = []
+    unmatched = unchanged = 0
+
+    for location_id, location_code, concept_id, standard_code in rows:
+        code = _text(location_code)
+        new_concept_id = concept_id_by_code.get(code)
+        if new_concept_id is None:
+            unmatched += 1
+            continue
+        if concept_id == new_concept_id and _text(standard_code) == code:
+            unchanged += 1
+            continue
+        updates.append({"location_id": int(location_id),
+                        "concept_id": new_concept_id, "standard_code": code})
+
+    if updates and not dry_run:
+        statement = text(
+            "UPDATE dim_location SET concept_id = :concept_id, "
+            "standard_code = :standard_code WHERE location_id = :location_id")
+        for start in range(0, len(updates), MAX_IN_VARS):
+            session.execute(statement, updates[start:start + MAX_IN_VARS])
+        session.commit()
+
+    logger.info("  admin concepts (pack %r, %d concept(s)): %d/%d attached, "
+                "%d unchanged, %d unmatched%s", pack.pack_id,
+                len(concept_id_by_code), len(updates), len(rows), unchanged,
+                unmatched, " (dry run)" if dry_run else "")
+    return {"pack_id": pack.pack_id, "vocabulary_id": vocabulary_id,
+            "concepts": len(concept_id_by_code), "rows_examined": len(rows),
+            "attached": len(updates), "unchanged": unchanged,
+            "unmatched": unmatched, "dry_run": bool(dry_run)}
+
+
+# ---------------------------------------------------------------------------
+# reassign_grid_facts_to_admin
+# ---------------------------------------------------------------------------
+
+def reassign_grid_facts_to_admin(session, *, pack_id: Optional[str] = None,
+                                 registry: Any = None, dry_run: bool = False,
+                                 prune_grid_locations: bool = False
+                                 ) -> Dict[str, Any]:
+    """Point every fact row attached to a grid cell at the nearest admin unit.
+
+    A grid cell is a synthetic carrier of coordinates, not an analysis unit. Grid
+    level and the admin levels come from the pack (``grid_level``,
+    ``admin_level_map``), not from a literal ``'grid'``.
+
+    Determinism: the location query is ``ORDER BY location_id`` and the
+    comparison is strict ``<``, so an exact distance tie is won by the **lowest
+    ``location_id``**. That is a stated rule, not "whichever row the engine
+    returned first".
     """
-    # Map GID -> concept_id from dim_concept where vocabulary = GADM.
-    gid_to_concept = dict(session.execute(text("""
-        SELECT concept_code, concept_id
-        FROM dim_concept
-        WHERE vocabulary_id = 'GADM'
-    """)).fetchall())
+    pack = _active_location_pack(pack_id, registry)
 
-    if not gid_to_concept:
-        logger.info("  No GADM concepts loaded; skipping concept attach.")
-        return 0
+    grid_level = pack.grid_level
+    if not grid_level:
+        raise RuntimeError(
+            f"pack {pack.pack_id!r} declares no `grid_level`, so grid facts cannot "
+            f"be identified.")
 
-    updated = 0
-    for gid, cid in gid_to_concept.items():
-        result = session.execute(text("""
-            UPDATE dim_location
-            SET concept_id = :cid
-            WHERE location_code = :gid
-              AND (concept_id IS NULL OR concept_id <> :cid)
-        """), {"cid": cid, "gid": gid})
-        updated += result.rowcount or 0
+    admin_levels: Tuple[str, ...] = tuple(pack.admin_level_map.values())
+    if not admin_levels:
+        raise RuntimeError(
+            f"pack {pack.pack_id!r} declares no `admin_level_map`, so there is no "
+            f"administrative level to reassign to.")
 
-    session.commit()
-    logger.info(f"  Attached GADM concepts to {updated} locations")
-    return updated
+    rows = session.execute(text(
+        "SELECT location_id, name, admin_level, centroid_lat, centroid_lon "
+        "FROM dim_location ORDER BY location_id")).fetchall()
+
+    by_level: Dict[str, List[Tuple[int, float, float]]] = {}
+    grid_locations: List[Tuple[int, float, float]] = []
+
+    for location_id, _name, admin_level, centroid_lat, centroid_lon in rows:
+        label = _text(admin_level)
+        try:
+            lat, lon = float(centroid_lat), float(centroid_lon)
+        except (TypeError, ValueError):
+            continue
+        if lat != lat or lon != lon:  # NaN
+            continue
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            continue
+        if label == grid_level:
+            grid_locations.append((int(location_id), lat, lon))
+        elif label in admin_levels:
+            by_level.setdefault(label, []).append((int(location_id), lat, lon))
+
+    base = {"grid_level": grid_level, "tie_break": "location_id ascending",
+            "dry_run": bool(dry_run)}
+    if not grid_locations:
+        logger.info("  no grid locations found (grid_level=%r)", grid_level)
+        return dict(base, grid_locations=0, admin_locations=0, reassigned=0,
+                    unmatched=0, pruned=0)
+
+    targets: List[Tuple[int, float, float]] = []
+    target_level: Optional[str] = None
+    for level_label in reversed(admin_levels):
+        candidates = by_level.get(level_label) or []
+        if candidates:
+            targets, target_level = candidates, level_label
+            break
+
+    if not targets:
+        _warn_once(
+            f"grid-targets:{pack.pack_id}",
+            "  %d grid location(s) found but no location carries a configured "
+            "administrative level (%s); no grid fact reassigned.",
+            len(grid_locations), list(admin_levels))
+        return dict(base, grid_locations=len(grid_locations), admin_locations=0,
+                    reassigned=0, unmatched=len(grid_locations), pruned=0)
+
+    nearest: Dict[int, int] = {}
+    unmatched = 0
+    for grid_id, grid_lat, grid_lon in grid_locations:
+        best_id: Optional[int] = None
+        best_distance = float("inf")
+        for candidate_id, candidate_lat, candidate_lon in targets:
+            distance = haversine_distance(grid_lat, grid_lon,
+                                          candidate_lat, candidate_lon)
+            if distance < best_distance:
+                best_distance, best_id = distance, candidate_id
+        if best_id is None:
+            unmatched += 1
+        elif best_id != grid_id:
+            nearest[grid_id] = best_id
+
+    fact_tables = _location_fact_tables()
+    reassigned = 0
+
+    if nearest and not dry_run:
+        ordered_pairs = sorted(nearest.items())
+        for table_name in fact_tables:
+            if not _SAFE_TABLE.match(table_name):
+                raise ValueError(f"refusing to interpolate {table_name!r}")
+            statement = text(
+                f"UPDATE {table_name} SET location_id = :new_id "
+                f"WHERE location_id = :old_id")
+            for old_id, new_id in ordered_pairs:
+                result = session.execute(statement,
+                                         {"new_id": new_id, "old_id": old_id})
+                reassigned += int(result.rowcount or 0)
+        session.commit()
+
+    pruned = 0
+    if prune_grid_locations and not dry_run and nearest:
+        orphan_ids = sorted(nearest)
+        still_referenced: set = set()
+        for table_name in fact_tables:
+            if not _SAFE_TABLE.match(table_name):
+                continue
+            for start in range(0, len(orphan_ids), MAX_IN_VARS):
+                chunk = orphan_ids[start:start + MAX_IN_VARS]
+                statement = text(
+                    f"SELECT DISTINCT location_id FROM {table_name} "
+                    f"WHERE location_id IN :vals ORDER BY location_id"
+                ).bindparams(bindparam("vals", expanding=True))
+                for (referenced,) in session.execute(
+                    statement, {"vals": chunk}).fetchall():
+                    still_referenced.add(int(referenced))
+
+        deletable = [i for i in orphan_ids if i not in still_referenced]
+        if deletable:
+            statement = text(
+                "DELETE FROM dim_location WHERE location_id IN :vals"
+            ).bindparams(bindparam("vals", expanding=True))
+            for start in range(0, len(deletable), MAX_IN_VARS):
+                session.execute(statement,
+                                {"vals": deletable[start:start + MAX_IN_VARS]})
+            session.commit()
+            pruned = len(deletable)
+
+    logger.info("  grid reassignment (%r -> %r): %d/%d cell(s), %d fact row(s) "
+                "moved, %d unmatched, %d pruned, tie-break location_id ascending%s",
+                grid_level, target_level, len(nearest), len(grid_locations),
+                reassigned, unmatched, pruned, " (dry run)" if dry_run else "")
+    return dict(base, grid_locations=len(grid_locations),
+                admin_locations=len(targets), reassigned=reassigned,
+                unmatched=unmatched, pruned=pruned)
 
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-def _chunked(seq, size):
-    seq = list(seq)
-    for i in range(0, len(seq), size):
-        yield seq[i:i + size]
+__all__ = [
+    "attach_admin_concepts",
+    "load_admin_hierarchy",
+    "reassign_grid_facts_to_admin",
+    "resolve_parent_locations",
+]

@@ -1,0 +1,94 @@
+# path: vocabularies/registry/gadm/manifest.yaml
+# status: REVISED FILE
+#
+# Administrative boundaries, release 4.1 — the `location` pack.
+#
+# Seeded from the constants that utilities/admin_alignment.py and
+# utilities/consolidation.py hard-coded before the registry existed: the
+# vocabulary id, the domain, a single global fuzzy threshold of 0.85, and the
+# two target fields that were matched. Reproducing today's output byte-for-byte
+# is the point of seeding with today's numbers.
+#
+# Two blocks are new in batch 4 and exist for one reason each:
+#
+#   layers / admin_level_map / grid_level
+#       The physical layout of the boundary product — layer names, GID column,
+#       name columns, the level->admin_level mapping, and the label used for
+#       grid cells. Before this, all four were string literals in
+#       utilities/admin_alignment.py (_GADM_LAYERS, 'GADM', 'grid'). They are
+#       declared here so that adopting a second boundary source, or a release
+#       whose layer schema changed, is a manifest edit rather than a code
+#       change (review C6 / §5 step 8).
+#
+# Nothing in the code names this product any more: `admin_alignment` asks the
+# registry for the pack that declares layers, and reads the layout off it.
+
+pack_id: gadm
+version: "4.1"
+domain: location
+
+# Rank components. `precedence` is the primary key; `specificity` breaks ties
+# in favour of the narrower vocabulary. rank_key() == (100, -3, "gadm").
+precedence: 100
+specificity: 3
+
+# Normalisation applied before the L2 (normalised) rung of the ladder.
+# `generic` is unicodedata NFKD + diacritic strip + whitespace collapse.
+normalizer_chain:
+  - generic
+
+fuzzy_threshold: 0.85
+fuzzy_margin: 0.05
+case_sensitive: false
+
+field_scope:
+  - dim_location.name
+  - dim_location.country_code
+
+# No predicate: this pack applies to every row of its field scope.
+applies_when: {}
+
+# Location names are ambiguous across admin1 units ("Central" exists more than
+# once in several countries), so a string match is never allowed to auto-apply
+# on its own. The spatial pass is authoritative whenever the row carries
+# coordinates; this rule tells the resolver that a name-only decision must
+# stay in `needs_review` until a human or a coordinate resolves it.
+canonical_rule: "require_spatial_or_human"
+
+released_with: "1.0.0"
+
+# ---------------------------------------------------------------------------
+# Physical layout of the boundary data
+# ---------------------------------------------------------------------------
+#
+# `level` is the GADM admin level as an integer, and is the only key the code
+# orders by. `layer` is the GeoPackage layer to open. `gid_column` holds the
+# hierarchy path (GID_2_KEN.3.1), and `name_columns` is a preference list — the
+# first column with a non-empty value is the label.
+#
+# Level 0 carries two name candidates because level-0 rows are the only ones
+# where the country name and the layer's own name column can both be populated;
+# the others carry one.
+layers:
+  - { level: 0, layer: ADM_ADM_0, gid_column: GID_0,
+      name_columns: [COUNTRY, NAME_0] }
+  - { level: 1, layer: ADM_ADM_1, gid_column: GID_1,
+      name_columns: [NAME_1] }
+  - { level: 2, layer: ADM_ADM_2, gid_column: GID_2,
+      name_columns: [NAME_2] }
+  - { level: 3, layer: ADM_ADM_3, gid_column: GID_3,
+      name_columns: [NAME_3] }
+
+# Integer GADM level -> the value written to dim_location.admin_level. Declared
+# rather than derived, because it is a CDM vocabulary and not a property of the
+# source product: another boundary source may label its levels differently.
+admin_level_map:
+  0: admin0
+  1: admin1
+  2: admin2
+  3: admin3
+
+# The admin_level value that marks a synthetic grid cell. utilities/
+# consolidation.reassign_grid_facts_to_admin reads this instead of testing the
+# literal string, so a run over a differently-labelled grid is a manifest edit.
+grid_level: grid

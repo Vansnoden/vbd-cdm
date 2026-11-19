@@ -1,0 +1,34 @@
+# NCBI Taxonomy vector species vocabulary, release 2024-11.
+# Seeded from the pre-registry constants: vocabulary_id 'NCBI', domain
+# 'vector', threshold 0.85. This is the one domain that used the
+# species-specific normaliser before the registry existed.
+
+pack_id: ncbi
+version: "2024-11"
+domain: vector
+
+# rank_key() == (100, -3, "ncbi").
+precedence: 100
+specificity: 3
+
+# `species_canon` strips the genus prefix and the complex/subgroup/form
+# qualifiers, so 'Anopheles gambiae', 'Gambiae Complex' and 'gambiae_s form'
+# all reduce to the same key. Copied verbatim from loader._norm_species.
+normalizer_chain:
+  - species_canon
+
+fuzzy_threshold: 0.85
+fuzzy_margin: 0.05
+case_sensitive: false
+
+field_scope:
+  - dim_vector.species_name
+
+applies_when: {}
+
+# Hybrid designations ('Anopheles coluzzii/gambiae') are legitimately distinct
+# and the normaliser deliberately does not merge them. A match that only
+# survives the fuzzy rung stays in review.
+canonical_rule: "never_collapse_hybrids"
+
+released_with: "1.0.0"

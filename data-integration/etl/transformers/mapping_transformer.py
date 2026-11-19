@@ -1,128 +1,446 @@
+# -*- coding: utf-8 -*-
 """
-MappingTransformer - Interprets CSV mapping files to transform source DataFrames
-into CDM table-specific DataFrames.
+MappingTransformer - Interprets CSV mapping files (or inline column specs) to
+transform source DataFrames into CDM table-specific DataFrames.
 """
 
-from datetime import datetime
+from __future__ import annotations
+
 import calendar
-import pandas as pd
 import json
-from typing import Dict, List, Any, Optional, Union
-from collections import defaultdict
 import logging
+import warnings
+from collections import defaultdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+
+import pandas as pd
+from sqlalchemy import Integer
 
 from database import models
-from database.session import SessionLocal 
+from database.session import SessionLocal
+from etl.transformers.concept_resolver import AUTO_ACCEPTED, ConceptResolver
+from utilities.config.source_spec import MAPPING_COLUMNS
+
+if TYPE_CHECKING:  # pragma: no cover - type checkers only
+    from etl.transformers.dimension_index import DimensionKeyIndex
+
+UNPARTITIONED = "<unpartitioned>"
 
 logger = logging.getLogger(__name__)
 
 
 class MappingTransformer:
-    """
-    Transforms a source DataFrame (from any file format) into multiple CDM table DataFrames
-    using a mapping CSV that defines source -> target column mappings.
+    """Transforms a source DataFrame into multiple CDM table DataFrames.
+
+    Parameters
+    ----------
+    mapping_csv_path : str, optional
+        Legacy path. Still first positionally, because ``transform_dimensions``
+        and ``transform_facts`` construct ``MappingTransformer(path)``.
+    large_df_threshold : int
+        Rows above which the row-wise loop logs a warning.
+    column_specs : list of ColumnSpec, optional
+        Inline form. Mutually exclusive with the CSV: they are two encodings of
+        one table, and preferring one silently would hide a config that says both.
+    registry : VocabularyRegistry, optional
+        Used by the ``resolve`` transform and to decide whether a literal
+        ``{raw: code}`` table in a ``map`` transform is authoritative. Absent
+        means the ``resolve`` transform refuses rather than guesses.
+    run_id : str, optional
+        Forwarded to every ``Resolution`` so the ledger can attribute evidence.
     """
 
-    def __init__(self, mapping_csv_path: str, large_df_threshold: int = 1_000_000):
-        """
-        Args:
-            mapping_csv_path: Path to the mapping CSV file.
-            large_df_threshold: Number of rows above which a warning is logged.
-        """
-        self.mapping = pd.read_csv(mapping_csv_path, quotechar='"')
+    def __init__(self, mapping_csv_path: Optional[str] = None,
+                 large_df_threshold: int = 1_000_000, *,
+                 column_specs: Optional[List[Any]] = None,
+                 registry: Any = None,
+                 run_id: Optional[str] = None) -> None:
+        if mapping_csv_path and column_specs:
+            raise ValueError(
+                "MappingTransformer accepts a mapping CSV or inline column "
+                "specs, not both; they describe the same table and there is no "
+                "defined precedence between them."
+            )
+        if not mapping_csv_path and not column_specs:
+            raise ValueError(
+                "MappingTransformer needs `mapping_csv_path` or `column_specs`; "
+                "with neither there is nothing to transform."
+            )
+
+        self.mapping_csv_path = mapping_csv_path
+        self.column_specs: List[Any] = list(column_specs) if column_specs else []
         self.large_df_threshold = large_df_threshold
+        self.registry = registry
+        self.run_id = run_id
+
+        self._input_kind = "columns" if self.column_specs else "csv"
+        if self.column_specs:
+            rows = [spec.mapping_row() for spec in self.column_specs]
+            self.mapping = pd.DataFrame(rows, columns=list(MAPPING_COLUMNS))
+        else:
+            self.mapping = pd.read_csv(mapping_csv_path, quotechar='"')
+
+        self._normalise_mapping_frame()
+
+        self._resolver: Optional[ConceptResolver] = None
+        self._resolver_session: Any = None
+        self._pending_resolutions: Dict[tuple, Any] = {}
+        #: ``(table, ref_field) -> DimensionKeyIndex``. The live dimension cache.
+        self._index_cache: Dict[tuple, Optional[DimensionKeyIndex]] = {}
+        #: ``(table, column)`` pairs already warned about, so a chunked source
+        #: does not emit ten thousand identical lines.
+        self._warned_unpartitioned: set = set()
+
         self._validate_mapping()
         self._group_by_target_table()
-        self._dimension_cache = {}
 
-    def _validate_mapping(self):
-        required_cols = {'source_column', 'target_table', 'target_column', 'transform', 'required'}
+    # -------------------------------------------------------------------------
+    # Construction hygiene
+    # -------------------------------------------------------------------------
+
+    def _normalise_mapping_frame(self) -> None:
+        """Coerce the mapping frame into the dtypes the transform loop expects.
+
+        Two coercions, each fixing a failure a clean CSV happens to mask:
+
+        * ``required`` becomes a real ``bool``. ``_determine_raw_value`` tests
+          ``mapping.get('required', False)``, and ``bool("False")`` is True — a
+          string column would make every optional column required.
+        * Blank strings in the nullable columns become NaN. The loop tests
+          ``pd.notna(...)`` and ``pd.notna("")`` is True, so an empty cell would be
+          read as a literal static value (or as a real source column name).
+        """
+        nullable_columns = (
+            "source_column", "transform_params", "static_value",
+            "default_value", "source_data_type",
+        )
+        for column in nullable_columns:
+            if column not in self.mapping.columns:
+                continue
+            self.mapping[column] = self.mapping[column].where(
+                self.mapping[column].map(
+                    lambda value: not (
+                        isinstance(value, str) and not value.strip()
+                    )
+                )
+            )
+
+        if "required" in self.mapping.columns:
+            def _as_bool(value) -> bool:
+                if isinstance(value, bool):
+                    return value
+                return str(value).strip().lower() in ("true", "t", "1", "yes")
+
+            self.mapping["required"] = self.mapping["required"].map(_as_bool)
+
+    def _validate_mapping(self) -> None:
+        """Validate the mapping table for whichever input shape produced it."""
+        required_cols = {
+            "source_column", "target_table", "target_column", "transform", "required",
+        }
         missing = required_cols - set(self.mapping.columns)
         if missing:
-            raise ValueError(f"Mapping CSV missing columns: {missing}")
+            origin = (
+                f"inline column specs ({len(self.column_specs)} entries)"
+                if self._input_kind == "columns"
+                else f"mapping CSV {self.mapping_csv_path!r}"
+            )
+            raise ValueError(f"{origin} is missing column(s): {sorted(missing)}")
 
-    def _group_by_target_table(self):
+        if self._input_kind == "columns":
+            known = {
+                "none", "map", "date_parse", "cast", "split", "unit_convert",
+                "format_date", "coalesce", "derive_category", "concat", "resolve",
+            }
+            for spec in self.column_specs:
+                if spec.transform_name not in known:
+                    raise ValueError(
+                        f"{spec.target_field}: transform {spec.transform_name!r} "
+                        f"is not one this transformer dispatches on "
+                        f"({', '.join(sorted(known))})"
+                    )
+
+        context_transforms = {"format_date", "coalesce", "concat", "derive_category"}
+        for index, row in self.mapping.iterrows():
+            source_column = row.get("source_column")
+            static_value = row.get("static_value")
+            transform = str(row.get("transform") or "none").strip().lower()
+            if (
+                pd.isna(source_column)
+                and pd.isna(static_value)
+                and transform not in context_transforms
+            ):
+                raise ValueError(
+                    f"mapping row {index} writes "
+                    f"{row.get('target_table')}.{row.get('target_column')} but "
+                    f"names no source_column, no static_value, and uses "
+                    f"transform {transform!r}, which does not read one. That "
+                    f"row would write NULL for every record."
+                )
+
+    def _group_by_target_table(self) -> None:
         """Group mapping rows by target table name."""
         self.table_mappings = defaultdict(list)
         for _, row in self.mapping.iterrows():
-            self.table_mappings[row['target_table']].append(row.to_dict())
+            self.table_mappings[row["target_table"]].append(row.to_dict())
+
+    # -------------------------------------------------------------------------
+    # `map` — dimension lookup, or a literal table
+    # -------------------------------------------------------------------------
 
     def _apply_map_transform(
-        self, 
-        value: Any, 
-        params: Optional[Union[str, dict]],
-        extra_context: Optional[dict] = None) -> Any:
-        # Handle dimension lookups with ref parameter
-        ref = params.get('ref') if params else None
-        if ref:
-            # Parse ref: "dim_location.name" or "dim_location.location_name"
-            parts = ref.split('.')
-            if len(parts) == 2:
-                table_name, field_name = parts[0], parts[1]
-                # Get the model class
-                model_class = self._get_model_for_table(table_name)
-                if model_class:
-                    # Handle composite lookups from extra_context
-                    lookup_value = self._build_lookup_value(value, params, extra_context)
-                    return self._lookup_dimension_id(model_class, field_name, lookup_value)
-                else:
-                    logger.warning(f"Model not found for table: {table_name}")
-                    return value
-            else:
-                logger.warning(f"Invalid ref format: {ref}. Expected 'table.field'")
-                return value
-        else:
-            mapping = params or {}
-            # 'default' is an optional key inside params. When present, it
-            # is returned if no mapping entry matches. When absent, the
-            # input value passes through unchanged. This preserves the
-            # original behaviour for callers like itnuse_data that rely on
-            # the input surviving; callers like worldbank_indicator that
-            # want a fallback label can opt in explicitly.
-            default = mapping.get('default', value)
-            lookup = {k: v for k, v in mapping.items() if k != 'default'}
-            return lookup.get(str(value), default)
-    
-    
-    def _apply_date_parse_transform(
         self,
         value: Any,
-        params: Optional[Union[str, dict]]) -> Any:
+        params: Optional[Union[str, dict]],
+        extra_context: Optional[dict] = None,
+        target_field: Optional[str] = None,
+    ) -> Any:
+        """Apply a ``map`` transform: a dimension lookup, or a literal table.
+
+        ``ref`` branch
+        --------------
+        Routed through ``DimensionKeyIndex``, which replaces the per-value
+        ``SELECT ... WHERE field == value`` of the old lookup (review C12) with
+        one seed query per (table, field) and a dictionary thereafter. The index
+        also returns the concept alongside the surrogate key, so the caller no
+        longer reads the FK from one place and the concept from another (C7).
+
+        inline ``{raw: code}`` branch
+        -----------------------------
+        Retained **only** for fields no pack governs. The canonical example is
+        ``sex``: a closed, source-declared encoding with no vocabulary behind it.
+        Where a pack *does* govern the field, a literal table is a second,
+        unversioned source of truth for a decision the registry owns — that is
+        warned about and the literal is still applied, because silently resolving
+        instead would change a run's output based on config the user cannot see.
         """
-        Parse date value and return as 'YYYY-MM-DD' string.
-        Handles Timestamp, datetime, and strings (with/without time).
+        ref = params.get("ref") if isinstance(params, dict) else None
+
+        if ref:
+            parts = str(ref).split(".")
+            if len(parts) != 2:
+                logger.warning("Invalid ref format: %r. Expected 'table.field'", ref)
+                return None
+
+            table_name, field_name = parts[0].strip(), parts[1].strip()
+            lookup_value = self._build_lookup_value(
+                value, params or {}, extra_context
+            )
+            if lookup_value is None or (
+                isinstance(lookup_value, float) and pd.isna(lookup_value)
+            ):
+                return None
+
+            index = self._index_for(table_name, field_name)
+            if index is None:
+                logger.warning(
+                    "No dimension index for %s.%s; leaving %r unresolved. "
+                    "(ref=%r, target=%r)",
+                    table_name, field_name, lookup_value, ref, target_field,
+                )
+                return None
+
+            entry = index.lookup_raw(lookup_value)
+            if entry is None:
+                logger.warning(
+                    "No match found for %s.%s = %r",
+                    table_name, field_name, lookup_value,
+                )
+                return None
+
+            # A fact FK holds the surrogate PK where the dimension has one, and
+            # the natural key where it does not (dim_vector's PK *is* its code).
+            if entry.pk is not None:
+                return entry.pk
+            return entry.code
+
+        mapping = params or {}
+        default = mapping.get("default", value)
+        lookup = {k: v for k, v in mapping.items() if k != "default"}
+
+        governing = self._governing_pack(target_field)
+        if governing is not None and lookup:
+            logger.warning(
+                "%s is governed by pack %r, so this inline {raw: code} table is "
+                "non-authoritative: the registry owns that decision and a literal "
+                "here is a second, unversioned source of truth. Declare the "
+                "mapping in the pack's vocabulary, or use "
+                "transform: {type: resolve}. The literal is still applied so this "
+                "run's output matches the config as written.",
+                target_field, getattr(governing, "pack_id", "?"),
+            )
+
+        return lookup.get(str(value), default)
+
+    # -------------------------------------------------------------------------
+    # `resolve` — the concept ladder, one value at a time
+    # -------------------------------------------------------------------------
+
+    def _apply_resolve_transform(
+        self,
+        value: Any,
+        field: str,
+        params: Optional[dict] = None,
+    ) -> Optional[str]:
+        """Resolve one raw value against the pack that governs ``field``.
+
+        The ``resolve`` transform is the mapping-level entry point to the ladder:
+        it names a CDM field (``dim_vector.species_name``), asks the registry
+        which pack governs it, resolves the value with ``ConceptResolver`` and
+        returns the accepted standard code (or ``None``).
+
+        Values whose decision is not ``auto_accepted`` get ``None``. The decision
+        itself — not this column — is what a review queue reads, and
+        ``concept_code`` is ``None`` on every withheld decision by contract.
+
+        Parameters
+        ----------
+        value : Any
+            The raw cell. ``None``, ``NaN`` and blank resolve to ``None``
+            through the ladder rather than raising.
+        field : str
+            The CDM field the transform writes into, from the mapping row's
+            ``transform_params['ref']`` or its ``target_table.target_column``.
+        params : dict, optional
+            ``pack`` forces a specific pack id; anything else is ignored, so a
+            mapping CSV may carry extra transform parameters without error.
+
+        Returns
+        -------
+        str or None
+            The accepted standard code, or ``None``.
+
+        Raises
+        ------
+        ValueError
+            If no registry was supplied, if ``field`` is blank, or if ``pack``
+            names a pack the registry does not hold. All three are configuration
+            errors that would otherwise resolve every row to nothing, silently.
+
+        Notes
+        -----
+        Per-cell, not per-series. ``_build_table_df`` dispatches one cell at a
+        time, and ``ConceptResolver`` memoises on ``(field, value)``, so the
+        second occurrence of a repeated value is a dictionary hit. A chunked
+        source therefore pays the resolution cost once per distinct value.
         """
-        fmt = params.get('format', '%Y-%m-%d') if params else '%Y-%m-%d'
+        if self.registry is None:
+            raise ValueError(
+                "the `resolve` transform needs a VocabularyRegistry "
+                "(MappingTransformer(..., registry=registry)). Without one there "
+                "is no pack to resolve against, and guessing one is the "
+                "policy-as-literal this refactor removes."
+            )
+
+        params = dict(params or {})
+        target_field = str(field or "").strip()
+        if not target_field:
+            raise ValueError(
+                "the `resolve` transform needs the CDM field it writes into "
+                "(for example 'dim_vector.species_name')."
+            )
+
+        supplied_pack_id = params.get("pack")
+        if supplied_pack_id:
+            pack = self.registry.get(str(supplied_pack_id))
+        else:
+            pack = self.registry.select_pack(target_field)
+
+        source_table, source_column = self._partition_field(target_field)
+
+        resolver = self._ensure_resolver()
+        resolution = resolver.resolve(
+            value,
+            pack,
+            {
+                "source_table": source_table,
+                "source_column": source_column,
+                "target_field": target_field,
+                "run_id": self.run_id,
+            },
+        )
+
+        self._pending_resolutions[
+            (
+                resolution.source_table,
+                resolution.source_column,
+                resolution.source_value,
+                resolution.run_id or "",
+            )
+        ] = resolution
+
+        return (
+            resolution.concept_code
+            if resolution.decision == AUTO_ACCEPTED
+            else None
+        )
+
+    def _partition_field(self, target_field: str) -> tuple[str, str]:
+        """Split ``'dim_vector.species_name'`` into its two halves.
+
+        A field that cannot be partitioned is a mapping error, and there are two
+        ways to report it badly. Synthesising ``'unknown'`` writes a
+        plausible-looking table name into an audit table, where it is
+        indistinguishable from a real one. Raising aborts an ingestion for a
+        single malformed mapping row. So the edge is recorded as the sentinel
+        ``UNPARTITIONED`` and logged at WARNING once per (table, column) pair.
+        """
+        table, separator, column = str(target_field).partition(".")
+        table = table.strip()
+        column = column.strip()
+        if not separator or not table or not column:
+            marker = (table or UNPARTITIONED, column or UNPARTITIONED)
+            if marker not in self._warned_unpartitioned:
+                self._warned_unpartitioned.add(marker)
+                logger.warning(
+                    "the `resolve` transform was given field %r, which is not "
+                    "'<table>.<column>'. Every resolution for it will be recorded "
+                    "with source_table=%r and source_column=%r, so the audit trail "
+                    "will not say which CDM column these decisions belong to. Fix "
+                    "the mapping row to name the target field in full.",
+                    target_field, marker[0], marker[1],
+                )
+            return marker
+        return table, column
+
+    # -------------------------------------------------------------------------
+    # Scalar transforms
+    # -------------------------------------------------------------------------
+
+    def _apply_date_parse_transform(self, value: Any,
+                                    params: Optional[Union[str, dict]]) -> Any:
+        """Parse a date value and return it as a ``YYYY-MM-DD`` string."""
+        fmt = params.get("format", "%Y-%m-%d") if params else "%Y-%m-%d"
         try:
-            # Already datetime-like → format directly
             if isinstance(value, (pd.Timestamp, datetime)):
-                return value.strftime('%Y-%m-%d')
-            # Try exact format first, fallback to flexible parser
+                return value.strftime("%Y-%m-%d")
             try:
                 dt = pd.to_datetime(value, format=fmt)
             except (ValueError, TypeError):
-                dt = pd.to_datetime(value)   # infers time, etc.
-            return dt.strftime('%Y-%m-%d')
-        except Exception as e:
-            logger.warning(f"Date parse failed for '{value}' with format '{fmt}': {e}")
+                dt = pd.to_datetime(value)
+            return dt.strftime("%Y-%m-%d")
+        except Exception as exc:  # noqa: BLE001 - one bad cell must not stop a table
+            logger.warning(
+                "Date parse failed for %r with format %r: %s", value, fmt, exc
+            )
             return None
-                
-    
-    def _apply_derive_category_transform(self, value, params, extra_context=None) -> Any:
-        """
-        Derive a categorical label from one or more source columns.
 
-        Rules are evaluated top-to-bottom; the first whose conditions all
-        hold wins. If none match, `default` is returned.
+    def _apply_derive_category_transform(self, value, params,
+                                         extra_context=None) -> Any:
+        """Derive a categorical label from one or more source columns.
 
-        Supported conditions:
-            Single-column:
-                {"col": "indoor_host_percent", "op": ">=", "value": 80}
-            Ratio of two columns, computed as a / (a + b):
-                {"cols": ["indoor_biting_total", "outdoor_biting_total"],
-                "op": "ratio_gte", "value": 0.8}
+        Rules are evaluated top-to-bottom; the first whose conditions all hold
+        wins. If none match, ``default`` is returned.
 
-        ops: >, >=, <, <=, ==, !=, ratio_gt, ratio_gte, ratio_lt, ratio_lte
+        Supported conditions::
+
+            {"col": "indoor_host_percent", "op": ">=", "value": 80}
+            {"cols": ["indoor_total", "outdoor_total"], "op": "ratio_gte",
+             "value": 0.8}
+
+        ``ops``: ``>``, ``>=``, ``<``, ``<=``, ``==``, ``!=``, ``ratio_gt``,
+        ``ratio_gte``, ``ratio_lt``, ``ratio_lte``.
         """
         if not params:
             return None
@@ -156,7 +474,6 @@ class MappingTransformer:
         def _check(cond) -> bool:
             op = cond["op"]
 
-            # Ratio comparison a / (a + b)
             if "cols" in cond:
                 a = _num(extra_context.get(cond["cols"][0]))
                 b = _num(extra_context.get(cond["cols"][1]))
@@ -165,20 +482,19 @@ class MappingTransformer:
                 ratio = a / (a + b)
                 v = float(cond["value"])
                 return {
-                    "ratio_gt":  ratio >  v,
+                    "ratio_gt": ratio > v,
                     "ratio_gte": ratio >= v,
-                    "ratio_lt":  ratio <  v,
+                    "ratio_lt": ratio < v,
                     "ratio_lte": ratio <= v,
                 }.get(op, False)
 
-            # Single-column comparison
             x = _num(extra_context.get(cond["col"]))
             if x is None:
                 return False
             y = float(cond["value"])
             return {
-                ">":  x >  y, ">=": x >= y,
-                "<":  x <  y, "<=": x <= y,
+                ">": x > y, ">=": x >= y,
+                "<": x < y, "<=": x <= y,
                 "==": x == y, "!=": x != y,
             }.get(op, False)
 
@@ -188,197 +504,134 @@ class MappingTransformer:
 
         return params.get("default")
 
-
     def _apply_cast_transform(self, value, params):
-        target_type = params.get('type', 'str')
-        # Treat common "not reported" tokens as null regardless of target type.
-        null_tokens = {'NR', 'NF', 'ND', '-', 'NA', 'N/A', 'NONE', 'NULL', 'NAN'}
+        target_type = params.get("type", "str")
+        null_tokens = {"NR", "NF", "ND", "-", "NA", "N/A", "NONE", "NULL", "NAN"}
         if isinstance(value, str) and value.strip().upper() in null_tokens:
             return None
         try:
-            if target_type == 'int':
+            if target_type == "int":
                 return int(float(value))
-            elif target_type == 'float':
+            if target_type == "float":
                 return float(value)
-            elif target_type == 'str':
+            if target_type == "str":
                 return str(value)
-            else:
-                return value
+            return value
         except (ValueError, TypeError):
-            logger.warning(f"Cast to {target_type} failed for value '{value}'")
+            logger.warning("Cast to %s failed for value %r", target_type, value)
             return None
-        
-    
-    def _apply_split_transform(
-        self, 
-        value: Any, 
-        params: Optional[Union[str, dict]]) -> Any:
-        delimiter = params.get('delimiter', ',')
-        index = params.get('index', 0)
+
+    def _apply_split_transform(self, value: Any,
+                               params: Optional[Union[str, dict]]) -> Any:
+        delimiter = params.get("delimiter", ",")
+        index = int(params.get("index", 0))
         parts = str(value).split(delimiter)
-        if index < len(parts):
+        if -len(parts) <= index < len(parts):
             return parts[index].strip()
-        logger.warning(f"Split index {index} out of range for value '{value}'")
+        logger.warning("Split index %s out of range for value %r", index, value)
         return None
-    
 
-    def _apply_unit_convert_transform(
-        self,
-        value: Any,
-        params: Optional[Union[str, dict]],
-    ) -> Any:
+    def _apply_unit_convert_transform(self, value: Any,
+                                      params: Optional[Union[str, dict]]) -> Any:
+        """Affine unit conversion.
+
+        ``out = value / factor + offset`` when ``divide``, else
+        ``out = value * factor + offset``.
+
+        Params: ``factor`` (1.0), ``offset`` (0.0), ``divide`` (False),
+        ``default`` (None), ``clamp_min``, ``clamp_max``, ``round_to``,
+        ``treat_as_null``.
+
+        Also: closes the "divide by zero" hole (logs and returns ``default``
+        instead of raising ``ZeroDivisionError``) and treats a NaN result as
+        unparseable rather than propagating it.
         """
-        Affine unit conversion: out = (value / factor) + offset   (divide=True)
-                                out = (value * factor) + offset   (divide=False)
-
-        Params
-        ------
-        factor : float
-            Multiplicative scale. Default 1.0.
-        offset : float
-            Additive offset applied after the scale. Default 0.0.
-        divide : bool
-            When True, divide by `factor` instead of multiplying. Useful for
-            reciprocal-style conversions where expressing the scale as a
-            multiplier would be awkward (e.g. 1 / 0.01). Default False.
-        default : Any
-            Value returned when the input cannot be parsed. If omitted, the
-            function returns None, which the caller's default-value logic
-            then handles. Default None.
-        clamp_min, clamp_max : float | None
-            Optional bounds applied after conversion. Typical use: clamp a
-            proportion into [0, 1] after multiplying a percentage by 0.01.
-        round_to : int | None
-            Optional number of decimal places to round to. Useful for
-            converting to integer-valued units (e.g. minutes).
-        treat_as_null : list[str]
-            Additional strings (beyond the defaults) to treat as null.
-            Case-insensitive.
-
-        Returns
-        -------
-        float | default
-            The converted value, or `default` if parsing failed.
-        """
-        if not params:
-            params = {}
-
-        factor    = float(params.get("factor", 1.0))
-        offset    = float(params.get("offset", 0.0))
-        divide    = bool(params.get("divide", False))
-        default   = params.get("default")            # None is a valid value here
+        params = params or {}
+        factor = float(params.get("factor", 1.0))
+        offset = float(params.get("offset", 0.0))
+        divide = bool(params.get("divide", False))
+        default = params.get("default")
         clamp_min = params.get("clamp_min")
         clamp_max = params.get("clamp_max")
-        round_to  = params.get("round_to")
+        round_to = params.get("round_to")
+        fraction = bool(params.get("fraction", False))
 
-        null_tokens = {"", "NA", "N/A", "NONE", "NULL", "NAN"}
+        null_tokens = {"", "NA", "N/A", "NONE", "NULL", "NAN", "<NA>", "NAT"}
         extra_nulls = params.get("treat_as_null") or []
         if isinstance(extra_nulls, str):
             extra_nulls = [extra_nulls]
         null_tokens.update(str(x).strip().upper() for x in extra_nulls)
 
-        # ---- Guard the divide case ----------------------------------------
-        if divide and factor == 0:
-            logger.warning(
-                "unit_convert: divide=True with factor=0 is undefined; "
-                "returning default"
-            )
+        if value is None or (isinstance(value, float) and pd.isna(value)):
             return default
-
-        # ---- Null / sentinel handling -------------------------------------
-        if value is None:
-            return default
-
-        if isinstance(value, float) and pd.isna(value):
-            return default
-
         if isinstance(value, str):
-            s = value.strip()
-            if not s or s.upper() in null_tokens:
+            text = value.strip().replace(",", "")
+            if not text or text.upper() in null_tokens:
                 return default
-            value = s  # keep the trimmed string for float() below
+            try:
+                number = float(text)
+            except (TypeError, ValueError):
+                logger.warning("unit_convert: could not parse %r", value)
+                return default
+        else:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                logger.warning("unit_convert: could not parse %r", value)
+                return default
 
-        # ---- Numeric coercion ---------------------------------------------
-        try:
-            v = float(value)
-        except (ValueError, TypeError):
-            logger.warning(f"unit_convert: could not parse {value!r}")
+        if pd.isna(number):
             return default
 
-        if pd.isna(v):
-            return default
+        # A percentage value with a `%` sign is the commonest reason a source
+        # column is a string. Strip it here rather than at every mapping.
+        if isinstance(value, str) and value.strip().endswith("%") and fraction:
+            number = number / 100.0
 
-        # ---- Apply the affine transform -----------------------------------
-        v = (v / factor) if divide else (v * factor)
-        v = v + offset
+        if divide:
+            if factor == 0:
+                logger.warning(
+                    "unit_convert: divide by zero (factor=%r); returning default",
+                    factor,
+                )
+                return default
+            number = number / factor
+        else:
+            number = number * factor
+        number += offset
 
-        # ---- Optional bounds ----------------------------------------------
         if clamp_min is not None:
-            v = max(v, float(clamp_min))
+            number = max(number, float(clamp_min))
         if clamp_max is not None:
-            v = min(v, float(clamp_max))
-
-        # ---- Optional rounding --------------------------------------------
+            number = min(number, float(clamp_max))
         if round_to is not None:
-            v = round(v, int(round_to))
+            number = round(number, int(round_to))
+        return number
 
-        return v
+    def _apply_coalesce_transform(self, value: Any,
+                                  params: Optional[Union[str, dict]],
+                                  extra_context: Optional[dict] = None) -> Any:
+        """Return the first non-null value among ``params['columns']``.
 
+        Useful when a source stores one logical quantity in two
+        mutually-exclusive columns — IRMapper's ``Concentration (%)`` (WHO tube)
+        and ``Concentration (µg)`` (CDC bottle).
 
-    def _apply_coalesce_transform(
-        self,
-        value: Any,
-        params: Optional[Union[str, dict]],
-        extra_context: Optional[dict] = None,
-    ) -> Any:
+        Zero IS a usable value; only ``None``, NaN and the null tokens are not.
         """
-        Return the first non-null value among a list of source columns.
-
-        Useful when a source stores the same logical quantity in two
-        mutually-exclusive columns — e.g. IRMapper files 4 and 5, where the
-        concentration appears in either `Concentration (%)` (WHO tube) or
-        `Concentration (µg)` (CDC bottle), never both in the same row.
-
-        Params
-        ------
-        columns : list[str]
-            Column names to try, in priority order. The first column with a
-            usable value wins.
-        default : Any
-            Value returned when every column is empty or unusable.
-            Default None.
-        treat_as_null : list[str]
-            Extra strings to treat as null (case-insensitive, whitespace
-            trimmed). The defaults are already recognised:
-            "", "NA", "N/A", "NONE", "NULL", "NAN", "NR".
-
-        Returns
-        -------
-        Any
-            The first usable value, or `default`.
-
-        Notes
-        -----
-        A value is "usable" if it is not None, not NaN, and — for strings —
-        does not reduce to a recognised null token. Numeric zero IS usable;
-        the transform deliberately does not treat 0 as missing.
-        """
-        if not params:
-            params = {}
-
-        cols    = params.get("columns", [])
+        params = params or {}
+        cols = params.get("columns", [])
         default = params.get("default")
 
         if not cols or not isinstance(cols, list):
             logger.warning(
-                f"coalesce: 'columns' must be a non-empty list, got {cols!r}"
+                "coalesce: 'columns' must be a non-empty list, got %r", cols
             )
             return default
-
         if not extra_context:
             return default
 
-        null_tokens = {"", "NA", "N/A", "NONE", "NULL", "NAN", "NR"}
+        null_tokens = {"", "NA", "N/A", "NONE", "NULL", "NAN", "NR", "<NA>", "NAT"}
         extra_nulls = params.get("treat_as_null") or []
         if isinstance(extra_nulls, str):
             extra_nulls = [extra_nulls]
@@ -392,76 +645,40 @@ class MappingTransformer:
                 continue
             if isinstance(v, float) and pd.isna(v):
                 continue
+            if type(v).__name__ in ("NAType", "NaTType"):
+                continue
             if isinstance(v, str) and v.strip().upper() in null_tokens:
                 continue
             return v
 
-        return default    
-        
-    
-    def _apply_format_date_transform(
-        self,
-        value: Any,
-        params: Optional[Union[str, dict]],
-        extra_context: Optional[dict] = None,
-    ) -> Any:
+        return default
+
+    def _apply_format_date_transform(self, value: Any,
+                                     params: Optional[Union[str, dict]],
+                                     extra_context: Optional[dict] = None) -> Any:
+        """Build a ``YYYY-MM-DD`` date_id from one to three source columns.
+
+        ``dim_time.date_id`` is a full-date primary key, so every fact row needs
+        a complete date. A source that knows only the year, or year + month, is
+        accommodated: the missing components come from ``month_default`` /
+        ``day_default``, and an impossible date is clamped to the last valid day
+        of its month (Feb 30 → Feb 28/29) unless ``clamp_invalid_day`` is False.
         """
-        Build a YYYY-MM-DD date_id string from one to three source columns.
-
-        Because `dim_time.date_id` is a full-date primary key, every fact row
-        must carry a complete YYYY-MM-DD string. Sources that only know the
-        year (or year + month) are still accommodated: the missing components
-        are filled from configurable defaults, and whatever precision was
-        available is preserved in the returned date.
-
-        Params
-        ------
-        columns : list[str]
-            One to three column names, ordered [year, month, day]. Only the
-            first entry (year) is required. Missing trailing entries trigger
-            the defaults below.
-        default : str | None
-            Fallback date_id string, returned when the year is missing or
-            out of range. Typically "1970-01-01" or "1900-01-01".
-        month_default : int
-            Month to use when the month column is absent or unparseable.
-            Default 1 (January).
-        day_default : int
-            Day to use when the day column is absent or unparseable.
-            Default 1.
-        min_year, max_year : int
-            Bounds on the accepted year. Values outside the range fall back
-            to `default`. Defaults 1800 and 2200.
-        clamp_invalid_day : bool
-            When True (the default), a day that is out of range for the
-            given month is clamped to the last valid day of that month
-            (e.g. Feb 30 -> Feb 28/29). When False, the row falls back to
-            `default` instead.
-
-        Returns
-        -------
-        str | None
-            A YYYY-MM-DD date_id string, or `default` if the year could not
-            be resolved.
-        """
-        if not params:
-            params = {}
-
+        params = params or {}
         cols = params.get("columns", [])
         if not isinstance(cols, list) or not (1 <= len(cols) <= 3):
             logger.warning(
-                f"format_date: 'columns' must be a list of 1-3 names, got {cols!r}"
+                "format_date: 'columns' must be a list of 1-3 names, got %r", cols
             )
             return params.get("default")
 
-        default          = params.get("default")
-        month_default    = int(params.get("month_default", 1))
-        day_default      = int(params.get("day_default", 1))
-        min_year         = int(params.get("min_year", 1800))
-        max_year         = int(params.get("max_year", 2200))
-        clamp_invalid    = bool(params.get("clamp_invalid_day", True))
+        default = params.get("default")
+        month_default = int(params.get("month_default", 1))
+        day_default = int(params.get("day_default", 1))
+        min_year = int(params.get("min_year", 1800))
+        max_year = int(params.get("max_year", 2200))
+        clamp_invalid = bool(params.get("clamp_invalid_day", True))
 
-        # ---- Internal: coerce a raw cell to a positive integer, or None ----
         def _as_int(raw):
             if raw is None:
                 return None
@@ -469,7 +686,7 @@ class MappingTransformer:
                 return None
             if isinstance(raw, str):
                 s = raw.strip()
-                if not s or s.upper() in ("NA", "N/A", "NONE", "NULL", "NAN"):
+                if not s or s.upper() in ("NA", "N/A", "NONE", "NULL", "NAN", "<NA>"):
                     return None
                 try:
                     return int(float(s))
@@ -480,325 +697,464 @@ class MappingTransformer:
             except (ValueError, TypeError):
                 return None
 
-        # ---- Year (mandatory) ---------------------------------------------
-        raw_year = extra_context.get(cols[0]) if extra_context else None
-        year = _as_int(raw_year)
+        year = _as_int(extra_context.get(cols[0])) if extra_context else None
         if year is None or not (min_year <= year <= max_year):
-            logger.debug(
-                f"format_date: unusable year {raw_year!r}; using default {default!r}"
-            )
+            logger.debug("format_date: unusable year for %r; using %r",
+                         extra_context, default)
             return default
 
-        # ---- Month (optional) ---------------------------------------------
         month = month_default
-        if len(cols) >= 2:
-            raw_month = extra_context.get(cols[1]) if extra_context else None
-            m = _as_int(raw_month)
+        if len(cols) >= 2 and extra_context:
+            m = _as_int(extra_context.get(cols[1]))
             if m is not None and 1 <= m <= 12:
                 month = m
-            elif m is not None:
-                logger.debug(
-                    f"format_date: month {m} out of range; using {month_default}"
-                )
 
-        # ---- Day (optional) -----------------------------------------------
         day = day_default
-        if len(cols) >= 3:
-            raw_day = extra_context.get(cols[2]) if extra_context else None
-            d = _as_int(raw_day)
+        if len(cols) >= 3 and extra_context:
+            d = _as_int(extra_context.get(cols[2]))
             if d is not None and 1 <= d <= 31:
                 day = d
-            elif d is not None:
-                logger.debug(
-                    f"format_date: day {d} out of range; using {day_default}"
-                )
 
-        # ---- Assemble and validate ----------------------------------------
-        # datetime() raises ValueError on impossible dates (Feb 30, Apr 31, ...).
         try:
             return datetime(year, month, day).strftime("%Y-%m-%d")
         except ValueError:
             if not clamp_invalid:
-                logger.debug(
-                    f"format_date: invalid date {year}-{month:02d}-{day:02d}; "
-                    f"using default {default!r}"
-                )
                 return default
-            # Clamp the day to the last valid day of the month.
             last_day = calendar.monthrange(year, month)[1]
-            clamped = datetime(year, month, last_day)
-            logger.debug(
-                f"format_date: {year}-{month:02d}-{day:02d} invalid; "
-                f"clamped to {clamped.strftime('%Y-%m-%d')}"
-            )
-            return clamped.strftime("%Y-%m-%d")
+            return datetime(year, month, last_day).strftime("%Y-%m-%d")
 
+    def _apply_transform(self, value: Any, transform: str,
+                         params: Optional[Union[str, dict]],
+                         extra_context: Optional[dict] = None,
+                         target_field: Optional[str] = None) -> Any:
+        """Apply one transformation to one value.
 
-    def _apply_transform(
-        self,
-        value: Any,
-        transform: str,
-        params: Optional[Union[str, dict]],
-        extra_context: Optional[dict] = None) -> Any:
+        Dispatches on ``transform``. ``target_field`` is required by ``map`` (to
+        decide whether a literal table is authoritative) and ``resolve`` (to know
+        which field to resolve); every other transform ignores it.
         """
-        Apply a single transformation to a value.
-
-        Args:
-            value: The input value (may be None or NaN).
-            transform: Transformation type ('none', 'map', 'date_parse', 'cast', 'split', 'unit_convert', 'format_date').
-            params: Optional parameters (dict or, for cast, a string type name).
-            extra_context: Additional context for lookups (e.g., other columns from the row)
-        Returns:
-            Transformed value, or None if transformation fails.
-        """
-        # Normalise params: if a string is given for cast, treat as {'type': params}
         if isinstance(params, str):
-            if params.strip() == '':
+            if not params.strip():
                 params = {}
-            elif transform == 'cast':
-                params = {'type': params}
+            elif transform == "cast":
+                params = {"type": params}
             else:
                 params = {}
         elif params is None:
             params = {}
-        # For transforms that don't require a raw value, skip the None check.
-        if transform not in ('format_date', 'map', 'concat', 'coalesce', 'derive_category'):
-            if pd.isna(value) or value is None:
+
+        if transform not in (
+            "format_date", "map", "concat", "coalesce", "derive_category"
+        ):
+            if value is None:
                 return None
-        if transform == 'none':
+            if isinstance(value, float) and pd.isna(value):
+                return None
+
+        if transform == "none":
             return value
-        elif transform == 'map':
-            return self._apply_map_transform(value, params, extra_context)
-        elif transform == 'date_parse':
+        if transform == "map":
+            return self._apply_map_transform(
+                value, params, extra_context, target_field
+            )
+        if transform == "resolve":
+            return self._apply_resolve_transform(value, target_field, params)
+        if transform == "date_parse":
             return self._apply_date_parse_transform(value, params)
-        elif transform == 'cast':
+        if transform == "cast":
             return self._apply_cast_transform(value, params)
-        elif transform == 'split':
+        if transform == "split":
             return self._apply_split_transform(value, params)
-        elif transform == 'unit_convert':
+        if transform == "unit_convert":
             return self._apply_unit_convert_transform(value, params)
-        elif transform == 'format_date':
+        if transform == "format_date":
             return self._apply_format_date_transform(value, params, extra_context)
-        elif transform == 'coalesce':
+        if transform == "coalesce":
             return self._apply_coalesce_transform(value, params, extra_context)
-        elif transform == 'derive_category':
-            return self._apply_derive_category_transform(value, params, extra_context)
-        else:
-            logger.warning(f"Unknown transform type: '{transform}'")
-            return value
-        
-    def _get_model_for_table(self, table_name: str):
-        """Get the SQLAlchemy model class for a given table name."""
-        # Map table names to model classes
-        model_map = {
-            'dim_vocabulary': models.DimVocabulary,
-            'dim_concept': models.DimConcept,
-            'dim_location': models.DimLocation,
-            'dim_time': models.DimTime,
-            'dim_disease': models.DimDisease,
-            'dim_vector': models.DimVector,
-            'dim_insecticide': models.DimInsecticide,
-            'dim_identification_method': models.DimIdentificationMethod,
-            'dim_resistance_test_type': models.DimResistanceTestType,
-            'dim_socioeconomic_indicator': models.DimSocioeconomicIndicator,
-            'dim_source': models.DimSource,
-            'fact_concept_map': models.FactConceptMap,
-            'fact_vector_observation': models.FactVectorObservation,
-            'fact_disease_case': models.FactDiseaseCase,
-            'fact_insecticide_resistance': models.FactInsecticideResistance,
-            'fact_bionomics': models.FactBionomics,
-            'fact_intervention': models.FactIntervention,
-            'fact_socioeconomic_condition': models.FactSocioeconomicCondition,
-            'fact_health_facility': models.FactHealthFacility,
-            'fact_disease_burden': models.FactDiseaseBurden,
-            'fact_environment': models.FactEnvironment,
-        }
-        return model_map.get(table_name)
-    
-    def _build_lookup_value(self, original_value: Any, params: dict, extra_context: Optional[dict]) -> Any:
+        if transform == "derive_category":
+            return self._apply_derive_category_transform(
+                value, params, extra_context
+            )
+
+        logger.warning("Unknown transform type: %r", transform)
+        return value
+
+    # -------------------------------------------------------------------------
+    # Model / key discovery
+    # -------------------------------------------------------------------------
+
+    def _model_for_table(self, table_name: str):
+        """The model class for ``table_name``, derived rather than listed.
+
+        Review C13: ``_get_model_for_table`` was a literal dict duplicating
+        ``DBLoader._build_model_map``. This scans ``models`` instead, which is
+        what the loader already does, so a new model needs no edit here.
         """
-        Build the lookup value using the source column value and optionally other columns.
-        
-        Args:
-            original_value: The value from the source column
-            params: Transform parameters (may contain 'columns' for composite lookups)
-            extra_context: Additional row data for composite lookups
-        
-        Returns:
-            The value to use for the lookup
+        for attribute in sorted(vars(models)):
+            candidate = getattr(models, attribute)
+            if getattr(candidate, "__tablename__", None) == table_name:
+                return candidate
+        return None
+
+    def _natural_key(self, table_name: str) -> Optional[str]:
+        """The column a dimension row is identified by.
+
+        Read from ``DBLoader.NATURAL_KEY_CONFIG``, which is already the single
+        declaration of every table's natural key — it has to match a unique
+        constraint, or the upsert would not bite. Imported lazily so this module
+        does not depend on the loader at import time.
         """
-        # Check if we need to combine multiple columns for uniqueness
-        columns = params.get('columns')
+        try:
+            from etl.loaders.db_loader import NATURAL_KEY_CONFIG
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("NATURAL_KEY_CONFIG unavailable: %s", exc)
+            return None
+
+        config = NATURAL_KEY_CONFIG.get(table_name) or {}
+        columns = config.get("columns") or []
+        return columns[0] if columns else None
+
+    def _index_for(self, table_name: str,
+                   field_name: str) -> Optional["DimensionKeyIndex"]:
+        """A ``DimensionKeyIndex`` for ``table_name`` matched on ``field_name``.
+
+        ``field_name`` is the ref's own column and becomes the index's *alias*,
+        which is what reproduces the old single ``WHERE field == value`` lookup
+        while adding one key function and one query instead of one query per
+        value.
+
+        ``pk_field`` is set only when the primary key is an integer surrogate.
+        Where the natural key *is* the primary key (``dim_vector.vector_code``),
+        ``DimensionEntry.pk`` stays None and the caller falls back to
+        ``entry.code`` — which is the value a fact FK holds there anyway.
+
+        A failure to seed is cached as ``None`` so a bad ref logs once rather than
+        once per row, and ``lookup_raw`` then returns None for every value.
+        """
+        cache_key = (table_name, field_name)
+        if cache_key in self._index_cache:
+            return self._index_cache[cache_key]
+
+        from etl.transformers.dimension_index import DimensionKeyIndex
+
+        index: Optional[DimensionKeyIndex] = None
+        model = self._model_for_table(table_name)
+        natural_key = self._natural_key(table_name)
+
+        if model is None or not natural_key:
+            logger.warning(
+                "Cannot build a dimension index for %s.%s (model=%r, "
+                "natural_key=%r); refs into it will resolve to NULL.",
+                table_name, field_name, model, natural_key,
+            )
+            self._index_cache[cache_key] = None
+            return None
+
+        primary_key = list(model.__table__.primary_key.columns)
+        pk_field = None
+        if len(primary_key) == 1 and isinstance(primary_key[0].type, Integer):
+            pk_field = primary_key[0].name
+
+        columns = set(model.__table__.columns.keys())
+        try:
+            with SessionLocal() as session:
+                index = DimensionKeyIndex.from_session(
+                    session,
+                    table_name,
+                    code_field=natural_key,
+                    pk_field=pk_field,
+                    concept_code_field=None,
+                    concept_id_field=(
+                        "concept_id" if "concept_id" in columns else None
+                    ),
+                    standard_code_field=(
+                        "standard_code" if "standard_code" in columns else None
+                    ),
+                    concept_name_field=None,
+                    alias_field=field_name if field_name in columns else None,
+                    label=table_name,
+                )
+        except Exception as exc:  # noqa: BLE001 - a bad ref must not abort a source
+            logger.error(
+                "Could not seed a dimension index for %s on %r: %s: %s",
+                table_name, field_name, type(exc).__name__, exc,
+            )
+            index = None
+
+        self._index_cache[cache_key] = index
+        return index
+
+    def _governing_pack(self, target_field: Optional[str]):
+        """The pack that governs ``target_field``, or None.
+
+        Returns None on every uncertainty — no registry, a field outside the
+        catalog, a field no pack claims — because the only decision this feeds is
+        whether a config-declared literal table is authoritative, and the safe
+        default is "not governed".
+        """
+        if self.registry is None or not target_field:
+            return None
+        try:
+            return self.registry.select_pack(str(target_field))
+        except Exception as exc:  # noqa: BLE001 - FieldNotInCatalog included
+            logger.debug("no governing pack for %r: %s", target_field, exc)
+            return None
+
+    def _ensure_resolver(self) -> ConceptResolver:
+        """The per-transformer ``ConceptResolver``, created on first use.
+
+        One resolver per transformer means one in-memory vocabulary and one memo
+        table per transform pass, which is what makes a repeated raw value free
+        from the second row onwards. The session it holds is closed by
+        :meth:`close`.
+        """
+        if self._resolver is None:
+            if self._resolver_session is None:
+                self._resolver_session = SessionLocal()
+            self._resolver = ConceptResolver(self.registry, self._resolver_session)
+        return self._resolver
+
+    # -------------------------------------------------------------------------
+    # Row loop
+    # -------------------------------------------------------------------------
+
+    def _build_lookup_value(self, original_value: Any, params: dict,
+                            extra_context: Optional[dict]) -> Any:
+        """Build the lookup value from one column, or from several joined."""
+        columns = params.get("columns")
         if columns and extra_context:
-            # Combine multiple columns
             parts = []
             for col in columns:
                 if col in extra_context and pd.notna(extra_context[col]):
                     parts.append(str(extra_context[col]))
             if parts:
-                # Use separator or default to '/'
-                separator = params.get('separator', '/')
+                separator = params.get("separator", "/")
                 return separator.join(parts)
-        
-        # Single column lookup
         return original_value
-    
-    def _lookup_dimension_id(self, model_class, field_name: str, lookup_value: Any) -> Optional[int]:
+
+    def _legacy_lookup_dimension_id(self, model_class, field_name: str,
+                                    lookup_value: Any) -> Optional[int]:
+        """Deprecated. Per-value ``SELECT ... WHERE field == value`` lookup.
+
+        Renamed from ``_lookup_dimension_id``; warns on every call. It is the
+        fourth resolution mechanism the review counted (C12) — exact ``==``
+        only, no case folding, no vocabulary, one query per distinct value
+        against an unindexed column — and ``_apply_map_transform`` no longer
+        calls it. It survives only so an out-of-tree caller keeps working for
+        one release; nothing in this repository reaches it.
+
+        The cache is created lazily on the instance rather than assumed: a
+        previous revision removed ``self._dimension_cache`` from ``__init__``
+        while this method still read it, so the "deprecated but working" promise
+        was an ``AttributeError``.
         """
-        Look up the primary key ID from a dimension table.
-        
-        Args:
-            model_class: SQLAlchemy model class
-            field_name: The field to match (e.g., 'name', 'code')
-            lookup_value: The value to search for
-        
-        Returns:
-            The ID (primary key) of the matching record, or None if not found
-        """
-        if lookup_value is None or (isinstance(lookup_value, float) and pd.isna(lookup_value)):
+        warnings.warn(
+            "MappingTransformer._lookup_dimension_id is deprecated; use "
+            "_index_for() + DimensionKeyIndex.lookup_raw(), which keys values "
+            "consistently and returns the concept alongside the surrogate key.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        if lookup_value is None or (
+            isinstance(lookup_value, float) and pd.isna(lookup_value)
+        ):
             return None
-        # Check cache first
+
+        cache = self.__dict__.setdefault("_dimension_cache", {})
         cache_key = f"{model_class.__tablename__}_{field_name}_{lookup_value}"
-        if cache_key in self._dimension_cache:
-            return self._dimension_cache[cache_key]
+        if cache_key in cache:
+            return cache[cache_key]
+
         try:
             with SessionLocal() as session:
-                # Build query dynamically
-                query = session.query(model_class)
-                # Handle different field types (string vs numeric)
-                # if isinstance(lookup_value, str):
-                #     query = query.filter(getattr(model_class, field_name).ilike(lookup_value))
-                # else:
-                #     query = query.filter(getattr(model_class, field_name) == lookup_value)
-                query = query.filter(getattr(model_class, field_name) == lookup_value)
+                query = session.query(model_class).filter(
+                    getattr(model_class, field_name) == lookup_value
+                )
                 result = query.first()
                 if result:
-                    # Get the primary key
                     pk_column = model_class.__table__.primary_key.columns.values()[0]
                     pk_value = getattr(result, pk_column.name)
-                    self._dimension_cache[cache_key] = pk_value
-                    logger.info(f"Looked up for PK Column {pk_column} with {field_name} == {lookup_value} in model {model_class}, Result ID: {pk_value}")
+                    cache[cache_key] = pk_value
                     return pk_value
-                else:
-                    logger.warning(f"No match found for {model_class.__tablename__}.{field_name} = '{lookup_value}'")
-                    return None
-        except Exception as e:
-            logger.error(f"Error during dimension lookup: {e}")
+                logger.warning(
+                    "No match found for %s.%s = %r",
+                    model_class.__tablename__, field_name, lookup_value,
+                )
+                return None
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error during dimension lookup: %s", exc)
             return None
-        
 
     def _determine_raw_value(self, source_row, target_table, mapping) -> Any:
         value = None
 
-        # 1. Static value is the value itself; no source column needed.
-        if pd.notna(mapping.get('static_value')):
-            return mapping['static_value']
+        if pd.notna(mapping.get("static_value")):
+            return mapping["static_value"]
 
-        # 2. Empty source_column → defer to the transform.
-        src_col = mapping.get('source_column')
+        src_col = mapping.get("source_column")
         if src_col is None or (isinstance(src_col, float) and pd.isna(src_col)):
             return None
 
-        # 3. Otherwise read from the source row.
         if src_col not in source_row:
-            if mapping.get('required', False):
+            if mapping.get("required", False):
                 raise ValueError(
-                    f"Required source column '{src_col}' missing in data (table {target_table})"
+                    f"Required source column {src_col!r} missing in data "
+                    f"(table {target_table})"
                 )
-            value = mapping.get('default_value')
+            value = mapping.get("default_value")
         else:
             value = source_row[src_col]
-            if pd.notna(mapping.get('source_data_type')):
-                dtype = mapping['source_data_type']
+            if pd.notna(mapping.get("source_data_type")):
+                dtype = mapping["source_data_type"]
                 try:
-                    if dtype == 'int':
+                    if dtype == "int":
                         value = int(float(value)) if pd.notna(value) else None
-                    elif dtype == 'float':
+                    elif dtype == "float":
                         value = float(value) if pd.notna(value) else None
-                    elif dtype == 'str':
+                    elif dtype == "str":
                         value = str(value) if pd.notna(value) else None
                 except (ValueError, TypeError):
                     value = None
         return value
-    
 
-    def _apply_transformation(self, idx, raw_value, source_row, mapping, row_context):
-        value = raw_value
-        transform = mapping['transform']
+    def _apply_transformation(self, idx, raw_value, source_row, mapping,
+                              row_context) -> Any:
+        """Parse one mapping row's params and apply its transform."""
+        transform = mapping["transform"]
+        target_field = f"{mapping['target_table']}.{mapping['target_column']}"
         params = None
-        if pd.notna(mapping.get('transform_params')):
-            params_str = mapping['transform_params']
-            # Skip if the string is empty or only whitespace
-            if params_str and params_str.strip():
+
+        raw_params = mapping.get("transform_params")
+        if pd.notna(raw_params):
+            params_str = raw_params
+            if params_str and str(params_str).strip():
                 try:
                     params = json.loads(params_str)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Invalid JSON in transform_params: '{params_str}' - {e}")
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "Invalid JSON in transform_params: %r - %s", params_str, exc
+                    )
                     params = {}
             else:
                 params = {}
-        if transform == 'concat':
-            cols = params.get('columns', []) if params else []
-            sep = params.get('separator', ' ') if params else ' '
+
+        if transform == "concat":
+            cols = (params or {}).get("columns", [])
+            sep = (params or {}).get("separator", " ")
             parts = []
             for col in cols:
                 if col in row_context and pd.notna(row_context[col]):
                     parts.append(str(row_context[col]))
                 else:
-                    logger.warning(f"Concat: column '{col}' missing or null in row {idx}")
-            value = sep.join(parts) if parts else mapping.get('default_value')
-        else:
-            value = self._apply_transform(raw_value, transform, params, extra_context=row_context)
-        return value
+                    logger.warning(
+                        "Concat: column %r missing or null in row %s", col, idx
+                    )
+            return sep.join(parts) if parts else mapping.get("default_value")
+
+        return self._apply_transform(
+            raw_value, transform, params,
+            extra_context=row_context,
+            target_field=target_field,
+        )
 
     def _apply_default_transform(self, value, mapping, target_table):
         if value is None or (isinstance(value, float) and pd.isna(value)):
-            if mapping.get('required', False):
+            if mapping.get("required", False):
                 raise ValueError(
-                    f"Required field '{mapping['target_column']}' in table '{target_table}' has null value"
+                    f"Required field '{mapping['target_column']}' in table "
+                    f"'{target_table}' has null value"
                 )
-            value = mapping.get('default_value')
+            value = mapping.get("default_value")
         return value
 
-    def _build_table_df(self, source_df: pd.DataFrame, target_table: str) -> pd.DataFrame:
+    def _build_table_df(self, source_df: pd.DataFrame,
+                        target_table: str) -> pd.DataFrame:
         rows = []
         mappings = self.table_mappings[target_table]
-        records = source_df.to_dict(orient='records')      # once, not per row
+        records = source_df.to_dict(orient="records")
 
         for idx, row_context in enumerate(records):
             record = {}
             for mapping in mappings:
-                value = self._determine_raw_value(row_context, target_table, mapping)
-                value = self._apply_transformation(idx, value, row_context, mapping, row_context)
+                value = self._determine_raw_value(
+                    row_context, target_table, mapping
+                )
+                value = self._apply_transformation(
+                    idx, value, row_context, mapping, row_context
+                )
                 value = self._apply_default_transform(value, mapping, target_table)
-                record[mapping['target_column']] = value
+                record[mapping["target_column"]] = value
             rows.append(record)
         return pd.DataFrame(rows)
 
-
     def transform(self, source_df: pd.DataFrame,
-              target_filter: Optional[set] = None) -> Dict[str, pd.DataFrame]:
-        """
-        Transform source DataFrame into a dictionary of table -> DataFrame.
+                  target_filter: Optional[set] = None) -> Dict[str, pd.DataFrame]:
+        """Transform a source DataFrame into ``{table: DataFrame}``.
 
-        Args:
-            source_df:      Source DataFrame.
-            target_filter:  If provided, only build DataFrames for these target
-                            tables. Used to keep dimension-only and fact-only
-                            transform passes separated.
+        Parameters
+        ----------
+        source_df : pandas.DataFrame
+        target_filter : set of str, optional
+            If provided, only build DataFrames for these target tables. Used to
+            keep the dimension-only and fact-only passes separated, which matters
+            because the fact pass resolves FKs against dimensions this run has
+            just loaded.
         """
         if len(source_df) > self.large_df_threshold:
             logger.warning(
-                f"Source DataFrame has {len(source_df):,} rows (> {self.large_df_threshold:,}). "
-                "Row-wise transformation may be slow. Consider chunking the source data."
+                "Source DataFrame has %s row(s) (> %s). Row-wise transformation "
+                "may be slow. Consider chunking the source data.",
+                f"{len(source_df):,}", f"{self.large_df_threshold:,}",
             )
-        result = {}
+
+        result: Dict[str, pd.DataFrame] = {}
         for target_table in self.table_mappings.keys():
             if target_filter is not None and target_table not in target_filter:
                 continue
             df = self._build_table_df(source_df, target_table)
-            df = df.dropna(how='all')
+            df = df.dropna(how="all")
             if not df.empty:
                 result[target_table] = df
-                logger.info(f"Built {len(df)} rows for table '{target_table}'")
+                logger.info(
+                    "Built %d rows for table '%s'", len(df), target_table
+                )
         return result
+
+    # -------------------------------------------------------------------------
+    # Lifecycle
+    # -------------------------------------------------------------------------
+
+    def pending_resolutions(self) -> List[Any]:
+        """Resolutions produced by ``resolve`` transforms, sorted, de-duplicated.
+
+        Sorted by the source triple so two runs emit the same order. The concept
+        pass — ``DBLoader.load_resolutions`` — is what persists these.
+        """
+        return [
+            self._pending_resolutions[key]
+            for key in sorted(self._pending_resolutions)
+        ]
+
+    def close(self) -> None:
+        """Release the resolver's session. Safe to call twice.
+
+        ``_pending_resolutions`` deliberately survives: ``close`` is a resource
+        release, and a caller that drains the buffer afterwards must still find
+        its evidence. Clearing it here would be the batch-5 §4.1 defect again.
+        """
+        if self._resolver_session is not None:
+            try:
+                self._resolver_session.close()
+            finally:
+                self._resolver_session = None
+                self._resolver = None
+
+    def __enter__(self) -> "MappingTransformer":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+__all__ = ["MappingTransformer"]

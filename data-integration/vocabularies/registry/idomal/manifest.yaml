@@ -1,0 +1,28 @@
+# IDOMAL malaria ontology, release 2024-05.
+# Seeded from the pre-registry constants: vocabulary_id 'IDOMAL', domain
+# 'disease', threshold 0.85.
+
+pack_id: idomal
+version: "2024-05"
+domain: disease
+
+# rank_key() == (100, -3, "idomal").
+precedence: 100
+specificity: 3
+
+normalizer_chain:
+  - generic
+
+fuzzy_threshold: 0.85
+fuzzy_margin: 0.05
+case_sensitive: false
+
+field_scope:
+  - dim_disease.disease_name
+
+applies_when: {}
+
+# Curated ontology: a single unambiguous match may be applied without a human.
+canonical_rule: null
+
+released_with: "1.0.0"

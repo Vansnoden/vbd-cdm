@@ -1,0 +1,67 @@
+version: "1.0"
+
+vocabularies:
+  - id: GADM
+    name: "GADM Administrative Boundaries"
+    source_url: "https://gadm.org"
+    domain: location
+    concept_classes: [country, admin1, admin2, admin3]
+    priority: 100                        # higher wins when multiple vocabularies cover a domain
+    format: gpkg
+    file: gadm41.gpkg
+    loader: gadm_gpkg
+    loader_config:
+      countries: ["KEN", "GHA", "NGA", "TZA", "UGA"]
+      levels: [0, 1, 2]
+      name_field: "NAME"
+      code_field: "GID"
+
+  - id: NCBI
+    name: "NCBI Taxonomy (Vectors)"
+    source_url: "https://www.ncbi.nlm.nih.gov/taxonomy"
+    domain: vector
+    concept_classes: [species, subspecies, genus]
+    priority: 90
+    format: csv
+    file: ncbi_vectors.csv
+    loader: csv_concept
+    loader_config:
+      code_col: tax_id
+      name_col: scientific_name
+      class_col: rank
+      parent_col: parent_tax_id
+      synonyms_col: synonyms
+
+  - id: IDOMAL
+    name: "IDOMAL - Malaria Disease Ontology"
+    source_url: "http://purl.obolibrary.org/obo/idomal.owl"
+    domain: disease
+    concept_classes: [disease, pathogen]
+    priority: 90
+    format: csv
+    file: idomal_diseases.csv
+    loader: csv_concept
+    loader_config:
+      code_col: id
+      name_col: label
+      synonyms_col: synonyms
+
+  - id: DIAGNOSTIC_METHODS
+    name: "Diagnostic Methods"
+    domain: diagnostic_method
+    concept_classes: [method]
+    priority: 50
+    format: csv
+    file: diagnostic_methods.csv
+    loader: csv_concept
+    loader_config: {code_col: code, name_col: name, synonyms_col: synonyms}
+
+  - id: COLLECTION_METHODS
+    name: "Mosquito Collection Methods"
+    domain: collection_method
+    concept_classes: [method]
+    priority: 50
+    format: csv
+    file: collection_methods.csv
+    loader: csv_concept
+    loader_config: {code_col: code, name_col: name, synonyms_col: synonyms}

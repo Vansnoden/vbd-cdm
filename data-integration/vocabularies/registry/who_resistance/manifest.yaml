@@ -1,0 +1,45 @@
+# path: vocabularies/registry/who-resistance/manifest.yaml
+# status: NEW FILE
+#
+# WHO insecticide-resistance classification cut-offs, release 2024-01.
+#
+# This is a *parameter* pack, not a concept pack: it declares no `domain`, no
+# `field_scope` and no matcher, because it resolves nothing. It exists so that
+# the two numbers that classify a bioassay live in versioned data rather than
+# inside utilities/consolidation.py::_compute_resistance_status (review C3).
+#
+# The vocabulary registry recognises a manifest as a parameter pack when it has
+# `pack_id` and `version` but neither `domain` nor `field_scope`, and stores
+# every remaining top-level key under `ParameterPack.parameters`. That is why
+# `resistance_thresholds` is a top-level key here rather than nested under a
+# `parameters:` block — the block would be one indirection with no reader.
+#
+# Who reads it
+# ------------
+# `utilities.consolidation._resistance_thresholds()` looks for the unique pack
+# whose parameters declare `resistance_thresholds`, and takes `susceptible` and
+# `suspected` from it. It does not name this pack: the declaration is the
+# lookup key, so a second classification scheme can be added by shipping a
+# second manifest with a different key, and the code does not change.
+#
+# What the numbers mean (WHO 2016, "Monitoring and managing insecticide
+# resistance in Aedes mosquito populations" / the anopheline equivalent)
+# ------------------------------------------------------------------------
+#   mortality >= susceptible   -> 'Susceptible'           (no resistance)
+#   mortality >= suspected     -> 'Suspected Resistance'  (verify)
+#   otherwise                  -> 'Resistant'
+#
+# Expressed as percentages, matching fact_insecticide_resistance.mortality,
+# which schemas.py validates as 0-100.
+#
+# The ordering `suspected <= susceptible` is validated at load time by
+# `_resistance_thresholds`, not here: a manifest is data, and the check belongs
+# where the values are used.
+
+pack_id: who-resistance
+version: "2024-01"
+released_with: "1.0.0"
+
+resistance_thresholds:
+  susceptible: 98
+  suspected: 90

@@ -1,0 +1,6 @@
+# path: tests/fixtures/calibration/ncbi.csv
+# status: NEW FILE
+raw_value,expected_code,expected_method
+"Anopheles gambiae",NCBI:7159,exact
+"Gambiae Complex",NCBI:7159,normalized
+"Anopheles notarealspecies",,unresolved
