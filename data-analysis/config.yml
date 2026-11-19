@@ -17,7 +17,7 @@ vbd-cdm-analysis:
   # countries: ["ALL"]            # every country in dim_location
   # countries: ["Kenya"]          # ISO alpha-2, or full country name
   # countries: ["KE", "TZ", "UG"] # multiple
-  countries: ["Kenya"]
+  countries: ["KE"]
 
   # locations: ["ALL"]                  # every location inside the country filter
   # locations: ["Siaya County"]         # exact or substring match on dim_location.name
@@ -41,7 +41,7 @@ vbd-cdm-analysis:
 
   # species_filter: ["All"]                                  # every species
   # species_filter: ["Anopheles gambiae", "Anopheles funestus"]
-  species_filter: ["All"] #["Anopheles gambiae", "Anopheles funestus"]
+  species_filter: ["funestus group", "Anopheles gambiae"] #["Anopheles gambiae", "Anopheles funestus"]
 
   max_lag_months: 6
   output_dir: "outputs/analysis"
