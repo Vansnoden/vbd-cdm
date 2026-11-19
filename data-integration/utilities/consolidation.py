@@ -1,44 +1,28 @@
 # -*- coding: utf-8 -*-
-"""Post-ingestion consolidation phases.
+"""Post-ingestion consolidation.
 
-Order:
-    FK alignment -> A6 locations (identity merge, hierarchy, grid parents)
-    -> vocabulary load -> A8 reconcile -> A8b dimension values
-    -> A8c fact values -> A9 spatial concepts -> B5 merge -> facts cascade
-    -> orphan audit -> burden expand -> resistance -> duplicate scan
-    -> validation.
+Order: FK alignment -> A6 locations -> VOCAB load -> A8 reconcile -> A8b dim values
+-> A8c fact values -> A9 spatial concepts -> A9b coordinate-based naming -> B5 merge
+-> facts cascade -> orphan audit -> burden -> resistance -> dup scan -> validation.
 
-Two orders in that list are load-bearing and were wrong before:
-
-* the vocabulary CSVs are loaded **before** A8. ``dim_concept`` is written only
-  by ``VocabularyLoader.load_csv``; reconciliation filters it by the pack's
-  version-qualified ``vocabulary_id``. A pack recorded only in
-  ``dim_vocabulary`` resolves nothing, so every value came back ``unresolved``.
-* values are rewritten **after** A8 and **before** B5. A8 stamps
-  ``concept_id``; the rewrite is what gives two rows that resolved to one
-  concept the same label, and B5 then groups them on ``concept:<id>``.
-
-Every dimension-to-fact relationship is read from ``Base.metadata``, never from a
-literal (``_dimension_fact_map``). A hand-maintained map is one schema change
-behind the schema by construction: the version of this module that hard-coded
-five dimensions had no entry for ``dim_resistance_test_type``, so B5 deleted its
-merged rows while ``fact_insecticide_resistance`` still referenced them and the
-whole run died on a foreign-key violation.
-
-Nothing here redefines a geo or country helper: ``database.geoutils`` owns them.
-An earlier revision shadowed ``get_iso_country_code`` below the imports and kept
-the first-match substring bug that resolved 'guinea' to Equatorial Guinea.
+Load precedes A8 (dim_concept has one writer). A8b/A8c follow A8 (they need
+concept_id). A9b follows A9 (it needs the spatial concept and the loaded labels).
+Every dimension->fact link comes from Base.metadata, never a literal map.
+Geo helpers live in database.geoutils; nothing here redefines them.
 """
 
 from __future__ import annotations
 
 import calendar
+import difflib
 import logging
 import re
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set,
+                    Tuple)
 
 import numpy as np
 import pandas as pd
@@ -47,50 +31,44 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database.constants import COUNTRY_LOOKUP
-from database.geoutils import (
-    ISO_COUNTRY_CODES,
-    ISO_TO_COUNTRY_NAME,
-    get_country_from_coords,
-    get_country_name,
-    get_iso_country_code,
-    haversine_distance,
-)
-from database.models import (
-    DimDisease, DimIdentificationMethod, DimInsecticide, DimLocation,
-    DimResistanceTestType, DimSocioeconomicIndicator, DimSource, DimVector,
-    FactBionomics, FactDiseaseBurden, FactDiseaseCase, FactEnvironment,
-    FactHealthFacility, FactInsecticideResistance, FactIntervention,
-    FactSocioeconomicCondition, FactVectorObservation,
-)
+from database.geoutils import (ISO_COUNTRY_CODES, ISO_TO_COUNTRY_NAME,
+                               get_country_from_coords, get_country_name,
+                               get_iso_country_code, haversine_distance)
+from database.models import (DimDisease, DimIdentificationMethod, DimInsecticide,
+                             DimLocation, DimResistanceTestType,
+                             DimSocioeconomicIndicator, DimSource, DimVector,
+                             FactBionomics, FactDiseaseBurden, FactDiseaseCase,
+                             FactEnvironment, FactHealthFacility,
+                             FactInsecticideResistance, FactIntervention,
+                             FactSocioeconomicCondition, FactVectorObservation)
 from database.session import Base, SessionLocal, require_identifier
-from etl.transformers.concept_resolver import (
-    AUTO_ACCEPTED, METHOD_ALIAS, METHOD_AMBIGUOUS, METHOD_EXACT, METHOD_FUZZY,
-    METHOD_NORMALIZED, NEEDS_REVIEW, RESISTANCE_BANDS, UNRESOLVED,
-    ConceptResolver, Resolution,
-)
+from etl.transformers.concept_resolver import (AUTO_ACCEPTED, METHOD_ALIAS,
+                                               METHOD_AMBIGUOUS, METHOD_EXACT,
+                                               METHOD_FUZZY, METHOD_NORMALIZED,
+                                               NEEDS_REVIEW, RESISTANCE_BANDS,
+                                               UNRESOLVED, ConceptResolver,
+                                               Resolution)
 from utilities.vocabulary import normalizers as _normalizers
-from utilities.vocabulary.alignment import (
-    align_dimension_values,
-    align_fact_values,
-    alignment_report,
-    load_shipped_vocabularies,
-)
-from utilities.vocabulary.field_catalog import (
-    can_stamp,
-    dimension_fields,
-    iter_bindings,
-    resolve_field,
-)
+from utilities.vocabulary.alignment import (align_dimension_values,
+                                            align_fact_values,
+                                            alignment_report,
+                                            load_shipped_vocabularies)
+from utilities.vocabulary.field_catalog import (can_stamp, dimension_fields,
+                                                iter_bindings, resolve_field)
 from utilities.vocabulary.registry import VocabularyRegistry
 
 logger = logging.getLogger(__name__)
 
 MAX_IN_VARS = 900
 
-#: A grid cell's name is "<lon>/<lat>". That is what every raster mapping writes,
-#: and it is the only reliable way to recognise one when the location pack does
-#: not declare ``grid_level``.
+# "<lon>/<lat>" — how every raster/site mapping writes a cell name.
 _GRID_NAME_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$")
+_NUMERIC_TOKEN_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$")
+_NAME_SEPARATOR_RE = re.compile(r"[/\\|]")
+# GADM 3.6 "GID_2_KEN.3_1" and GADM 4.x "KEN.3_1" — a code, never a name.
+_GID_LIKE_RE = re.compile(r"^(?:GID_\d+_[A-Z]{3}|[A-Z]{3}\.\d+(?:\.\d+)*_\d+)$")
+_GID_COLUMN_RE = re.compile(r"^GID_(\d+)$", re.IGNORECASE)
+_NAME_COLUMN_RE = re.compile(r"^NAME_(\d+)$", re.IGNORECASE)
 
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
 
@@ -108,21 +86,17 @@ def _warn_once(marker: str, message: str, *args: Any) -> None:
 
 
 def _warn_legacy_alignment() -> None:
-    """Emitted once per process. ``_align_fact_foreign_keys`` repairs an orphan
-    with a LIKE substring match, records no score and writes no concept-map row,
-    so its repairs are unreviewable. Scheduled for removal."""
+    """LEGACY: LIKE substring repair, no score, no concept-map row."""
     if _LEGACY_ALIGNMENT_WARNED:
         return
     _LEGACY_ALIGNMENT_WARNED.add("align_fact_foreign_keys")
     logger.warning(
         "_align_fact_foreign_keys is LEGACY (review C12): substring match, no "
-        "score, no fact_concept_map row, no reviewable trace. Do not build on it."
-    )
+        "score, no fact_concept_map row, no reviewable trace.")
 
 
 def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
-    """Return ``registry``, or load the shipped packs once. A missing directory
-    is a warning and None; a malformed manifest raises."""
+    """Return the given registry, else load the shipped packs once."""
     if registry is not None:
         return registry
     key = str(DEFAULT_REGISTRY_PATH)
@@ -130,11 +104,9 @@ def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
     if cached is not None:
         return cached
     if not DEFAULT_REGISTRY_PATH.is_dir():
-        _warn_once(
-            "registry:missing",
-            "no vocabulary registry at %s and none supplied; vocabulary "
-            "standardisation is skipped for this run.", DEFAULT_REGISTRY_PATH,
-        )
+        _warn_once("registry:missing",
+                   "no vocabulary registry at %s and none supplied; vocabulary "
+                   "standardisation is skipped for this run.", DEFAULT_REGISTRY_PATH)
         return None
     loaded = VocabularyRegistry.load_from(DEFAULT_REGISTRY_PATH)
     _REGISTRY_CACHE[key] = loaded
@@ -142,6 +114,7 @@ def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
 
 
 def _model_for_table(table_name: str):
+    """The declarative model for a table name, or None."""
     from database import models as _models
     for attribute in sorted(vars(_models)):
         candidate = getattr(_models, attribute)
@@ -151,14 +124,8 @@ def _model_for_table(table_name: str):
 
 
 def _dimension_models() -> Tuple[Any, ...]:
-    """Every ``dim_*`` model that has a primary key, sorted by table name.
-
-    Used where a static list used to be. ``dim_concept`` and ``dim_vocabulary``
-    are included: nothing references them from a fact table, so the derived maps
-    for them are empty, which is the truthful answer.
-    """
+    """Every dim_* model with a primary key, sorted by table name."""
     from database import models as _models
-
     found: Dict[str, Any] = {}
     for attribute in sorted(vars(_models)):
         candidate = getattr(_models, attribute)
@@ -173,18 +140,10 @@ def _dimension_models() -> Tuple[Any, ...]:
 
 
 def _dimension_fact_map(model_class) -> Tuple[Tuple[str, str], ...]:
-    """``((fact_table, fk_column), ...)`` reading the schema's own foreign keys.
+    """((fact_table, fk_column), ...) from Base.metadata foreign keys.
 
-    This replaces a module-level literal that named five dimensions by hand and
-    therefore knew nothing about ``dim_resistance_test_type``,
-    ``dim_identification_method`` or ``dim_socioeconomic_indicator``. B5 merged
-    ``dim_resistance_test_type`` while ``fact_insecticide_resistance`` still
-    referenced the deleted codes, and the FK pragma aborted the run. Deriving the
-    map from ``Base.metadata`` cannot fall behind a schema change.
-
-    Only columns that point at a *primary key* of ``model_class`` are returned,
-    because those are the keys B5 rewrites. A fact column pointing at a
-    non-key column is not an FK this pass can follow.
+    Replaces a hand-written map that omitted dim_resistance_test_type, which let
+    B5 delete merged rows still referenced by fact_insecticide_resistance.
     """
     table_name = getattr(model_class, "__tablename__", None)
     if not table_name:
@@ -206,7 +165,7 @@ def _dimension_fact_map(model_class) -> Tuple[Tuple[str, str], ...]:
             for foreign_key in column.foreign_keys:
                 try:
                     target = foreign_key.column
-                except Exception:  # noqa: BLE001 - unresolvable target
+                except Exception:  # noqa: BLE001
                     continue
                 if target is None or target.table.name != str(table_name):
                     continue
@@ -220,31 +179,29 @@ def _dimension_fact_map(model_class) -> Tuple[Tuple[str, str], ...]:
 
 
 def _default_vocab_key(value: Any) -> str:
-    """Trim, collapse whitespace, lower-case, strip accents. The generic key.
-
-    Used whenever no vocabulary pack governs a field. It is deliberately weak: it
-    never folds synonyms, because that is a vocabulary's job and a guess here
-    would merge two concepts nobody declared equal.
-    """
+    """Trim/lower/deaccent key. Weak on purpose: never folds synonyms."""
     if value is None:
         return ""
     text_value = str(value).strip()
     if not text_value:
         return ""
-    decomposed = _normalizers.NORMALIZERS["generic"](text_value)
+    try:
+        decomposed = _normalizers.NORMALIZERS["generic"](text_value)
+    except Exception:  # noqa: BLE001
+        decomposed = text_value.lower()
     return re.sub(r"\s+", " ", decomposed).strip()
 
 
 def _pack_key_fn(pack: Any):
-    """``str -> str`` grouping key for a pack, degrading to the generic key."""
+    """str->str grouping key for a pack, degrading to the generic key."""
     chain = tuple(getattr(pack, "normalizer_chain", ()) or ())
     label = getattr(pack, "pack_id", "?")
     try:
         composed = _normalizers.compose(chain)
     except Exception as exc:  # noqa: BLE001
         _warn_once(f"compose:{label}",
-                   "pack %r: normalizer_chain %s could not be composed (%s: %s). "
-                   "Grouping falls back to the generic key.",
+                   "pack %r: normalizer_chain %s could not be composed (%s: %s); "
+                   "grouping falls back to the generic key.",
                    label, list(chain), type(exc).__name__, exc)
         return _default_vocab_key
 
@@ -253,16 +210,385 @@ def _pack_key_fn(pack: Any):
             return composed(value)
         except Exception as exc:  # noqa: BLE001
             _warn_once(f"normalise:{label}:{type(exc).__name__}",
-                       "pack %r: the normaliser raised %s: %s. Grouping falls "
+                       "pack %r: the normaliser raised %s: %s; grouping falls "
                        "back to the generic key.", label, type(exc).__name__, exc)
             return _default_vocab_key(value)
 
     return _guarded
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Name inspection and similarity
+# --------------------------------------------------------------------------
+
+def _looks_like_coordinate(value: Any) -> bool:
+    """True when the value is a bare number."""
+    text_value = str(value or "").strip()
+    return bool(text_value) and bool(_NUMERIC_TOKEN_RE.match(text_value))
+
+
+def _name_tokens(value: Any) -> List[str]:
+    """Segments of an identity string, blanks dropped."""
+    text_value = str(value or "").strip()
+    if not text_value:
+        return []
+    return [token.strip() for token in _NAME_SEPARATOR_RE.split(text_value)
+            if token.strip()]
+
+
+def _is_human_label(value: Any) -> bool:
+    """Plausible place name: has a letter, is not a number, is not a GID."""
+    text_value = str(value or "").strip()
+    if not text_value:
+        return False
+    if not any(character.isalpha() for character in text_value):
+        return False
+    if _NUMERIC_TOKEN_RE.match(text_value):
+        return False
+    if _GID_LIKE_RE.match(text_value.upper()):
+        return False
+    return True
+
+
+def _title_name(token: Any) -> str:
+    """Recase only uniformly-cased tokens (str.title() breaks "Côte d'Ivoire")."""
+    text_value = re.sub(r"\s+", " ", str(token or "").strip())
+    if not text_value:
+        return ""
+    if text_value.islower() or text_value.isupper():
+        return text_value.title()
+    return text_value
+
+
+def _looks_generated_name(name: Any, location_code: Any = None) -> bool:
+    """True when name is "<lon>/<lat>", equal to the code, or name/lat/lon."""
+    text_name = str(name or "").strip()
+    if not text_name:
+        return True
+    if _GRID_NAME_RE.match(text_name):
+        return True
+    text_code = str(location_code or "").strip()
+    if text_code and text_name == text_code:
+        return True
+    tokens = _name_tokens(text_name)
+    if len(tokens) >= 2 and any(_looks_like_coordinate(t) for t in tokens):
+        return True
+    return False
+
+
+def _similarity_key(value: Any) -> str:
+    """Lower-case, deaccented, punctuation-free, collapsed."""
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    try:
+        text_value = _normalizers.NORMALIZERS["generic"](text_value)
+    except Exception:  # noqa: BLE001
+        text_value = text_value.lower()
+    text_value = re.sub(r"[^0-9a-z]+", " ", text_value)
+    return re.sub(r"\s+", " ", text_value).strip()
+
+
+def _name_similarity(left: Any, right: Any) -> float:
+    """Agreement in [0,1]: max(equality, Jaccard, containment, difflib ratio).
+
+    Evaluation only — never used to choose which polygon names a point.
+    """
+    a, b = _similarity_key(left), _similarity_key(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+
+    tokens_a = {token for token in a.split() if token}
+    tokens_b = {token for token in b.split() if token}
+    containment = jaccard = 0.0
+    if tokens_a and tokens_b:
+        shared = tokens_a & tokens_b
+        jaccard = len(shared) / len(tokens_a | tokens_b)
+        if tokens_a <= tokens_b or tokens_b <= tokens_a:
+            smaller = min(len(tokens_a), len(tokens_b))
+            containment = len(shared) / smaller if smaller else 0.0
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    return max(ratio, jaccard, containment)
+
+
+def _identity_tokens(value: Any, country_tokens: Sequence[Any] = ()) -> List[str]:
+    """Human segments of an identity, the country segment dropped."""
+    tokens = _name_tokens(value)
+    if not tokens:
+        return []
+    drop = {str(token).strip().casefold() for token in country_tokens
+            if str(token).strip()}
+    words = [token for token in tokens if not _looks_like_coordinate(token)]
+    usable = [word for word in words if word.casefold() not in drop] or words
+    return [_title_name(word) for word in usable if _is_human_label(word)]
+
+
+def _best_identity_token(location_code: Any, name: Any,
+                         country_tokens: Sequence[Any] = ()) -> Optional[str]:
+    """Narrowest human segment either column carries (identities are broad->narrow)."""
+    for candidate in (location_code, name):
+        tokens = _identity_tokens(candidate, country_tokens)
+        if tokens:
+            return tokens[-1]
+    return None
+
+
+def _approx_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Equirectangular distance in km."""
+    try:
+        mean_lat = np.radians((float(lat1) + float(lat2)) / 2.0)
+        delta_lat = (float(lat1) - float(lat2)) * 111.32
+        delta_lon = (float(lon1) - float(lon2)) * 111.32 * np.cos(mean_lat)
+        return float(np.hypot(delta_lat, delta_lon))
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+# --------------------------------------------------------------------------
+# Boundary geometry
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _BoundaryUnit:
+    """One administrative polygon."""
+    level: int
+    gid: str
+    name: str
+    geometry: Any
+
+
+class _BoundaryIndex:
+    """Point-in-polygon over administrative layers; STRtree when available."""
+
+    def __init__(self, units: Sequence[_BoundaryUnit], label: str = "") -> None:
+        self.units = list(units)
+        self.label = label
+        self.levels = sorted({unit.level for unit in self.units})
+        self._tree = None
+        self._geometry_positions: Dict[int, int] = {}
+        self._bounds: List[Tuple[Tuple[float, float, float, float], int]] = []
+        self._build_index()
+
+    def _build_index(self) -> None:
+        if not self.units:
+            return
+        try:
+            from shapely.strtree import STRtree
+            geometries = [unit.geometry for unit in self.units]
+            self._tree = STRtree(geometries)
+            self._geometry_positions = {id(g): i for i, g in enumerate(geometries)}
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("no STRtree for %s (%s: %s); scanning bounding boxes",
+                         self.label, type(exc).__name__, exc)
+            self._tree = None
+        for position, unit in enumerate(self.units):
+            try:
+                self._bounds.append((unit.geometry.bounds, position))
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _candidate_positions(self, point) -> List[int]:
+        if self._tree is not None:
+            try:
+                matching = self._tree.query(point)
+            except Exception:  # noqa: BLE001
+                return list(range(len(self.units)))
+            positions: List[int] = []
+            for item in matching:
+                if isinstance(item, (int, np.integer)):
+                    positions.append(int(item))
+                    continue
+                position = self._geometry_positions.get(id(item))
+                if position is not None:
+                    positions.append(position)
+            return positions
+
+        x, y = point.x, point.y
+        return [position for bounds, position in self._bounds
+                if bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]]
+
+    def containing(self, lat: Any, lon: Any) -> List[_BoundaryUnit]:
+        """Units holding the point, deepest first. touches() counts (boundary rivers)."""
+        if not self.units:
+            return []
+        try:
+            from shapely.geometry import Point
+            point = Point(float(lon), float(lat))
+        except Exception:  # noqa: BLE001
+            return []
+        if not np.isfinite(point.x) or not np.isfinite(point.y):
+            return []
+
+        found: List[_BoundaryUnit] = []
+        for position in self._candidate_positions(point):
+            if position >= len(self.units):
+                continue
+            unit = self.units[position]
+            try:
+                if unit.geometry.contains(point) or unit.geometry.touches(point):
+                    found.append(unit)
+            except Exception:  # noqa: BLE001
+                continue
+        found.sort(key=lambda unit: -unit.level)
+        return found
+
+    def nearest(self, lat: Any, lon: Any) -> Tuple[Optional[_BoundaryUnit], float]:
+        """Closest unit and its distance in km, for offshore/boundary-gap points."""
+        if not self.units:
+            return None, float("inf")
+        try:
+            from shapely.geometry import Point
+            point = Point(float(lon), float(lat))
+        except Exception:  # noqa: BLE001
+            return None, float("inf")
+
+        best: Optional[_BoundaryUnit] = None
+        best_degrees = float("inf")
+        for unit in self.units:
+            try:
+                distance = unit.geometry.distance(point)
+            except Exception:  # noqa: BLE001
+                continue
+            if distance < best_degrees:
+                best, best_degrees = unit, distance
+        if best is None:
+            return None, float("inf")
+        return best, float(best_degrees) * 111.32
+
+
+def _list_boundary_layers(path: Path) -> List[Optional[str]]:
+    """Layer names of a GeoPackage, ordered by trailing level digit."""
+    names: List[str] = []
+    try:
+        import fiona
+        names = [str(name) for name in fiona.listlayers(str(path))]
+    except Exception:  # noqa: BLE001
+        try:
+            import geopandas as gpd
+            names = [str(name)
+                     for name in gpd.list_layers(str(path)).iloc[:, 0].tolist()]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not list layers in %s: %s: %s",
+                         path, type(exc).__name__, exc)
+            return [None]
+
+    def _level(name: str) -> int:
+        match = re.search(r"_(\d+)$", name)
+        return int(match.group(1)) if match else 99
+
+    return sorted(names, key=_level) or [None]
+
+
+def _load_boundary_index(path: Any, *, layer: Optional[str] = None,
+                         precision: Optional[float] = 1e-5) -> _BoundaryIndex:
+    """Read every GID_n/NAME_n layer of a boundary file into an index."""
+    candidate = Path(str(path))
+    if not candidate.exists():
+        raise FileNotFoundError(f"boundary file not found: {candidate}")
+
+    try:
+        import geopandas as gpd
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "coordinate-based naming needs geopandas and shapely; "
+            "`pip install geopandas shapely`") from exc
+
+    units: List[_BoundaryUnit] = []
+    for layer_name in ([layer] if layer else _list_boundary_layers(candidate)):
+        try:
+            frame = gpd.read_file(candidate, layer=layer_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("  boundary: could not read layer %r from %s: %s: %s",
+                           layer_name, candidate, type(exc).__name__, exc)
+            continue
+        if frame is None or frame.empty:
+            continue
+
+        gid_column = next((str(column) for column in frame.columns
+                           if _GID_COLUMN_RE.match(str(column))), None)
+        if gid_column is None:
+            logger.debug("  boundary: layer %r has no GID_n column; skipped",
+                         layer_name)
+            continue
+        level = int(_GID_COLUMN_RE.match(gid_column).group(1))
+        name_column = None
+        for column in frame.columns:
+            match = _NAME_COLUMN_RE.match(str(column))
+            if match and int(match.group(1)) == level:
+                name_column = str(column)
+                break
+
+        geometry_column = "geometry"
+        geometry_attribute = getattr(frame, "geometry", None)
+        if geometry_attribute is not None:
+            geometry_column = geometry_attribute.name
+
+        added = 0
+        for record in frame.itertuples(index=False):
+            values = record._asdict()
+            geometry = values.get(geometry_column)
+            if geometry is None:
+                continue
+            try:
+                if geometry.is_empty:
+                    continue
+                if precision is not None:
+                    geometry = geometry.simplify(precision, preserve_topology=True)
+            except Exception:  # noqa: BLE001
+                continue
+            gid = str(values.get(gid_column) or "").strip()
+            if not gid:
+                continue
+            label = _title_name(values.get(name_column)) if name_column else ""
+            units.append(_BoundaryUnit(level=level, gid=gid, name=label,
+                                       geometry=geometry))
+            added += 1
+        logger.debug("  boundary: layer %r -> %d unit(s) at level %d",
+                     layer_name, added, level)
+
+    if not units:
+        raise RuntimeError(
+            f"{candidate} holds no layer with a GID_n/NAME_n column pair, so no "
+            f"polygon can be matched. Check that this is a GADM boundary file.")
+    return _BoundaryIndex(units, label=str(candidate))
+
+
+def _choose_boundary_unit(units: Sequence[_BoundaryUnit], identity: Optional[str],
+                          threshold: float) -> Tuple[Optional[_BoundaryUnit],
+                                                     float, str]:
+    """Pick the polygon that names a point.
+
+    Default: the deepest human-named containing unit (most specific area that
+    truly contains the centroid). Overruled only when the source token equals a
+    shallower unit (>=0.995) or matches one at/above `threshold` while the
+    deepest does not. Returns (unit, similarity, decision).
+    """
+    human = [unit for unit in units if _is_human_label(unit.name)]
+    if not human:
+        return None, 0.0, "no_human_unit"
+
+    human.sort(key=lambda unit: -unit.level)
+    deepest = human[0]
+    if not identity:
+        return deepest, 0.0, "deepest_unit"
+
+    scored = [(unit, _name_similarity(identity, unit.name)) for unit in human]
+    best_unit, best_score = max(scored, key=lambda pair: (pair[1], pair[0].level))
+    deepest_score = _name_similarity(identity, deepest.name)
+
+    if best_score >= 0.995:
+        return best_unit, best_score, "identity_confirmed"
+    if best_score >= threshold > deepest_score:
+        return best_unit, best_score, "identity_preferred"
+    return deepest, deepest_score, "deepest_unit"
+
+
+# --------------------------------------------------------------------------
 # Canonical rules
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def _rule_tokens(pack: Any) -> tuple:
     raw = getattr(pack, "canonical_rule", None)
@@ -277,7 +603,7 @@ def _rule_require_spatial_or_human(pack: Any, resolution: "Resolution") -> bool:
 
 
 def _rule_never_collapse_hybrids(pack: Any, resolution: "Resolution") -> bool:
-    """A match that only survives the fuzzy rung stays in review."""
+    """A fuzzy-only match stays in review."""
     return resolution.match_method != METHOD_FUZZY
 
 
@@ -305,9 +631,9 @@ def _may_apply_concept(pack: Any, resolution: "Resolution") -> bool:
         if token in _CANONICAL_FORM_BONUSES:
             continue
         _warn_once(f"rule:{token}",
-                   "pack %r declares canonical_rule %r, which this build does "
-                   "not implement. No concept governed by it is applied "
-                   "automatically.", getattr(pack, "pack_id", "?"), token)
+                   "pack %r declares canonical_rule %r, which this build does not "
+                   "implement; nothing governed by it is applied automatically.",
+                   getattr(pack, "pack_id", "?"), token)
         return False
     return True
 
@@ -320,9 +646,9 @@ def _effective_decision(pack: Any, resolution: "Resolution") -> str:
     return decision
 
 
-# ---------------------------------------------------------------------------
-# Resistance policy
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Resistance thresholds
+# --------------------------------------------------------------------------
 
 RESISTANCE_THRESHOLDS_KEY = "resistance_thresholds"
 _SUSCEPTIBLE_KEY = "susceptible"
@@ -330,19 +656,14 @@ _SUSPECTED_KEY = "suspected"
 
 
 def _resistance_thresholds(registry=None) -> Tuple[float, float]:
-    """``(susceptible, suspected)`` percentages, from the parameter pack.
-
-    Never defaulted: a run that classified under undeclared cut-offs would be
-    indistinguishable from one that used the real ones.
-    """
+    """(susceptible, suspected) percentages from the parameter pack; never defaulted."""
     from utilities.vocabulary.registry import RegistryError
 
     loaded = _load_registry(registry)
     if loaded is None:
         raise RuntimeError(
             "cannot classify resistance: no registry supplied and none loadable. "
-            "Cut-offs live in vocabularies/registry/who-resistance/manifest.yaml."
-        )
+            "Cut-offs live in vocabularies/registry/who-resistance/manifest.yaml.")
     try:
         pack = loaded.require_parameter_pack(RESISTANCE_THRESHOLDS_KEY)
     except RegistryError as exc:
@@ -353,34 +674,29 @@ def _resistance_thresholds(registry=None) -> Tuple[float, float]:
         raise RuntimeError(
             f"parameter pack {pack.pack_id!r} declares "
             f"{RESISTANCE_THRESHOLDS_KEY!r} as {type(block).__name__}; expected a "
-            f"mapping with {_SUSCEPTIBLE_KEY!r} and {_SUSPECTED_KEY!r}."
-        )
+            f"mapping with {_SUSCEPTIBLE_KEY!r} and {_SUSPECTED_KEY!r}.")
     missing = [k for k in (_SUSCEPTIBLE_KEY, _SUSPECTED_KEY) if k not in block]
     if missing:
         raise RuntimeError(
             f"parameter pack {pack.pack_id!r} is missing {missing} from its "
-            f"{RESISTANCE_THRESHOLDS_KEY!r} block."
-        )
+            f"{RESISTANCE_THRESHOLDS_KEY!r} block.")
     try:
         susceptible = float(block[_SUSCEPTIBLE_KEY])
         suspected = float(block[_SUSPECTED_KEY])
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
             f"parameter pack {pack.pack_id!r} has a non-numeric "
-            f"{RESISTANCE_THRESHOLDS_KEY!r} value: {block!r}"
-        ) from exc
+            f"{RESISTANCE_THRESHOLDS_KEY!r} value: {block!r}") from exc
     if not (0.0 <= suspected <= susceptible <= 100.0):
         raise RuntimeError(
             f"parameter pack {pack.pack_id!r} declares an impossible band: "
-            f"{_SUSCEPTIBLE_KEY}={susceptible!r}, "
-            f"{_SUSPECTED_KEY}={suspected!r}."
-        )
+            f"{_SUSCEPTIBLE_KEY}={susceptible!r}, {_SUSPECTED_KEY}={suspected!r}.")
     return susceptible, suspected
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Burden expansion
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 _BURDEN_SEASONAL_FACTORS = {
     1: 0.55, 2: 0.50, 3: 0.65, 4: 1.35, 5: 1.50, 6: 1.40,
@@ -406,21 +722,9 @@ def _burden_generate_daily_case_counts(
     base_variation: float = 0.25,
     seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Expand an annual total into a daily series whose sum equals that total.
-
-    Shape = seasonal(month) * weekly(dow) * intra_month(day, month) *
-    lognormal(0, base_variation*0.7) * holiday * spike, normalised to sum 1, then
-    apportioned by largest remainder so ``sum(case_count) == round(annual_cases)``
-    exactly.
-
-    Corrections over the prior revision: factors normalised to 1 (not 365, which
-    produced ~365x the source total); ``calendar.monthrange`` (not
-    ``month % 12 + 1``, which was negative in December); ``default_rng`` (not the
-    process-global ``np.random.seed``); no ``max(1, ...)`` floor.
-    """
+    """Daily series whose sum equals round(annual_cases), by largest remainder."""
     rng = np.random.default_rng(
-        None if seed is None else int(seed) + int(location_id) + int(year)
-    )
+        None if seed is None else int(seed) + int(location_id) + int(year))
     date_range = pd.date_range(datetime(year, 1, 1), datetime(year, 12, 31))
 
     factors: List[float] = []
@@ -445,16 +749,12 @@ def _burden_generate_daily_case_counts(
         if rng.random() < 0.005:
             spike = 1.0 + float(rng.exponential(0.5))
 
-        factors.append(
-            _burden_seasonal_factor(month) * _burden_weekly_factor(date)
-            * intra * noise * holiday * spike
-        )
+        factors.append(_burden_seasonal_factor(month) * _burden_weekly_factor(date)
+                       * intra * noise * holiday * spike)
 
     total = sum(factors)
-    factors = (
-        [f / total for f in factors] if total > 0
-        else [1.0 / len(date_range)] * len(date_range)
-    )
+    factors = ([f / total for f in factors] if total > 0
+               else [1.0 / len(date_range)] * len(date_range))
 
     target = int(round(max(0.0, float(annual_cases))))
     raw = [annual_cases * f for f in factors]
@@ -467,7 +767,7 @@ def _burden_generate_daily_case_counts(
             counts[i] += 1
     elif remainder < 0:
         order = sorted(range(len(raw)), key=lambda i: (raw[i] - counts[i], i))
-        for i in order[: abs(remainder)]:
+        for i in order[:abs(remainder)]:
             if counts[i] > 0:
                 counts[i] -= 1
 
@@ -480,9 +780,9 @@ def _burden_generate_daily_case_counts(
     })
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Fact aggregation spec
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 _FACT_AGGREGATION_SPEC: Dict[str, Dict[str, Any]] = {
     "fact_vector_observation": {
@@ -547,15 +847,12 @@ _FACT_AGGREGATION_SPEC: Dict[str, Dict[str, Any]] = {
 }
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Module helpers
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing ``country_code``/``country_name`` from centroid coordinates.
-
-    Never overwrites a country the source declared. Returns a new frame.
-    """
+    """Fill missing country_code/country_name from centroids; never overwrites."""
     if dim_df is None or dim_df.empty:
         return dim_df
     if "centroid_lat" not in dim_df.columns or "centroid_lon" not in dim_df.columns:
@@ -567,8 +864,7 @@ def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
             frame[column] = None
 
     needs = frame["country_code"].isna() | (
-        frame["country_code"].astype(str).str.strip() == ""
-    )
+        frame["country_code"].astype(str).str.strip() == "")
     if not needs.any():
         return frame
 
@@ -594,7 +890,7 @@ def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
 
 def _chunked_in(session, base_sql: str, static_params: dict, values,
                 expanding_name: str = "vals", chunk_size: int = MAX_IN_VARS):
-    """Run a statement containing ``IN :vals`` in chunks."""
+    """Run a statement containing `IN :vals` in chunks."""
     values = list(values)
     if not values:
         return []
@@ -608,7 +904,7 @@ def _chunked_in(session, base_sql: str, static_params: dict, values,
 
 
 def _or_where(pairs: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """``WHERE a = :a AND b IS NULL`` built from a mapping."""
+    """WHERE a = :a AND b IS NULL built from a mapping."""
     clauses, params = [], {}
     for name, value in pairs.items():
         if value is None:
@@ -620,13 +916,7 @@ def _or_where(pairs: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
 
 def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
-    """Index of the nearest candidate for each point. Equirectangular, chunked.
-
-    ``dlat^2 + (dlon * cos(mean_lat))^2``. Adequate for nearest-neighbour at
-    regional scale, deterministic, and free of a projection dependency. Ties
-    resolve to the first candidate, and candidates arrive ordered by
-    ``location_id``, so the winner is the lowest id.
-    """
+    """Nearest-candidate index per point (equirectangular, chunked, deterministic)."""
     n = len(glat)
     out = np.zeros(n, dtype=int)
     if n == 0 or len(alat) == 0:
@@ -648,17 +938,12 @@ def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
     return out
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # DataConsolidator
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 class DataConsolidator:
-    """Consolidates and standardizes data in the CDM.
-
-    ``registry`` and ``run_id`` are attached by ``run_consolidation_step`` or
-    passed to ``consolidate_all``; a directly-constructed consolidator works with
-    no registry at all, and settles for the generic normalised key.
-    """
+    """Consolidation phases over one CDM session."""
 
     def __init__(self, session: Optional[Session] = None):
         self.session = session or SessionLocal()
@@ -666,9 +951,11 @@ class DataConsolidator:
         self._closed = False
         self._close_report: Dict[str, Any] = {}
         self._pending_resolutions: List[Any] = []
+        self._boundary_index: Optional[_BoundaryIndex] = None
+        self._boundary_path: Optional[str] = None
 
     def _scalar_or_zero(self, sql: str) -> int:
-        """``SELECT COUNT(*)`` or 0. A failed diagnostic must not fail a run."""
+        """COUNT(*) or 0; a failed diagnostic must not fail a run."""
         try:
             return int(self.session.execute(text(sql)).scalar() or 0)
         except Exception as exc:  # noqa: BLE001
@@ -683,7 +970,7 @@ class DataConsolidator:
             return 0
 
     def _distinct_value_count(self, field: str) -> int:
-        """Distinct non-blank values of a catalog field, or 0. Read-only."""
+        """Distinct non-blank values of a catalog field, or 0."""
         try:
             binding = resolve_field(field)
         except Exception:  # noqa: BLE001
@@ -691,18 +978,16 @@ class DataConsolidator:
         column = field.split(".", 1)[1]
         return self._scalar_or_zero(
             f"SELECT COUNT(DISTINCT {column}) FROM {binding.dimension_table} "
-            f"WHERE {column} IS NOT NULL "
-            f"AND TRIM(CAST({column} AS TEXT)) <> ''")
+            f"WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS TEXT)) <> ''")
 
-    # -- A6 ---------------------------------------------------------------
+    # -- A6 ----------------------------------------------------------------
 
     def fix_location_country_codes(self) -> int:
-        """Fill ``dim_location.country_code`` from coordinates. Returns rows fixed."""
+        """Fill country_code/country_name from centroids. Returns rows fixed."""
         rows = self.session.execute(text(
             "SELECT location_id, centroid_lat, centroid_lon FROM dim_location "
             "WHERE country_code IS NULL AND centroid_lat IS NOT NULL "
-            "AND centroid_lon IS NOT NULL ORDER BY location_id"
-        )).fetchall()
+            "AND centroid_lon IS NOT NULL ORDER BY location_id")).fetchall()
         if not rows:
             return 0
 
@@ -720,8 +1005,7 @@ class DataConsolidator:
         if updates:
             statement = text(
                 "UPDATE dim_location SET country_code = :country_code, "
-                "country_name = :country_name WHERE location_id = :location_id"
-            )
+                "country_name = :country_name WHERE location_id = :location_id")
             for start in range(0, len(updates), MAX_IN_VARS):
                 self.session.execute(statement, updates[start:start + MAX_IN_VARS])
             self.session.commit()
@@ -733,21 +1017,7 @@ class DataConsolidator:
     def consolidate_locations(self, *, gadm_gpkg: Optional[str] = None,
                               country_codes: Iterable[str] = (),
                               dry_run: bool = False) -> Dict[str, Any]:
-        """Fill country codes, place every row in the hierarchy, de-duplicate.
-
-        Order: fill country codes -> resolve boundary hierarchy (if a boundary
-        file is given) -> detach dangling parents -> merge rows sharing a
-        ``standard_code`` -> rebuild parents from ``standard_code`` -> assign a
-        parent to every grid cell -> report same-name groups.
-
-        The merge is **identity-based, not name-based**. ``location_code`` is
-        unique and a site name is not: two rows both called "Miwani" at
-        ``admin_level='site'`` are two different places, and merging them would
-        delete one and re-point its facts at the other. Two rows carrying the same
-        boundary GID, by contrast, are the same boundary unit by construction.
-        Same-name groups are reported by :meth:`_location_name_duplicates` and
-        never acted on.
-        """
+        """Country codes -> hierarchy -> detach -> identity merge -> grid parents."""
         logger.info("=" * 60)
         logger.info("A6: CONSOLIDATE LOCATIONS%s", " (dry run)" if dry_run else "")
         logger.info("=" * 60)
@@ -763,9 +1033,8 @@ class DataConsolidator:
                 parents_resolved = resolve_parent_locations(
                     self.session, gpkg_path=gadm_gpkg,
                     registry=getattr(self, "registry", None),
-                    country_codes=codes or None, dry_run=False,
-                ) or {}
-            except Exception as exc:  # noqa: BLE001 - geography is optional
+                    country_codes=codes or None, dry_run=False) or {}
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("  boundary hierarchy skipped: %s: %s",
                                type(exc).__name__, exc)
                 parents_resolved = {"status": "skipped", "reason": str(exc)}
@@ -775,7 +1044,7 @@ class DataConsolidator:
         registry = _load_registry(getattr(self, "registry", None))
         repaired = self._repair_dangling_parents(dry_run=dry_run)
 
-        # Identity merge only. See the method docstring: a name is not identity.
+        # A name is not identity: only an equal standard_code is.
         merge_report = self._merge_locations_by_identity(dry_run=dry_run)
         rebuilt = self._rebuild_admin_hierarchy_from_standard_code(dry_run=dry_run)
         grid_parents = self._assign_grid_parents(dry_run=dry_run)
@@ -813,6 +1082,8 @@ class DataConsolidator:
                                 "group_count": len(merged_groups),
                                 "groups": merged_groups},
             "name_duplicate_groups": name_duplicates,
+            "name_assignment": {"status": "deferred",
+                                "reason": "coordinate-based naming runs at A9b"},
             "final_country_fixes": filled,
             "merge_report": merge_report,
             "dry_run": bool(dry_run),
@@ -820,25 +1091,444 @@ class DataConsolidator:
 
         logger.info("  locations: %d -> %d row(s) (%d merged across %d group(s) by "
                     "standard_code), %d country code(s) filled, %d parent(s) "
-                    "repaired, %d grid cell(s) parented, %d same-name group(s) "
-                    "kept distinct%s",
-                    before, after, merged_count, len(merged_groups), filled,
-                    repaired.get("total", 0),
+                    "repaired, %d grid cell(s) parented, %d same-name group(s) kept "
+                    "distinct%s", before, after, merged_count, len(merged_groups),
+                    filled, repaired.get("total", 0),
                     int((grid_parents or {}).get("assigned", 0)),
                     len(name_duplicates), " (dry run)" if dry_run else "")
         return summary
 
-    def _merge_locations_by_identity(self, dry_run: bool = False) -> Dict[str, Any]:
-        """Merge ``dim_location`` rows that share a non-empty ``standard_code``.
+    # -- A9b ---------------------------------------------------------------
 
-        Two rows with the same GADM GID are the same boundary unit, so merging
-        them loses no information. Two rows with the same *name* may be different
-        places — ``location_code`` is unique and a name is not — so a name is
-        never treated as identity here.
+    def _boundary_index_for(self, path: Any,
+                            precision: Optional[float] = 1e-5,
+                            ) -> Optional[_BoundaryIndex]:
+        """Boundary index for a path, built once per consolidator.
 
-        Grid cells carry no ``standard_code``, so they never form a group and are
-        never deleted by this pass.
+        The precision is part of the cache key: a caller that asks for a
+        different simplification must not silently receive the coarser index.
         """
+        candidate = None if path is None else str(path)
+        if (self._boundary_index is not None and candidate is not None
+                and candidate == self._boundary_path
+                and precision == getattr(self, "_boundary_precision", None)):
+            return self._boundary_index
+        index = (_load_boundary_index(candidate, precision=precision)
+                 if candidate else None)
+        if index is not None:
+            self._boundary_index = index
+            self._boundary_path = candidate
+            self._boundary_precision = precision
+        return index
+
+    def _concept_labels_by_code(self, vocabulary_id: Optional[str]) -> Dict[str, str]:
+        """concept_code -> concept_name for one vocabulary."""
+        if not vocabulary_id:
+            return {}
+        try:
+            rows = self.session.execute(text(
+                "SELECT concept_code, concept_name FROM dim_concept "
+                "WHERE vocabulary_id = :v AND concept_name IS NOT NULL "
+                "AND TRIM(concept_name) <> ''"), {"v": vocabulary_id}).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not read concept labels for %r: %s",
+                         vocabulary_id, exc)
+            return {}
+        return {str(code).strip(): _title_name(name)
+                for code, name in rows if str(code or "").strip()}
+
+    def resolve_location_names(self, *, gadm_gpkg: Optional[str] = None,
+                               dry_run: bool = False,
+                               include_grid: bool = False,
+                               overwrite_human: bool = False,
+                               similarity_threshold: float = 0.80,
+                               max_distance_km: float = 25.0,
+                               token_fallback: bool = False,
+                               precision: Optional[float] = 1e-5,
+                               sample_limit: int = 10) -> Dict[str, Any]:
+        """Name every location from its coordinates.
+
+        Point-in-polygon at every administrative level; the deepest human-named
+        containing unit supplies the label (from dim_concept when present, else
+        the layer's NAME_n). The source's own token is evidence only: it can
+        confirm the choice or outvote depth, and its similarity is recorded.
+
+        Ladder: from_boundary -> from_nearest_boundary -> from_ancestor ->
+        from_nearest_anchor -> from_token (opt-in). Unmatched rows keep their
+        name and are counted.
+
+        Grid cells are skipped by default (a pixel has no name, and 28k identical
+        labels would break the "<lon>/<lat>" fallback in _assign_grid_parents).
+        location_code is never touched, so every rewrite is reversible.
+        standard_code is NOT stamped here: _merge_locations_by_identity would
+        then collapse distinct sites inside one ward.
+        """
+        registry = _load_registry(getattr(self, "registry", None))
+        pack = None
+        if registry is not None:
+            try:
+                pack = registry.select_pack("dim_location.name")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("no location pack for the naming pass: %s", exc)
+
+        grid_level = getattr(pack, "grid_level", None)
+        admin_levels = tuple((getattr(pack, "admin_level_map", {}) or {}).values())
+        vocabulary_id = getattr(pack, "vocabulary_id", None)
+
+        try:
+            rows = self.session.execute(text(
+                "SELECT location_id, name, location_code, admin_level, "
+                "       country_code, country_name, centroid_lat, centroid_lon, "
+                "       parent_location_id, concept_id "
+                "FROM dim_location ORDER BY location_id")).mappings().all()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("  location naming: could not read dim_location: %s", exc)
+            return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+
+        report: Dict[str, Any] = {
+            "status": "ok", "examined": len(rows), "renamed": 0,
+            "grid_skipped": 0, "already_named": 0,
+            "from_boundary": 0, "from_nearest_boundary": 0,
+            "from_ancestor": 0, "from_nearest_anchor": 0, "from_token": 0,
+            "unresolved_no_coordinates": 0, "unresolved_no_match": 0,
+            "boundary_file": None, "boundary_units": 0,
+            "decisions": {},
+            "similarity": {"evaluated": 0, "mean": 0.0, "min": 0.0,
+                           "below_threshold": 0, "samples": []},
+            "human_name_conflicts": 0, "human_name_conflict_samples": [],
+            "samples": [], "dry_run": bool(dry_run),
+        }
+
+        if not rows:
+            report["status"] = "no_data"
+            logger.info("  location names: dim_location is empty; nothing to name")
+            return report
+
+        def _count(decision: str) -> None:
+            """Increment from_<prefix> and the raw decision histogram.
+
+            The report keys are ``from_boundary`` / ``from_nearest_boundary``;
+            the decision strings are ``boundary:<reason>`` /
+            ``nearest_boundary:<km>``. Indexing the report with the bare prefix
+            raised KeyError, so the mapping is explicit rather than implied.
+            """
+            prefix = decision.split(":", 1)[0]
+            bucket = f"from_{prefix}"
+            report[bucket] = int(report.get(bucket, 0)) + 1
+            report["decisions"][decision] = report["decisions"].get(decision, 0) + 1
+
+        boundary_path = gadm_gpkg or self._boundary_path
+        index: Optional[_BoundaryIndex] = None
+        if boundary_path:
+            try:
+                index = self._boundary_index_for(boundary_path, precision=precision)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "  location naming: no boundary geometry (%s: %s). Falling back "
+                    "to the parent chain and to named administrative rows.",
+                    type(exc).__name__, exc)
+                index = None
+        if index is not None:
+            report["boundary_file"] = index.label
+            report["boundary_units"] = len(index.units)
+            logger.info("  location naming: %d polygon(s) at level(s) %s from %s",
+                        len(index.units),
+                        ", ".join(str(level) for level in index.levels), index.label)
+        else:
+            logger.warning("  location naming: no boundary file. Configure "
+                           "core.admin_boundaries.path to name from coordinates.")
+
+        concept_labels = self._concept_labels_by_code(vocabulary_id)
+        token_concepts: Dict[str, str] = {}
+        if token_fallback and concept_labels:
+            for code, label in concept_labels.items():
+                key = _similarity_key(label)
+                if key:
+                    token_concepts.setdefault(key, code)
+
+        name_by_id: Dict[int, str] = {
+            int(row["location_id"]): str(row["name"] or "") for row in rows}
+        parent_of: Dict[int, Optional[int]] = {
+            int(row["location_id"]): (None if row["parent_location_id"] is None
+                                      else int(row["parent_location_id"]))
+            for row in rows}
+
+        def _depth(location_id: int, seen: Optional[Set[int]] = None) -> int:
+            """Ancestor count with a cycle guard."""
+            seen = seen or set()
+            if location_id in seen:
+                return 0
+            seen.add(location_id)
+            parent = parent_of.get(location_id)
+            return 0 if parent is None else 1 + _depth(parent, seen)
+
+        # Parent-first, so from_ancestor reads the in-memory result.
+        ordered = sorted(rows, key=lambda row: (_depth(int(row["location_id"])),
+                                                int(row["location_id"])))
+
+        updates: List[Dict[str, Any]] = []
+        deferred: List[Dict[str, Any]] = []
+        anchors: Dict[str, List[Tuple[int, str, float, float]]] = {}
+        similarities: List[float] = []
+
+        for row in ordered:
+            location_id = int(row["location_id"])
+            text_name = str(row["name"] or "").strip()
+            text_code = str(row["location_code"] or "").strip()
+            label = str(row["admin_level"] or "").strip()
+            country = str(row["country_code"] or "").strip().upper()
+            is_admin = bool(label) and (not admin_levels or label in admin_levels)
+
+            is_grid = bool(grid_level) and label == grid_level
+            if not is_grid:
+                is_grid = bool(_GRID_NAME_RE.match(text_name)
+                               or _GRID_NAME_RE.match(text_code))
+            if is_grid and not include_grid:
+                report["grid_skipped"] += 1
+                continue
+
+            country_tokens = [row["country_name"], country,
+                              ISO_TO_COUNTRY_NAME.get(country, "")]
+            identity = _best_identity_token(text_code, text_name, country_tokens)
+            is_anchor = bool(row["concept_id"] is not None or is_admin)
+
+            try:
+                flat, flon = (float(row["centroid_lat"]),
+                              float(row["centroid_lon"]))
+            except (TypeError, ValueError):
+                flat = flon = None
+            has_coords = (flat is not None and np.isfinite(flat)
+                          and np.isfinite(flon))
+
+            human_existing = bool(text_name) and not _looks_generated_name(
+                text_name, text_code)
+
+            # --- already human: keep it, but record disagreement -----------
+            if human_existing and not overwrite_human:
+                report["already_named"] += 1
+                if is_anchor and has_coords:
+                    anchors.setdefault(country, []).append(
+                        (location_id, text_name, flat, flon))
+                if index is not None and has_coords:
+                    try:
+                        units = index.containing(flat, flon)
+                    except (TypeError, ValueError):
+                        units = []
+                    unit, score, _choice = _choose_boundary_unit(
+                        units, identity, similarity_threshold)
+                    if unit is not None and score < similarity_threshold:
+                        report["human_name_conflicts"] += 1
+                        if len(report["human_name_conflict_samples"]) < sample_limit:
+                            report["human_name_conflict_samples"].append(
+                                {"location_id": location_id, "name": text_name,
+                                 "boundary": (concept_labels.get(unit.gid)
+                                              or unit.name),
+                                 "similarity": round(score, 3)})
+                continue
+
+            if not has_coords:
+                deferred.append({"row": row, "reason": "no_coordinates",
+                                 "identity": identity, "country": country})
+                continue
+
+            chosen: Optional[str] = None
+            decision = ""
+
+            if index is not None:
+                units = index.containing(flat, flon)
+                if units:
+                    unit, score, choice = _choose_boundary_unit(
+                        units, identity, similarity_threshold)
+                    if unit is not None:
+                        chosen = concept_labels.get(unit.gid) or unit.name
+                        if identity:
+                            similarities.append(score)
+                            if (score < similarity_threshold
+                                    and len(report["similarity"]["samples"])
+                                    < sample_limit):
+                                report["similarity"]["samples"].append(
+                                    {"location_id": location_id,
+                                     "identity": identity, "boundary": chosen,
+                                     "similarity": round(score, 3),
+                                     "decision": choice})
+                        decision = f"boundary:{choice}"
+                else:
+                    unit, distance_km = index.nearest(flat, flon)
+                    if unit is not None and distance_km <= max_distance_km:
+                        chosen = concept_labels.get(unit.gid) or unit.name
+                        decision = f"nearest_boundary:{distance_km:.1f}km"
+
+            if chosen is None:
+                ancestor = parent_of.get(location_id)
+                hops = 0
+                while ancestor is not None and hops < 32:
+                    candidate = name_by_id.get(ancestor, "")
+                    if candidate and not _looks_generated_name(candidate):
+                        chosen, decision = candidate, "ancestor"
+                        break
+                    ancestor = parent_of.get(ancestor)
+                    hops += 1
+
+            if chosen is None or not _is_human_label(chosen):
+                deferred.append({"row": row,
+                                 "reason": ("no_polygon" if chosen is None
+                                            else "candidate_not_human"),
+                                 "identity": identity, "country": country,
+                                 "lat": flat, "lon": flon})
+                continue
+
+            name_by_id[location_id] = chosen
+            updates.append({"location_id": location_id, "name": chosen})
+            _count(decision)
+            if is_anchor:
+                anchors.setdefault(country, []).append(
+                    (location_id, chosen, flat, flon))
+            if len(report["samples"]) < sample_limit:
+                report["samples"].append({
+                    "location_id": location_id, "from": text_name, "to": chosen,
+                    "decision": decision,
+                    "similarity": (round(_name_similarity(identity, chosen), 3)
+                                   if identity else None)})
+
+        # Pass B: coordinates known, no polygon and no named ancestor.
+        pending: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in deferred:
+            if entry.get("reason") in ("no_polygon", "candidate_not_human"):
+                pending.setdefault(entry["country"], []).append(entry)
+
+        for country in sorted(pending):
+            group = pending[country]
+            pool = anchors.get(country) or []
+            if not pool:
+                continue
+            nearest = _nearest_index(
+                [entry["lat"] for entry in group],
+                [entry["lon"] for entry in group],
+                [item[2] for item in pool], [item[3] for item in pool])
+            for offset, entry in enumerate(group):
+                anchor = pool[int(nearest[offset])]
+                distance_km = _approx_km(entry["lat"], entry["lon"],
+                                         anchor[2], anchor[3])
+                if distance_km > max_distance_km:
+                    continue
+                chosen = anchor[1]
+                if not _is_human_label(chosen):
+                    continue
+                location_id = int(entry["row"]["location_id"])
+                name_by_id[location_id] = chosen
+                updates.append({"location_id": location_id, "name": chosen})
+                _count(f"nearest_anchor:{distance_km:.1f}km")
+                entry["resolved"] = True
+                if len(report["samples"]) < sample_limit:
+                    report["samples"].append({
+                        "location_id": location_id,
+                        "from": str(entry["row"]["name"] or ""), "to": chosen,
+                        "decision": f"nearest_anchor:{distance_km:.1f}km",
+                        "similarity": (round(_name_similarity(
+                            entry["identity"], chosen), 3)
+                            if entry["identity"] else None)})
+
+        # Pass C: what is left, and why.
+        resolved_ids = {entry["location_id"] for entry in updates}
+        for entry in deferred:
+            location_id = int(entry["row"]["location_id"])
+            if location_id in resolved_ids or entry.get("resolved"):
+                continue
+            if entry["reason"] == "no_coordinates":
+                identity = entry["identity"]
+                if token_fallback and identity:
+                    concept_code = token_concepts.get(_similarity_key(identity))
+                    if concept_code:
+                        chosen = concept_labels.get(concept_code)
+                        if chosen and _is_human_label(chosen):
+                            name_by_id[location_id] = chosen
+                            updates.append({"location_id": location_id,
+                                            "name": chosen})
+                            _count("token:no_coordinates")
+                            continue
+                report["unresolved_no_coordinates"] += 1
+            else:
+                report["unresolved_no_match"] += 1
+            if len(report["samples"]) < sample_limit:
+                report["samples"].append({
+                    "location_id": location_id,
+                    "from": str(entry["row"]["name"] or ""),
+                    "to": None, "decision": entry["reason"]})
+
+        if similarities:
+            report["similarity"]["evaluated"] = len(similarities)
+            report["similarity"]["mean"] = round(float(np.mean(similarities)), 3)
+            report["similarity"]["min"] = round(float(np.min(similarities)), 3)
+            report["similarity"]["below_threshold"] = sum(
+                1 for score in similarities if score < similarity_threshold)
+
+        if updates and not dry_run:
+            statement = text("UPDATE dim_location SET name = :name "
+                             "WHERE location_id = :location_id")
+            try:
+                for start in range(0, len(updates), MAX_IN_VARS):
+                    self.session.execute(statement,
+                                         updates[start:start + MAX_IN_VARS])
+                self.session.commit()
+            except Exception as exc:  # noqa: BLE001
+                self.session.rollback()
+                logger.error("  location naming: the commit failed: %s", exc)
+                return {"status": "error",
+                        "reason": f"{type(exc).__name__}: {exc}"}
+
+        report["renamed"] = len(updates)
+        report["status"] = "dry_run" if dry_run else "ok"
+
+        logger.info(
+            "  location names: %d of %d row(s) renamed (%d containing polygon, %d "
+            "nearest polygon, %d named ancestor, %d nearby named unit, %d "
+            "vocabulary token), %d already named, %d grid cell(s) kept%s",
+            len(updates), report["examined"], report["from_boundary"],
+            report["from_nearest_boundary"], report["from_ancestor"],
+            report["from_nearest_anchor"], report["from_token"],
+            report["already_named"], report["grid_skipped"],
+            " (dry run)" if dry_run else "")
+        if report["similarity"]["evaluated"]:
+            logger.info("  name/identity similarity: %d compared, mean %.3f, "
+                        "min %.3f, %d below %.2f",
+                        report["similarity"]["evaluated"],
+                        report["similarity"]["mean"], report["similarity"]["min"],
+                        report["similarity"]["below_threshold"],
+                        similarity_threshold)
+        if report["unresolved_no_coordinates"]:
+            logger.warning("  %d row(s) have no coordinates and kept their name.",
+                           report["unresolved_no_coordinates"])
+        if report["unresolved_no_match"]:
+            logger.warning("  %d row(s) fall inside no polygon and near no named "
+                           "unit within %.0f km; they kept their name.",
+                           report["unresolved_no_match"], max_distance_km)
+        if report["human_name_conflicts"]:
+            logger.info("  %d existing name(s) disagree with their containing "
+                        "polygon; left alone (overwrite_human=False)",
+                        report["human_name_conflicts"])
+        for sample in report["samples"]:
+            if sample.get("to"):
+                logger.info("    %r -> %r (%s, similarity %s)", sample["from"],
+                            sample["to"], sample["decision"],
+                            sample.get("similarity"))
+            else:
+                logger.info("    location %s kept %r: %s", sample["location_id"],
+                            sample["from"], sample["decision"])
+        for sample in report["human_name_conflict_samples"]:
+            logger.info("    kept %r, polygon says %r (similarity %.3f)",
+                        sample["name"], sample["boundary"], sample["similarity"])
+        return report
+        
+
+    def _assign_location_names(self, **kwargs: Any) -> Dict[str, Any]:
+        """Deprecated alias for resolve_location_names."""
+        warnings.warn("_assign_location_names is deprecated; use "
+                      "resolve_location_names (coordinate-based).",
+                      DeprecationWarning, stacklevel=2)
+        return self.resolve_location_names(**kwargs)
+
+    def _merge_locations_by_identity(self, dry_run: bool = False) -> Dict[str, Any]:
+        """Merge rows sharing a non-empty standard_code. Never merges by name."""
         keys = self.session.execute(text(
             "SELECT standard_code FROM dim_location "
             "WHERE standard_code IS NOT NULL AND TRIM(standard_code) <> '' "
@@ -858,8 +1548,7 @@ class DataConsolidator:
             canonical = sorted(members, key=lambda r: (
                 0 if getattr(r, "concept_id", None) is not None else 1,
                 0 if getattr(r, "parent_location_id", None) is not None else 1,
-                int(getattr(r, "location_id", 0)),
-            ))[0]
+                int(getattr(r, "location_id", 0))))[0]
             canonical_id = int(canonical.location_id)
 
             duplicate_keys: List[Any] = []
@@ -887,18 +1576,16 @@ class DataConsolidator:
                     self._update_fact_references(DimLocation, duplicate_key,
                                                  canonical_id)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "  dim_location: could not re-point the facts of %s onto "
-                        "%s: %s. Keeping the duplicate rather than orphaning them.",
-                        duplicate_key, canonical_id, exc)
+                    logger.warning("  dim_location: could not re-point the facts of "
+                                   "%s onto %s: %s; keeping the duplicate.",
+                                   duplicate_key, canonical_id, exc)
                     skipped_total += 1
                     continue
 
                 remaining = self._count_references(DimLocation, duplicate_key)
                 if remaining:
-                    logger.warning(
-                        "  dim_location: %s still has %d referencing row(s) after "
-                        "the cascade; not deleted.", duplicate_key, remaining)
+                    logger.warning("  dim_location: %s still has %d referencing "
+                                   "row(s); not deleted.", duplicate_key, remaining)
                     skipped_total += 1
                     continue
 
@@ -913,8 +1600,7 @@ class DataConsolidator:
                     "canonical_name": canonical.name,
                     "merged_count": len(members),
                     "duplicate_codes": duplicate_keys,
-                    "member_names": [m.name for m in members],
-                })
+                    "member_names": [m.name for m in members]})
 
         if deleted_total and not dry_run:
             self.session.commit()
@@ -932,15 +1618,7 @@ class DataConsolidator:
                 "skipped_referenced": skipped_total}
 
     def _location_name_duplicates(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Same-name groups in ``dim_location``, read-only.
-
-        Reported so a reviewer can decide whether two identically named rows are
-        the same place. Nothing is deleted on this evidence: a shared name is not
-        identity, and rows sharing a ``standard_code`` were already merged.
-
-        The ids are fetched in one extra query and grouped in Python rather than
-        with ``GROUP_CONCAT`` / ``STRING_AGG``, which differ by dialect.
-        """
+        """Same-name groups, read-only. Long list is expected after naming."""
         keys = self.session.execute(text(
             "SELECT name, country_code, admin_level, COUNT(*) AS n "
             "FROM dim_location WHERE name IS NOT NULL "
@@ -963,24 +1641,17 @@ class DataConsolidator:
 
         groups: List[Dict[str, Any]] = []
         for name, country, level, count in keys:
-            groups.append({
-                "name": name,
-                "country_code": country,
-                "admin_level": level,
-                "count": int(count),
-                "location_ids": by_key.get((str(name), country, level), []),
-            })
+            groups.append({"name": name, "country_code": country,
+                           "admin_level": level, "count": int(count),
+                           "location_ids": by_key.get((str(name), country, level),
+                                                      [])})
 
-        logger.info("  dim_location: %d same-name group(s) kept as distinct places "
-                    "(see name_duplicate_groups)", len(groups))
+        logger.info("  dim_location: %d same-name group(s) reported, not merged",
+                    len(groups))
         return groups
 
     def _repair_dangling_parents(self, dry_run: bool = False) -> Dict[str, Any]:
-        """NULL a parent pointer that does not resolve, and break self-parents.
-
-        Both conditions break any recursive hierarchy query. NULL is honest here;
-        the nearest ancestor of a broken pointer is a guess.
-        """
+        """NULL unresolvable and self-referential parents."""
         dangling = self.session.execute(text(
             "SELECT COUNT(*) FROM dim_location l WHERE l.parent_location_id IS NOT NULL "
             "AND (l.parent_location_id = l.location_id OR NOT EXISTS "
@@ -997,48 +1668,36 @@ class DataConsolidator:
             self.session.execute(text(
                 "UPDATE dim_location SET parent_location_id = NULL "
                 "WHERE parent_location_id = location_id OR (parent_location_id IS NOT NULL "
-                "AND parent_location_id NOT IN (SELECT location_id FROM dim_location))"
-            ))
+                "AND parent_location_id NOT IN (SELECT location_id FROM dim_location))"))
             self.session.commit()
 
         if dangling:
-            logger.warning(
-                "  %d location row(s) had a dangling or self-referential parent and "
-                "were detached (%d self, %d missing target)%s",
-                dangling, self_parent, missing, " (dry run)" if dry_run else "")
+            logger.warning("  %d location row(s) had a dangling or self-referential "
+                           "parent and were detached (%d self, %d missing target)%s",
+                           dangling, self_parent, missing,
+                           " (dry run)" if dry_run else "")
 
         return {"total": int(dangling), "self_parent": int(self_parent),
                 "missing_parent": int(missing),
                 "repaired": 0 if dry_run else int(dangling)}
 
     def _rebuild_admin_hierarchy_from_standard_code(
-        self, dry_run: bool = False
-    ) -> Dict[str, Any]:
-        """Set ``parent_location_id`` from a GADM-style ``standard_code``.
-
-        A GID encodes its own parent (decrement the level, drop the last dotted
-        segment), so a run with no GeoPackage still gets a hierarchy. Only
-        unparented rows are touched: an existing parent was decided by the
-        spatial pass, which knows more.
-        """
+            self, dry_run: bool = False) -> Dict[str, Any]:
+        """Place unparented rows using the GID's own encoding of its parent."""
         rows = self.session.execute(text(
             "SELECT location_id, standard_code FROM dim_location "
             "WHERE parent_location_id IS NULL AND standard_code IS NOT NULL "
-            "ORDER BY location_id"
-        )).fetchall()
+            "ORDER BY location_id")).fetchall()
         if not rows:
             return {"examined": 0, "placed": 0}
 
         from utilities.admin_alignment import _parent_gid
 
-        # Indexed on standard_code *and* location_code: after the spatial pass the
-        # GID lives in standard_code, so a lookup on location_code alone finds
-        # nothing.
+        # standard_code first: after the spatial pass the GID lives there.
         id_by_gid: Dict[str, int] = {}
         for loc_id, standard_code, location_code in self.session.execute(text(
             "SELECT location_id, standard_code, location_code FROM dim_location "
-            "ORDER BY location_id"
-        )).fetchall():
+            "ORDER BY location_id")).fetchall():
             for candidate in (standard_code, location_code):
                 gid = str(candidate or "").strip()
                 if gid:
@@ -1070,79 +1729,65 @@ class DataConsolidator:
 
     def _assign_grid_parents(self, *, force: bool = False,
                              dry_run: bool = False) -> Dict[str, Any]:
-        """Set ``parent_location_id`` on every grid cell.
+        """Give every grid cell a parent, so the R side can reach it.
 
-        A grid cell is a raster pixel: its ``location_code`` is "<lon>/<lat>", it
-        appears in no boundary product, and it carries no ``standard_code``. So
-        neither the GID join nor the ``standard_code`` rebuild can place it, and
-        it stays orphaned — unreachable from the R analysis, which finds
-        study-area cells by walking ``parent_location_id`` downward from the
-        administrative rows the config names by name.
-
-        A cell is recognised by **either** signal, so the pass cannot be disabled
-        by a missing manifest key:
-
-        * ``admin_level == pack.grid_level``, when the pack declares one;
-        * ``location_code`` matching "<lon>/<lat>", which is what every raster
-          mapping writes.
-
-        Each cell is assigned to the deepest administrative level that carries
-        centroid coordinates, restricted to the cell's own ``country_code`` so a
-        Kenyan pixel is never filed under a Ugandan district. When the pack
-        declares no ``admin_level_map``, the target level is the deepest one by
-        observed parent-chain depth instead.
-
-        Idempotent: by default only cells with a NULL parent are considered, so a
-        re-run is cheap and a manual override survives. ``force=True`` recomputes
-        every cell.
+        A cell is recognised by admin_level == pack.grid_level, or by "<lon>/<lat>"
+        in name OR location_code (location_code is never rewritten, so recognition
+        survives a naming pass). Parent = deepest admin level with coordinates,
+        restricted to the cell's own country. Idempotent unless force=True.
         """
         registry = _load_registry(getattr(self, "registry", None))
         pack = None
         if registry is not None:
             try:
                 pack = registry.select_pack("dim_location.name")
-            except Exception as exc:  # noqa: BLE001 - no pack is not a failure
+            except Exception as exc:  # noqa: BLE001
                 logger.debug("no location pack for the grid pass: %s", exc)
 
         grid_level = getattr(pack, "grid_level", None)
         admin_levels = tuple((getattr(pack, "admin_level_map", {}) or {}).values())
 
         rows = self.session.execute(text(
-            "SELECT location_id, name, admin_level, country_code, centroid_lat, "
-            "       centroid_lon, parent_location_id "
-            "FROM dim_location ORDER BY location_id")).fetchall()
+            "SELECT location_id, name, location_code, admin_level, country_code, "
+            "       centroid_lat, centroid_lon, parent_location_id "
+            "FROM dim_location ORDER BY location_id")).mappings().all()
 
-        parent_of = {int(r[0]): r[6] for r in rows}
+        parent_of = {int(row["location_id"]): row["parent_location_id"]
+                     for row in rows}
 
-        def _depth(loc_id: int, seen: Optional[Set[int]] = None) -> int:
-            """Ancestor count, with a cycle guard."""
+        def _depth(location_id: int, seen: Optional[Set[int]] = None) -> int:
             seen = seen or set()
-            if loc_id in seen:
+            if location_id in seen:
                 return 0
-            seen.add(loc_id)
-            parent = parent_of.get(loc_id)
+            seen.add(location_id)
+            parent = parent_of.get(location_id)
             return 0 if parent is None else 1 + _depth(int(parent), seen)
 
-        # record = (location_id, country, lat, lon, parent, label)
-        grid: List[Tuple[int, str, float, float, Any, str]] = []
-        admin_records: List[Tuple[int, str, float, float, Any, str]] = []
+        grid: List[Dict[str, Any]] = []
+        admin_records: List[Dict[str, Any]] = []
         no_coords = 0
         by_pattern = 0
 
-        for loc_id, name, level, country, lat, lon, parent in rows:
-            label = "" if level is None else str(level).strip()
+        for row in rows:
+            location_id = int(row["location_id"])
+            label = str(row["admin_level"] or "").strip()
+            country = str(row["country_code"] or "").strip().upper()
+
             is_grid = bool(grid_level) and label == grid_level
-            if not is_grid and _GRID_NAME_RE.match(str(name or "")):
+            if not is_grid and (_GRID_NAME_RE.match(str(row["name"] or ""))
+                                or _GRID_NAME_RE.match(
+                                    str(row["location_code"] or ""))):
                 is_grid = True
                 by_pattern += 1
 
             try:
-                flat, flon = float(lat), float(lon)
+                flat, flon = (float(row["centroid_lat"]),
+                              float(row["centroid_lon"]))
             except (TypeError, ValueError):
                 if is_grid:
                     no_coords += 1
                 continue
-            if flat != flat or flon != flon:  # NaN
+            if not (np.isfinite(flat) and np.isfinite(flon)):
                 if is_grid:
                     no_coords += 1
                 continue
@@ -1151,18 +1796,18 @@ class DataConsolidator:
                     no_coords += 1
                 continue
 
-            code = (country or "").strip().upper()
+            record = {"location_id": location_id, "country": country,
+                      "lat": flat, "lon": flon,
+                      "parent": row["parent_location_id"], "label": label}
             if is_grid:
-                grid.append((int(loc_id), code, flat, flon, parent, label))
+                grid.append(record)
             elif not label:
                 continue
             elif admin_levels:
                 if label in admin_levels:
-                    admin_records.append(
-                        (int(loc_id), code, flat, flon, parent, label))
+                    admin_records.append(record)
             else:
-                admin_records.append(
-                    (int(loc_id), code, flat, flon, parent, label))
+                admin_records.append(record)
 
         if not grid:
             logger.info("  no grid cells found (grid_level=%r, %d row(s) examined); "
@@ -1170,20 +1815,21 @@ class DataConsolidator:
             return {"status": "no_grid", "grid_level": grid_level,
                     "grid_cells": 0, "assigned": 0}
 
-        # ---- pick the target level --------------------------------------
-        candidates: List[Tuple[int, str, float, float, Any, str]] = []
+        candidates: List[Dict[str, Any]] = []
         target_level: Optional[str] = None
 
         if admin_levels:
             for level_label in reversed(admin_levels):
-                pool = [r for r in admin_records if r[5] == level_label]
+                pool = [r for r in admin_records if r["label"] == level_label]
                 if pool:
                     candidates, target_level = pool, level_label
                     break
         else:
-            depths = {r[0]: _depth(r[0]) for r in admin_records}
+            depths = {r["location_id"]: _depth(r["location_id"])
+                      for r in admin_records}
             max_depth = max(depths.values(), default=0)
-            candidates = [r for r in admin_records if depths.get(r[0]) == max_depth]
+            candidates = [r for r in admin_records
+                          if depths.get(r["location_id"]) == max_depth]
             target_level = f"depth={max_depth}"
 
         if not candidates:
@@ -1196,30 +1842,30 @@ class DataConsolidator:
                     "grid_cells": len(grid), "assigned": 0,
                     "no_coordinates": no_coords}
 
-        by_country: Dict[str, List[Tuple[int, str, float, float, Any, str]]] = {}
+        by_country: Dict[str, List[Dict[str, Any]]] = {}
         for record in candidates:
-            by_country.setdefault(record[1], []).append(record)
+            by_country.setdefault(record["country"], []).append(record)
 
         kept = 0
         updates: List[Dict[str, Any]] = []
-        pending: Dict[str, List[Tuple[int, str, float, float, Any, str]]] = {}
+        pending: Dict[str, List[Dict[str, Any]]] = {}
         for record in grid:
-            if record[4] is not None and not force:
+            if record["parent"] is not None and not force:
                 kept += 1
                 continue
-            pending.setdefault(record[1], []).append(record)
+            pending.setdefault(record["country"], []).append(record)
 
         for country in sorted(pending):
             group = pending[country]
             pool = by_country.get(country) or candidates
             nearest = _nearest_index(
-                [r[2] for r in group], [r[3] for r in group],
-                [r[2] for r in pool], [r[3] for r in pool])
+                [r["lat"] for r in group], [r["lon"] for r in group],
+                [r["lat"] for r in pool], [r["lon"] for r in pool])
             for offset, record in enumerate(group):
-                parent_id = pool[int(nearest[offset])][0]
-                if parent_id == record[0]:
+                parent_id = pool[int(nearest[offset])]["location_id"]
+                if parent_id == record["location_id"]:
                     continue
-                updates.append({"location_id": record[0],
+                updates.append({"location_id": record["location_id"],
                                 "parent_location_id": parent_id})
 
         if updates and not dry_run:
@@ -1232,13 +1878,12 @@ class DataConsolidator:
 
         by_country_counts: Dict[str, int] = {}
         for record in grid:
-            by_country_counts[record[1] or "(none)"] = (
-                by_country_counts.get(record[1] or "(none)", 0) + 1)
+            key = record["country"] or "(none)"
+            by_country_counts[key] = by_country_counts.get(key, 0) + 1
 
         logger.info(
-            "  grid parents: %d/%d cell(s) assigned to %r (%d recognised by "
-            "location_code pattern, %d already parented, %d without coordinates; "
-            "countries: %s)%s",
+            "  grid parents: %d/%d cell(s) assigned to %r (%d by location_code "
+            "pattern, %d already parented, %d without coordinates; countries: %s)%s",
             len(updates), len(grid), target_level, by_pattern, kept, no_coords,
             ", ".join(f"{c}={n}" for c, n in sorted(by_country_counts.items())),
             " (dry run)" if dry_run else "")
@@ -1247,10 +1892,8 @@ class DataConsolidator:
                 "grid_level": grid_level, "admin_level": target_level,
                 "grid_cells": len(grid), "candidates": len(candidates),
                 "assigned": len(updates), "kept": kept,
-                "no_coordinates": no_coords,
-                "matched_by_pattern": by_pattern,
-                "by_country": by_country_counts,
-                "dry_run": bool(dry_run)}
+                "no_coordinates": no_coords, "matched_by_pattern": by_pattern,
+                "by_country": by_country_counts, "dry_run": bool(dry_run)}
 
     # -- dimension merge ---------------------------------------------------
 
@@ -1258,34 +1901,11 @@ class DataConsolidator:
                                fallback_key_fn=None, pack=None,
                                dry_run: bool = False,
                                group_extra: Tuple[str, ...] = ()) -> Dict[str, Any]:
-        """Merge duplicate rows of one dimension.
+        """Merge one dimension: concept:<id> -> standard:<code> -> name:<key>.
 
-        Grouping key ladder: ``concept:<id>`` -> ``standard:<code>`` ->
-        ``name:<normalised>[|extra...]``. ``group_extra`` appends columns to the
-        name branch; ``dim_location`` passes country + admin level, which is what
-        makes a bare name key safe.
-
-        ``fallback_key_fn`` defaults to the generic trim/lower/deaccent key, not
-        to the raw string. Grouping on the raw string meant `Cistern` and
-        `cistern` survived as two rows whenever no pack governed the column.
-
-        Canonical selection: a row carrying ``concept_id`` outranks one that does
-        not; then ``standard_code``; then lowest code. The canonical row adopts a
-        concept from a member before that member is deleted.
-
-        A duplicate is deleted only after **both** of these hold:
-
-        * every fact table that points at this dimension's primary key has been
-          re-pointed (``_update_fact_references``, whose column list is derived
-          from the schema);
-        * a live count confirms no row still references the key
-          (``_count_references``).
-
-        The second check is what prevents the failure this pass used to produce:
-        a dimension with no entry in a hand-written cascade map had its merged
-        rows deleted while facts still referenced them, and the foreign-key
-        pragma aborted the entire consolidation. Now such a row is kept and
-        reported instead.
+        fallback_key_fn defaults to the generic key (never the raw string).
+        A duplicate is deleted only after its facts are re-pointed AND a live
+        count confirms nothing still references it; otherwise it is kept.
         """
         table_name = getattr(model_class, "__tablename__", "?")
         try:
@@ -1314,10 +1934,9 @@ class DataConsolidator:
         def _suffix(record) -> str:
             if not group_extra:
                 return ""
-            parts = []
-            for column in group_extra:
-                value = getattr(record, column, None)
-                parts.append("" if value is None else str(value).strip().upper())
+            parts = [("" if getattr(record, column, None) is None
+                      else str(getattr(record, column)).strip().upper())
+                     for column in group_extra]
             return "|" + "|".join(parts)
 
         def key_of(record) -> Optional[str]:
@@ -1357,7 +1976,8 @@ class DataConsolidator:
 
         duplicate_groups = {k: v for k, v in groups.items() if len(v) > 1}
         if not duplicate_groups:
-            logger.info("  %s: %d row(s), no duplicate group", table_name, len(records))
+            logger.info("  %s: %d row(s), no duplicate group", table_name,
+                        len(records))
             empty["status"] = "ok"
             return empty
 
@@ -1373,11 +1993,10 @@ class DataConsolidator:
                 canonical = sorted(members, key=lambda r: (
                     0 if getattr(r, "concept_id", None) is not None else 1,
                     0 if str(getattr(r, "standard_code", None) or "").strip() else 1,
-                    str(getattr(r, code_col, "")),
-                ))[0]
+                    str(getattr(r, code_col, ""))))[0]
             if canonical is None:
-                logger.warning("  %s: group %r produced no canonical row", table_name,
-                               group_key)
+                logger.warning("  %s: group %r produced no canonical row",
+                               table_name, group_key)
                 continue
 
             canonical_key = getattr(canonical, code_col)
@@ -1405,8 +2024,8 @@ class DataConsolidator:
                     try:
                         self.session.execute(text(
                             f"UPDATE {safe_table} SET parent_location_id = :new_id "
-                            f"WHERE parent_location_id = :old_id"
-                        ), {"new_id": canonical_key, "old_id": duplicate_key})
+                            f"WHERE parent_location_id = :old_id"),
+                            {"new_id": canonical_key, "old_id": duplicate_key})
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("  %s: could not re-parent children of %r: %s",
                                        table_name, duplicate_key, exc)
@@ -1415,22 +2034,18 @@ class DataConsolidator:
                     self._update_fact_references(model_class, duplicate_key,
                                                  canonical_key)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "  %s: could not re-point the facts of %r onto %r: %s. "
-                        "Keeping the duplicate rather than orphaning them.",
-                        table_name, duplicate_key, canonical_key, exc)
+                    logger.warning("  %s: could not re-point facts of %r onto %r: "
+                                   "%s; keeping the duplicate.", table_name,
+                                   duplicate_key, canonical_key, exc)
                     kept_keys.append(duplicate_key)
                     skipped_total += 1
                     continue
 
                 remaining = self._count_references(model_class, duplicate_key)
                 if remaining:
-                    logger.warning(
-                        "  %s: %r is still referenced by %d row(s) after the "
-                        "cascade; kept. The foreign keys pointing at %s are not all "
-                        "in _dimension_fact_map, which reads Base.metadata — this "
-                        "means those references do not target its primary key.",
-                        table_name, duplicate_key, remaining, table_name)
+                    logger.warning("  %s: %r is still referenced by %d row(s) after "
+                                   "the cascade; kept.", table_name, duplicate_key,
+                                   remaining)
                     kept_keys.append(duplicate_key)
                     skipped_total += 1
                     continue
@@ -1447,8 +2062,7 @@ class DataConsolidator:
                     "merged_count": len(members),
                     "duplicate_codes": duplicate_keys,
                     "kept_codes": kept_keys,
-                    "member_names": [getattr(m, name_col, None) for m in members],
-                })
+                    "member_names": [getattr(m, name_col, None) for m in members]})
 
         if not dry_run:
             try:
@@ -1473,12 +2087,7 @@ class DataConsolidator:
     # -- FK cascade --------------------------------------------------------
 
     def _count_references(self, model_class, key: Any) -> int:
-        """How many fact rows still point at ``key``. Read-only.
-
-        The guard that turns a fatal foreign-key violation into a per-row skip.
-        Derived from ``_dimension_fact_map``, so it counts the same columns the
-        cascade rewrites.
-        """
+        """Fact rows still pointing at key. The guard against FK violations."""
         if key is None:
             return 0
         total = 0
@@ -1494,25 +2103,15 @@ class DataConsolidator:
         return total
 
     def _update_fact_references(self, model_class, old_key, new_key) -> int:
-        """Rewrite every fact FK pointing at ``old_key`` to ``new_key``.
-
-        The column list comes from :func:`_dimension_fact_map`, i.e. from the
-        schema's own foreign keys, so a dimension added to ``models.py`` is
-        covered without touching this module.
-
-        Uses one ``UPDATE`` when that cannot collide; otherwise routes through
-        ``_aggregate_and_reassign_bulk`` so colliding rows are aggregated rather
-        than deleted. Returns fact rows written.
-        """
+        """Rewrite every fact FK pointing at old_key; aggregate if it would collide."""
         if old_key == new_key:
             return 0
 
         pairs = _dimension_fact_map(model_class)
         if not pairs:
-            _warn_once(
-                f"no-fact-refs:{getattr(model_class, '__tablename__', '?')}",
-                "  %s: no fact table references its primary key; nothing to "
-                "re-point.", getattr(model_class, "__tablename__", "?"))
+            _warn_once(f"no-fact-refs:{getattr(model_class, '__tablename__', '?')}",
+                       "  %s: no fact table references its primary key; nothing to "
+                       "re-point.", getattr(model_class, "__tablename__", "?"))
             return 0
 
         written = 0
@@ -1528,8 +2127,8 @@ class DataConsolidator:
                 try:
                     result = self.session.execute(text(
                         f"UPDATE {safe_table} SET {safe_column} = :new "
-                        f"WHERE {safe_column} = :old"
-                    ), {"new": new_key, "old": old_key})
+                        f"WHERE {safe_column} = :old"),
+                        {"new": new_key, "old": old_key})
                     written += int(result.rowcount or 0)
                     continue
                 except IntegrityError:
@@ -1543,8 +2142,7 @@ class DataConsolidator:
 
             report = self._aggregate_and_reassign_bulk([{
                 "table": safe_table, "fk": safe_column,
-                "old": old_key, "new": new_key,
-            }])
+                "old": old_key, "new": new_key}])
             written += int(report.get("rows_written", 0))
         return written
 
@@ -1558,16 +2156,14 @@ class DataConsolidator:
 
         projected = ", ".join(
             f"CASE WHEN {c} = :old THEN :new ELSE {c} END" if c == fk_column else c
-            for c in key_columns
-        )
+            for c in key_columns)
         try:
             groups = self.session.execute(text(
                 "SELECT COUNT(*) FROM ("
                 f"  SELECT {projected} FROM {table_name} "
                 f"  WHERE {fk_column} IN (:old, :new) "
                 f"  GROUP BY {projected} HAVING COUNT(*) > 1"
-                ") AS colliding"
-            ), {"old": old_key, "new": new_key}).scalar() or 0
+                ") AS colliding"), {"old": old_key, "new": new_key}).scalar() or 0
         except Exception as exc:  # noqa: BLE001
             logger.debug("collision check failed for %s.%s (%s); assuming none",
                          table_name, fk_column, exc)
@@ -1578,12 +2174,7 @@ class DataConsolidator:
 
     def _validate_aggregation_spec(self, spec: Optional[Mapping[str, Any]] = None
                                    ) -> Dict[str, Dict[str, Any]]:
-        """Validate an aggregation spec into ``{table: {key, ops, numeric, derived}}``.
-
-        The natural key comes from ``DBLoader.NATURAL_KEY_CONFIG`` where it exists,
-        because that is the real conflict target. A spec that disagrees is
-        overruled and the disagreement is logged once.
-        """
+        """Validate a spec into {table: {key, ops, numeric, derived}}."""
         from etl.loaders.db_loader import NATURAL_KEY_CONFIG
 
         source = dict(_FACT_AGGREGATION_SPEC if spec is None else spec)
@@ -1619,8 +2210,7 @@ class DataConsolidator:
             is_number = {
                 c.name: (isinstance(c.type, Integer)
                          or str(c.type).upper().startswith(numeric_types))
-                for c in table_obj.__table__.columns
-            }
+                for c in table_obj.__table__.columns}
 
             entry = source[table_name]
             declared_key: Tuple[str, ...] = ()
@@ -1643,8 +2233,8 @@ class DataConsolidator:
                         token = str(operator).strip().lower()
                         if token not in operators:
                             raise ValueError(
-                                f"{table_name}: operator {operator!r} for "
-                                f"{column!r} is not one of {sorted(set(operators))}")
+                                f"{table_name}: operator {operator!r} for {column!r} "
+                                f"is not one of {sorted(set(operators))}")
                         declared_ops[str(column).strip()] = operators[token]
                 for op_name in ("sum", "max", "min", "first", "last"):
                     for column in _columns(entry.get(op_name), table_name, op_name):
@@ -1667,8 +2257,7 @@ class DataConsolidator:
                     _warn_once(
                         f"aggregate-key:{table_name}",
                         "%s: spec declares key %s but NATURAL_KEY_CONFIG declares "
-                        "%s. Using the loader's; the conflict target must be a real "
-                        "unique constraint.", table_name, list(declared_key),
+                        "%s; using the loader's.", table_name, list(declared_key),
                         list(loader_key))
                 key_columns = loader_key
             else:
@@ -1711,11 +2300,9 @@ class DataConsolidator:
                                  f"{missing_derived} the model does not carry")
 
             normalized[table_name] = {
-                "key": tuple(key_columns),
-                "ops": ops,
+                "key": tuple(key_columns), "ops": ops,
                 "numeric": tuple(c for c in sorted(ops) if is_number.get(c)),
-                "derived": tuple(sorted(set(derived) - set(ops) - set(key_columns))),
-            }
+                "derived": tuple(sorted(set(derived) - set(ops) - set(key_columns)))}
 
         return normalized
 
@@ -1723,8 +2310,7 @@ class DataConsolidator:
                                 spec: Optional[Mapping[str, Any]] = None,
                                 dry_run: bool = False,
                                 stop_on_error: bool = False) -> Dict[str, Any]:
-        """Per-record entry point: one bulk call each, so one bad record does not
-        lose the rest. Record shape ``{table, fk, old, new}``."""
+        """Per-record entry point: one bulk call each, so one bad record is isolated."""
         normalized = self._validate_aggregation_spec(spec)
         totals: Dict[str, Dict[str, Any]] = {}
         seen = errors = 0
@@ -1758,18 +2344,11 @@ class DataConsolidator:
     def _aggregate_and_reassign_bulk(self, records: Iterable[Mapping[str, Any]], *,
                                      spec: Optional[Mapping[str, Any]] = None,
                                      dry_run: bool = False) -> Dict[str, Any]:
-        """Reassign a fact FK, aggregating rows that would collide.
+        """Reassign a fact FK, aggregating colliding rows.
 
-        Read the affected rows, substitute the FK in memory, group on the natural
-        key with ``dropna=False``, NULL every ``derived`` column, delete the old
-        rows and insert the aggregates.
-
-        ``dropna=False`` is load-bearing: pandas otherwise drops groups whose key
-        contains NaN, deleting the rows the merge exists to preserve.
-
-        Every non-key column is selected and re-inserted. Selecting only the
-        columns named in the spec would silently drop any column the spec forgot,
-        and a NOT NULL column omitted from the INSERT fails the whole statement.
+        dropna=False is load-bearing (pandas otherwise drops NaN-key groups and
+        deletes the rows the merge exists to keep). Every non-PK column is
+        selected and re-inserted, so a NOT NULL column is never dropped.
         """
         normalized = self._validate_aggregation_spec(spec)
         results: Dict[str, Dict[str, Any]] = {}
@@ -1804,7 +2383,8 @@ class DataConsolidator:
             pk_columns = list(model.__table__.primary_key.columns)
             if len(pk_columns) != 1:
                 errors += 1
-                logger.warning("aggregate: %s has a composite primary key", table_name)
+                logger.warning("aggregate: %s has a composite primary key",
+                               table_name)
                 continue
             pk_name = pk_columns[0].name
 
@@ -1896,7 +2476,8 @@ class DataConsolidator:
                         cleaned[column] = value
                     payload.append(cleaned)
                 for start in range(0, len(payload), MAX_IN_VARS):
-                    self.session.execute(statement, payload[start:start + MAX_IN_VARS])
+                    self.session.execute(statement,
+                                         payload[start:start + MAX_IN_VARS])
                 self.session.commit()
 
             logger.info("  aggregate %s.%s: %d in, %d out (%d merged), %d derived "
@@ -1922,14 +2503,9 @@ class DataConsolidator:
                       stampable: bool = True) -> Dict[str, int]:
         """Reconcile one column against one pack.
 
-        Writes ``decision``, never ``is_approved``. Writes ``concept_code`` only
-        when the effective decision is ``auto_accepted``. Records decisions in
-        batches.
-
-        ``stampable`` says whether the table can hold ``concept_id`` and
-        ``standard_code``. A ``fact_*`` table cannot, so the decision is recorded
-        in ``fact_concept_map`` and the value is rewritten from there by
-        ``alignment.align_fact_values`` instead of being stamped.
+        Writes decision (never is_approved) and concept_code only on accept.
+        stampable=False records the decision in fact_concept_map only, because a
+        fact table has no concept_id; alignment.align_fact_values rewrites it.
         """
         from etl.transformers.dimension_index import DimensionKeyIndex, seed_from_rows
 
@@ -1937,8 +2513,7 @@ class DataConsolidator:
             "total": 0, "matched": 0, "exact": 0, "normalized": 0, "alias": 0,
             "fuzzy": 0, "ambiguous": 0, "unresolved": 0, "unmatched": 0,
             "needs_review": 0, "applied": 0, "concept_ids_set": 0, "recorded": 0,
-            "skipped_settled": 0, "errors": 0,
-        }
+            "skipped_settled": 0, "errors": 0}
 
         try:
             ident_table = require_identifier(table, what="table name")
@@ -1971,7 +2546,8 @@ class DataConsolidator:
                 ordered.append(row[0])
                 contexts[key] = {}
             for position, context_name in enumerate(extra_columns, start=1):
-                if contexts[key].get(context_name) is None and row[position] is not None:
+                if (contexts[key].get(context_name) is None
+                        and row[position] is not None):
                     contexts[key][context_name] = row[position]
 
         vocabulary_id = getattr(pack, "vocabulary_id", None)
@@ -2046,8 +2622,7 @@ class DataConsolidator:
                 "score": float(resolution.match_score), "decision": decision,
                 "vocab_version": (resolution.vocabulary_version
                                   or getattr(pack, "version", None)),
-                "resolver_version": resolution.resolver_version, "run_id": run_id,
-            })
+                "resolver_version": resolution.resolver_version, "run_id": run_id})
             if decision == AUTO_ACCEPTED and concept_code:
                 accepted.setdefault(str(concept_code), []).append(value)
 
@@ -2075,8 +2650,7 @@ class DataConsolidator:
                     fact_concept_map.is_approved = 1
                     AND fact_concept_map.concept_code IS NOT NULL
                     AND EXCLUDED.concept_code IS NOT NULL
-                    AND fact_concept_map.concept_code <> EXCLUDED.concept_code
-                )
+                    AND fact_concept_map.concept_code <> EXCLUDED.concept_code)
             """)
             for start in range(0, len(decision_rows), batch_size):
                 chunk = decision_rows[start:start + batch_size]
@@ -2092,11 +2666,9 @@ class DataConsolidator:
                 stats["recorded"] += len(chunk)
 
         if accepted and not stampable:
-            logger.info(
-                "    %s.%s: %d accepted concept(s) recorded in fact_concept_map "
-                "only; the table carries no concept_id, so the value is aligned "
-                "in place by A8c instead.",
-                table, column, len(accepted))
+            logger.info("    %s.%s: %d accepted concept(s) recorded in "
+                        "fact_concept_map only; the table has no concept_id, so A8c "
+                        "aligns the value in place.", table, column, len(accepted))
         elif accepted and not dry_run and not write_failed:
             for concept_code in sorted(accepted):
                 values = accepted[concept_code]
@@ -2137,13 +2709,12 @@ class DataConsolidator:
                 self.session.rollback()
                 stats["errors"] += 1
 
-        logger.info(
-            "    %s.%s: %d value(s) vs %s -> %d recorded, %d applied (%d "
-            "concept_id), %d needs review, %d unresolved, %d error(s)%s",
-            table, column, stats["total"], vocabulary_id or "(no pack)",
-            stats["recorded"], stats["applied"], stats["concept_ids_set"],
-            stats["needs_review"], stats["unresolved"], stats["errors"],
-            " (dry run)" if dry_run else "")
+        logger.info("    %s.%s: %d value(s) vs %s -> %d recorded, %d applied (%d "
+                    "concept_id), %d needs review, %d unresolved, %d error(s)%s",
+                    table, column, stats["total"], vocabulary_id or "(no pack)",
+                    stats["recorded"], stats["applied"], stats["concept_ids_set"],
+                    stats["needs_review"], stats["unresolved"], stats["errors"],
+                    " (dry run)" if dry_run else "")
         return stats
 
     def standardize_vocabularies(self, vocab_dir: Optional[str] = None,
@@ -2151,22 +2722,15 @@ class DataConsolidator:
                                  dry_run: bool = False, *,
                                  registry: Optional[VocabularyRegistry] = None,
                                  run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Reconcile raw values against the registry's packs.
+        """Reconcile every registered field against its pack.
 
-        Target, vocabulary, release, normaliser and thresholds all come from
-        ``registry.field_bindings()``. Reconciles only values this run has not
-        already settled. ``vocab_dir`` and ``fuzzy_threshold`` are accepted
-        positionally for one release and ignored, with a warning.
-
-        Before doing any work, reports every catalog field no pack governs. That
-        list is the actionable half of "the consolidation was not total": each
-        entry is a field whose values are merged on a generic key and never
-        matched to a concept, and each needs one manifest plus one CSV.
+        Reports ungoverned fields first: each is merged on a generic key and never
+        matched to a concept, and needs one manifest plus one CSV.
         """
         warnings.warn(
-            "standardize_vocabularies is the deprecated entry point; vocabulary "
-            "identity, release, normaliser and thresholds now come from the pack "
-            "manifests.", DeprecationWarning, stacklevel=2)
+            "standardize_vocabularies is the deprecated entry point; identity, "
+            "release, normaliser and thresholds come from the pack manifests.",
+            DeprecationWarning, stacklevel=2)
 
         logger.info("=" * 60)
         logger.info("A8: VOCABULARY RECONCILIATION%s", " (dry run)" if dry_run else "")
@@ -2206,21 +2770,18 @@ class DataConsolidator:
             logger.warning("  the registry binds no field to a pack.")
             return {}
 
-        unbound = [
-            binding.target_field for binding in iter_bindings()
-            if binding.value_type == "text"
-            and binding.target_field not in bindings
-        ]
+        unbound = [binding.target_field for binding in iter_bindings()
+                   if binding.value_type == "text"
+                   and binding.target_field not in bindings]
         if unbound:
             logger.warning(
-                "  %d of %d text field(s) have NO vocabulary pack. Their values "
-                "are not reconciled and stay exactly as the source wrote them; B5 "
-                "still merges them on a normalised key. Each needs one manifest "
-                "plus one concepts CSV:",
+                "  %d of %d text field(s) have NO vocabulary pack; their values "
+                "are not reconciled and stay as written, though B5 still merges "
+                "them on a normalised key. Each needs one manifest plus one CSV:",
                 len(unbound), len(unbound) + len(bindings))
             for field in unbound:
-                logger.warning("    %-50s %d distinct value(s)",
-                               field, self._distinct_value_count(field))
+                logger.warning("    %-50s %d distinct value(s)", field,
+                               self._distinct_value_count(field))
 
         def _settled(dimension_table: str, name_column: str) -> Set[str]:
             if not resolved_run_id:
@@ -2232,7 +2793,7 @@ class DataConsolidator:
                     "AND last_run_id = :r AND decision = :d"
                 ), {"t": dimension_table, "c": name_column,
                     "r": resolved_run_id, "d": AUTO_ACCEPTED}).fetchall()
-            except Exception as exc:  # noqa: BLE001 - pre-migration database
+            except Exception as exc:  # noqa: BLE001
                 logger.debug("could not read settled values for %s.%s: %s",
                              dimension_table, name_column, exc)
                 return set()
@@ -2269,9 +2830,9 @@ class DataConsolidator:
             if sizes[vocabulary_id] == 0:
                 logger.warning(
                     "  %s: pack %r has no concepts in dim_concept "
-                    "(vocabulary_id=%r); every value will be 'unresolved'. "
-                    "Load it with VocabularyLoader.load_csv(csv, registry.get("
-                    "pack_id)) — or run the VOCAB phase first.",
+                    "(vocabulary_id=%r); every value will be 'unresolved'. Load it "
+                    "with VocabularyLoader.load_csv(csv, registry.get(pack_id)) — "
+                    "or run the VOCAB phase first.",
                     field, getattr(pack, "pack_id", "?"), vocabulary_id)
             if len(packs) > 1:
                 logger.info("  %s: %d pack(s) cover this field; %r wins (rank: %s).",
@@ -2285,8 +2846,7 @@ class DataConsolidator:
                 binding.dimension_table, name_column, pack, resolver,
                 dry_run=dry_run, run_id=resolved_run_id,
                 settled_values=_settled(binding.dimension_table, name_column),
-                context_columns=context_columns,
-                stampable=can_stamp(field))
+                context_columns=context_columns, stampable=can_stamp(field))
             results[key] = stats
             applied_total += int(stats.get("applied", 0))
 
@@ -2303,10 +2863,10 @@ class DataConsolidator:
             s = results[key]
             logger.info("  %s: %d value(s), %d applied (%d exact, %d normalized, "
                         "%d alias, %d fuzzy), %d needs review, %d unresolved, "
-                        "%d settled, %d error(s)",
-                        key, s["total"], s["applied"], s["exact"], s["normalized"],
-                        s["alias"], s["fuzzy"], s["needs_review"], s["unresolved"],
-                        s["skipped_settled"], s["errors"])
+                        "%d settled, %d error(s)", key, s["total"], s["applied"],
+                        s["exact"], s["normalized"], s["alias"], s["fuzzy"],
+                        s["needs_review"], s["unresolved"], s["skipped_settled"],
+                        s["errors"])
         logger.info("  rows stamped with a concept: %d", applied_total)
         logger.info("=" * 60)
         return results
@@ -2317,8 +2877,7 @@ class DataConsolidator:
         try:
             return int(self.session.execute(
                 text("SELECT COUNT(*) FROM dim_concept WHERE vocabulary_id = :v"),
-                {"v": vocabulary_id},
-            ).scalar() or 0)
+                {"v": vocabulary_id}).scalar() or 0)
         except Exception as exc:  # noqa: BLE001
             logger.debug("could not count dim_concept for %s: %s", vocabulary_id, exc)
             return 0
@@ -2329,29 +2888,12 @@ class DataConsolidator:
                                *, registry: Optional[VocabularyRegistry] = None,
                                run_id: Optional[str] = None,
                                dry_run: bool = False) -> Dict[str, Any]:
-        """Merge duplicate rows of every dimension the catalog describes.
+        """Merge every dimension in the catalog, not only packed ones.
 
-        The work list is the **catalog**, not ``registry.merge_policies()``. A
-        merge is a property of the schema: two rows of
-        ``dim_identification_method`` whose names normalise to the same key are
-        duplicates whether or not a vocabulary governs the column. Building the
-        list from the merge policies made the merge conditional on a pack
-        existing, so every dimension without a manifest —
-        ``dim_identification_method``, ``dim_resistance_test_type``,
-        ``dim_socioeconomic_indicator``, ``dim_source`` — was never consolidated
-        at all.
-
-        A pack, when one exists, supplies the normaliser; otherwise the generic
-        key is used and that fact is logged per table.
-
-        One table failing does not abort the pass. Each table is attempted inside
-        its own ``try``; a failure rolls back that table, records
-        ``{"status": "error", ...}`` and continues, because a merge problem in
-        ``dim_resistance_test_type`` must not stop the burden expansion, the
-        resistance classification and the validation that follow it.
-
-        ``merge_policies`` is accepted for compatibility and ignored: coverage is
-        no longer a policy question.
+        The work list is the catalog: a merge is a property of the schema. Driving
+        it from registry.merge_policies() meant a dimension with no manifest was
+        never consolidated. A pack only supplies the normaliser. One table failing
+        rolls back that table and continues.
         """
         logger.info("=" * 60)
         logger.info("B5: MERGE DIMENSION ROWS BY CONCEPT%s",
@@ -2405,7 +2947,7 @@ class DataConsolidator:
             if resolved_registry is not None:
                 try:
                     pack = resolved_registry.select_pack(field)
-                except Exception as exc:  # noqa: BLE001 - FieldNotInCatalog
+                except Exception as exc:  # noqa: BLE001
                     logger.debug("no pack for %r: %s", field, exc)
 
             key_function = (_pack_key_fn(pack) if pack is not None
@@ -2423,10 +2965,9 @@ class DataConsolidator:
             except Exception as exc:  # noqa: BLE001
                 self.session.rollback()
                 failures.append(binding.dimension_table)
-                logger.error(
-                    "  %s: merge failed (%s: %s). Rolled back; the table is "
-                    "unchanged and the remaining phases continue.",
-                    binding.dimension_table, type(exc).__name__, exc)
+                logger.error("  %s: merge failed (%s: %s); rolled back, remaining "
+                             "phases continue.", binding.dimension_table,
+                             type(exc).__name__, exc)
                 results[binding.dimension_table] = {
                     "status": "error", "table": binding.dimension_table,
                     "duplicates_found": 0, "deleted": 0,
@@ -2443,8 +2984,8 @@ class DataConsolidator:
             logger.info("  merged on the pack's normaliser: %s",
                         ", ".join(sorted(with_vocabulary)))
         if failures:
-            logger.warning("  %d table(s) left unmerged because their merge "
-                           "failed: %s", len(failures), ", ".join(sorted(failures)))
+            logger.warning("  %d table(s) left unmerged because their merge failed: "
+                           "%s", len(failures), ", ".join(sorted(failures)))
 
         if not dry_run:
             try:
@@ -2455,13 +2996,8 @@ class DataConsolidator:
         return results
 
     def _pick_canonical_vector(self, records: List, pack=None):
-        """Surviving vector row for a merge group.
-
-        Score: concept_id (+1e6), standard_code (+1e5), pack-declared name bonus,
-        name length, fact usage (capped). The candidate list is sorted by
-        ``vector_code`` and ``max`` keeps the first maximal element, so ties never
-        depend on row order.
-        """
+        """Surviving vector row: concept_id, standard_code, pack bonus, name length,
+        fact usage. Sorted by vector_code so ties never depend on row order."""
         candidates = sorted(records, key=lambda r: str(getattr(r, "vector_code", "")))
         if not candidates:
             raise ValueError("_pick_canonical_vector needs at least one record")
@@ -2475,11 +3011,10 @@ class DataConsolidator:
             statement = text(
                 "SELECT vector_code, COUNT(*) FROM fact_vector_observation "
                 "WHERE vector_code IN :vals GROUP BY vector_code "
-                "ORDER BY vector_code"
-            ).bindparams(bindparam("vals", expanding=True))
+                "ORDER BY vector_code").bindparams(bindparam("vals", expanding=True))
             try:
                 for code, count in self.session.execute(
-                    statement, {"vals": codes[start:start + MAX_IN_VARS]}).fetchall():
+                        statement, {"vals": codes[start:start + MAX_IN_VARS]}).fetchall():
                     usage[str(code)] = int(count or 0)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("could not count fact usage: %s", exc)
@@ -2505,9 +3040,9 @@ class DataConsolidator:
         return max(candidates, key=score)
 
     def _normalize_species_name(self, name):
-        """Deprecated. Delegates to ``normalizers``; never re-implements the regex."""
+        """Deprecated: delegates to normalizers['species_canon']."""
         warnings.warn(
-            "DataConsolidator._normalize_species_name is deprecated; use "
+            "_normalize_species_name is deprecated; use "
             "utilities.vocabulary.normalizers.NORMALIZERS['species_canon'].",
             DeprecationWarning, stacklevel=2)
         return _normalizers.NORMALIZERS["species_canon"](name)
@@ -2515,11 +3050,7 @@ class DataConsolidator:
     # -- FK alignment ------------------------------------------------------
 
     def align_all_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """Align every fact-to-dimension foreign key.
-
-        Step 2 *repairs* orphans by name before step 3 NULLs what is left. The
-        reverse order nulled every orphan before the repair pass could see it.
-        """
+        """Repair orphans by name before NULLing what is left (not the reverse)."""
         logger.info("=" * 60)
         logger.info("ALIGNING ALL FOREIGN KEYS")
         logger.info("=" * 60)
@@ -2548,8 +3079,7 @@ class DataConsolidator:
         return results
 
     def _clean_dimension_tables(self, dry_run: bool = False) -> None:
-        """Report dimension rows no fact table references. Writes nothing: an
-        unreferenced dimension row is reference data, not garbage."""
+        """Report (never delete) dimension rows no fact table references."""
         inspector = inspect(self.session.bind)
         all_tables = inspector.get_table_names()
         fact_tables = [t for t in all_tables if t.startswith("fact_")]
@@ -2611,7 +3141,8 @@ class DataConsolidator:
                                             "indicator_code"),
         }
         inspector = inspect(self.session.bind)
-        fact_tables = [t for t in inspector.get_table_names() if t.startswith("fact_")]
+        fact_tables = [t for t in inspector.get_table_names()
+                       if t.startswith("fact_")]
         results: Dict[str, Any] = {}
 
         for dim_name, (model, pk_col) in dimension_models.items():
@@ -2668,12 +3199,10 @@ class DataConsolidator:
         return results
 
     def _align_fact_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """Legacy. Repair orphans by name, then NULL or quarantine the rest.
+        """LEGACY: repair orphans by LIKE, then NULL or quarantine the rest.
 
-        Results are keyed per ``(table, column)``: keying per table overwrote every
-        column's counters with the last column's. A non-nullable FK cannot be
-        NULLed, so unresolvable rows move to ``_quarantine_<table>`` — a real
-        DELETE, logged at WARNING with the count and a restore hint.
+        Keyed per (table, column); a non-nullable FK moves unresolvable rows to
+        _quarantine_<table> (a real DELETE, logged loudly).
         """
         from collections import Counter
 
@@ -2742,11 +3271,10 @@ class DataConsolidator:
                 stmt = text(
                     f"SELECT {fk_col}, COUNT(*) FROM {table_name} "
                     f"WHERE {fk_col} IS NOT NULL AND {fk_col} NOT IN :vals "
-                    f"GROUP BY {fk_col}"
-                ).bindparams(bindparam("vals", expanding=True))
+                    f"GROUP BY {fk_col}").bindparams(bindparam("vals", expanding=True))
                 try:
                     for value, count in self.session.execute(
-                        stmt, {"vals": chunk}).fetchall():
+                            stmt, {"vals": chunk}).fetchall():
                         orphan_counter[value] += count
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("    Could not query orphans for %s.%s: %s",
@@ -2774,7 +3302,8 @@ class DataConsolidator:
             orphaned_values = list(orphan_counter.keys())
             results[key]["orphaned"] = sum(orphan_counter.values())
             results[key]["details"] = [
-                {"value": v, "count": orphan_counter[v]} for v in orphaned_values[:100]]
+                {"value": v, "count": orphan_counter[v]}
+                for v in orphaned_values[:100]]
             if dry_run:
                 continue
 
@@ -2816,8 +3345,9 @@ class DataConsolidator:
                     continue
                 try:
                     row_ids = [r[0] for r in self.session.execute(text(
-                        f"SELECT {single_pk} FROM {table_name} WHERE {fk_col} = :old_val"
-                    ), {"old_val": orphan_val}).fetchall()]
+                        f"SELECT {single_pk} FROM {table_name} "
+                        f"WHERE {fk_col} = :old_val"),
+                        {"old_val": orphan_val}).fetchall()]
                 except Exception:  # noqa: BLE001
                     remaining_values.append(orphan_val)
                     continue
@@ -2827,8 +3357,8 @@ class DataConsolidator:
                     try:
                         self.session.execute(text(
                             f"UPDATE {table_name} SET {fk_col} = :new_val "
-                            f"WHERE {single_pk} = :row_id"
-                        ), {"new_val": new_val, "row_id": row_id})
+                            f"WHERE {single_pk} = :row_id"),
+                            {"new_val": new_val, "row_id": row_id})
                         self.session.commit()
                     except IntegrityError:
                         self.session.rollback()
@@ -2877,10 +3407,9 @@ class DataConsolidator:
                         moved += int(result.rowcount or 0)
                     results[key]["quarantined"] = moved
                     logger.warning(
-                        "    %s.%s: MOVED %d row(s) into %s (column is NOT NULL and "
-                        "the FK does not resolve). This is a real DELETE from the "
-                        "fact table; restore with INSERT INTO %s SELECT ... FROM %s.",
-                        table_name, fk_col, moved, qname, table_name, qname)
+                        "    %s.%s: MOVED %d row(s) into %s (NOT NULL FK that does "
+                        "not resolve). Restore with INSERT INTO %s SELECT ... FROM "
+                        "%s.", table_name, fk_col, moved, qname, table_name, qname)
                 self.session.commit()
 
             results[key]["fixed"] = sum(orphan_counter[v] for v in fixed_values)
@@ -2897,9 +3426,8 @@ class DataConsolidator:
             results[key]["still_orphaned"] = remaining_orphans
 
             if remaining_orphans:
-                logger.error("    %s.%s: %d row(s) still carry an unresolvable FK "
-                             "after repair and NULL/quarantine. Manual review.",
-                             table_name, fk_col, remaining_orphans)
+                logger.error("    %s.%s: %d row(s) still carry an unresolvable FK; "
+                             "manual review.", table_name, fk_col, remaining_orphans)
             else:
                 logger.info("    %s.%s: repair complete (%d fixed, %d orphaned)",
                             table_name, fk_col, results[key]["fixed"],
@@ -2909,7 +3437,7 @@ class DataConsolidator:
     # -- audit helpers -----------------------------------------------------
 
     def validate_country_codes(self) -> Dict[str, Any]:
-        """Count locations by country-code state. Read-only."""
+        """Count locations by country-code state."""
         rows = self.session.execute(text(
             "SELECT country_code FROM dim_location ORDER BY location_id")).fetchall()
         valid = invalid = missing = 0
@@ -2927,7 +3455,7 @@ class DataConsolidator:
                 "missing": missing, "invalid_values": sorted(invalid_values)[:20]}
 
     def _location_vocabulary_id(self, registry: Any = None) -> Optional[str]:
-        """The ``vocabulary_id`` the location pack writes, or None."""
+        """vocabulary_id the location pack writes, or None."""
         loaded = _load_registry(registry if registry is not None
                                 else getattr(self, "registry", None))
         if loaded is None:
@@ -2939,7 +3467,7 @@ class DataConsolidator:
             return None
 
     def _check_hierarchy(self, registry: Any = None) -> Dict[str, Any]:
-        """Count how many non-admin locations have a parent. Read-only."""
+        """How many non-admin locations have a parent."""
         pack = None
         loaded = _load_registry(registry if registry is not None
                                 else getattr(self, "registry", None))
@@ -2963,13 +3491,7 @@ class DataConsolidator:
         return {"placed": placed, "total_non_admin": total}
 
     def _check_remaining_orphans(self) -> Dict[str, int]:
-        """Fact FKs that still reference a missing dimension key.
-
-        Derived from ``_dimension_fact_map`` for every dimension model, so a new
-        FK column, or a whole new dimension, is covered without editing this
-        method. That is the property the previous literal map lacked: it listed
-        five dimensions and silently ignored the other three.
-        """
+        """Fact FKs still referencing a missing dimension key (schema-derived)."""
         orphans: Dict[str, int] = {}
         for model_class in _dimension_models():
             table_name = model_class.__tablename__
@@ -2994,22 +3516,12 @@ class DataConsolidator:
         return orphans
 
     def _check_concept_conflicts(self, vocabulary_id: Optional[str]) -> Dict[str, int]:
-        """Location rows whose ``concept_id`` disagrees with their own GID.
+        """Locations whose concept_id disagrees with the concept their GID names.
 
-        ``attach_admin_concepts`` derives ``concept_id`` from ``standard_code``,
-        so the invariant is:
-
-        * **conflicting** — ``standard_code`` names a concept in
-          ``dim_concept``, but ``concept_id`` is a different one;
-        * **dangling** — ``standard_code`` names a concept that is not in that
-          vocabulary at all, so ``concept_id`` cannot have come from it.
-
-        The check this replaces compared ``standard_code`` to ``location_code``
-        as strings. Those hold a GID and ``name/lat/lon`` respectively, so they
-        are never equal and the test flagged every stamped row — 385 in one run —
-        while measuring nothing. A conflict count that is structurally guaranteed
-        to equal the stamped-row count is noise, and noise hides the real
-        disagreement it was added to find.
+        conflicting: standard_code names a concept but concept_id is a different
+        one. dangling: standard_code names no concept in that vocabulary.
+        (The previous check compared standard_code to location_code, which are
+        never equal, so it flagged every stamped row and measured nothing.)
         """
         result = {"stamped": 0, "conflicting": 0, "dangling": 0}
         if not vocabulary_id:
@@ -3037,12 +3549,7 @@ class DataConsolidator:
     # -- burden / resistance ----------------------------------------------
 
     def fix_orphaned_burden_records(self) -> int:
-        """Repair burden rows whose ``location_id`` does not resolve.
-
-        Targets ``location_code`` only; an orphan with no matching code is left
-        untouched and counted, rather than dumped into the most common case
-        location.
-        """
+        """Repair burden rows whose location_id resolves via location_code."""
         logger.info("=" * 60)
         logger.info("FIXING ORPHANED BURDEN RECORDS")
         logger.info("=" * 60)
@@ -3111,12 +3618,10 @@ class DataConsolidator:
                                base_variation: float = 0.25, *,
                                default_population: Optional[float] = None
                                ) -> Dict[str, int]:
-        """Expand yearly burden rows into daily case records.
+        """Expand yearly burden into daily cases summing to the annual total.
 
-        ``default_population`` defaults to None, which **skips** a location with no
-        ``SP.POP.TOTL`` row and counts it. The daily series sums to the annual
-        total, so ``case_count`` stays a real case count. ``dim_time`` is extended
-        to cover the year before inserting, because ``date_id`` is a foreign key.
+        default_population=None skips (and counts) a location with no SP.POP.TOTL.
+        dim_time is extended first, because date_id is a foreign key.
         """
         logger.info("=" * 60)
         logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
@@ -3170,8 +3675,7 @@ class DataConsolidator:
             "  age_group, sex, outcome, case_count"
             ") VALUES ("
             "  :loc_id, :date_id, :date_id, :disease, 'ESTIMATE', :src_code, "
-            "  'confirmed', 'human', 'all', 'unknown', 'unknown', :case_count"
-            ")")
+            "  'confirmed', 'human', 'all', 'unknown', 'unknown', :case_count)")
         window_sql = text(
             "DELETE FROM fact_disease_case WHERE location_id = :loc_id "
             "AND date_id_onset >= :start_date AND date_id_onset <= :end_date "
@@ -3213,17 +3717,17 @@ class DataConsolidator:
             existing = int(self.session.execute(count_sql, window).scalar() or 0)
             if existing and not force:
                 logger.info("  skipping burden_id %s (location=%s, year=%s, "
-                            "disease=%s): %d ESTIMATE row(s) present.",
-                            burden_id, location_id, year, disease_code, existing)
+                            "disease=%s): %d ESTIMATE row(s) present.", burden_id,
+                            location_id, year, disease_code, existing)
                 stats["already_present"] += 1
                 continue
 
             daily = _burden_generate_daily_case_counts(
                 annual_cases=annual_cases, year=int(year),
-                location_id=int(location_id),
-                base_variation=base_variation, seed=seed)
-            logger.info("  burden_id %s (location=%s, year=%s): %d day(s), "
-                        "sum=%d (annual %.0f), mean=%.1f, max=%d",
+                location_id=int(location_id), base_variation=base_variation,
+                seed=seed)
+            logger.info("  burden_id %s (location=%s, year=%s): %d day(s), sum=%d "
+                        "(annual %.0f), mean=%.1f, max=%d",
                         burden_id, location_id, year, len(daily),
                         int(daily["case_count"].sum()), annual_cases,
                         float(daily["case_count"].mean()),
@@ -3255,11 +3759,7 @@ class DataConsolidator:
         return stats
 
     def _ensure_dim_time(self, year: int) -> int:
-        """Insert any missing ``dim_time`` rows for ``year``. Returns rows added.
-
-        ``fact_disease_case.date_id`` is a foreign key, so a burden year outside
-        the seeded horizon fails on PostgreSQL instead of passing silently.
-        """
+        """Insert missing dim_time rows for year. Returns rows added."""
         from datetime import timedelta
 
         existing = {row[0] for row in self.session.execute(text(
@@ -3290,20 +3790,12 @@ class DataConsolidator:
         return len(payload)
 
     def _compute_resistance_status(self) -> Dict[str, Any]:
-        """Classify every bioassay into the WHO mortality bands.
-
-        Cut-offs come from the ``who-resistance`` parameter pack, never a literal.
-        Band labels come from ``concept_resolver.RESISTANCE_BANDS``, so
-        ``'Susceptible'`` is spelled once.
-
-        Four passes, strongest signal first: tested+dead, tested+resistant,
-        susceptible+resistant, mortality only. Each touches only rows whose
-        ``resistance_status`` is still NULL or blank, so the method is idempotent.
-        """
+        """Classify bioassays into WHO bands. Cut-offs from the parameter pack."""
         registry = getattr(self, "registry", None)
         susceptible_cutoff, suspected_cutoff = _resistance_thresholds(registry)
 
-        pack_id, pack_version, pack_release = "(unknown)", "(unknown)", "(unrecorded)"
+        pack_id, pack_version, pack_release = ("(unknown)", "(unknown)",
+                                              "(unrecorded)")
         try:
             loaded = _load_registry(registry)
             pack = (loaded.require_parameter_pack(RESISTANCE_THRESHOLDS_KEY)
@@ -3312,7 +3804,7 @@ class DataConsolidator:
                 pack_id = getattr(pack, "pack_id", pack_id)
                 pack_version = getattr(pack, "version", pack_version)
                 pack_release = getattr(pack, "released_with", "") or pack_release
-        except Exception as exc:  # noqa: BLE001 - a log line must not kill the pass
+        except Exception as exc:  # noqa: BLE001
             logger.debug("could not read the classification pack: %s", exc)
 
         bands = {
@@ -3445,15 +3937,7 @@ class DataConsolidator:
     def detect_duplicates(self, tables: Optional[Iterable[str]] = None, *,
                           registry: Any = None,
                           max_groups: int = 50) -> Dict[str, Any]:
-        """Report the dimension rows a merge would collapse. Read-only.
-
-        Also reports **contradictions**: rows whose normalised name agrees but
-        whose ``concept_id`` disagrees. That is not a duplicate — merging it would
-        delete a row the vocabulary has already contradicted.
-
-        Covers every dimension in the catalog, not only those with a pack, so a
-        scan matches what B5 will actually do.
-        """
+        """Report what a merge would collapse, plus name/concept contradictions."""
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
         wanted = ({str(n).strip() for n in tables if str(n).strip()}
@@ -3504,7 +3988,8 @@ class DataConsolidator:
 
             groups: Dict[str, List[Any]] = {}
             for record in records:
-                concept_id = getattr(record, "concept_id", None) if has_concept else None
+                concept_id = (getattr(record, "concept_id", None)
+                              if has_concept else None)
                 if concept_id is not None:
                     groups.setdefault(f"concept:{concept_id}", []).append(record)
                     continue
@@ -3530,15 +4015,14 @@ class DataConsolidator:
                     name_key = _default_vocab_key(text_value)
                 if not str(name_key or "").strip():
                     continue
-                groups.setdefault(f"name:{str(name_key).strip()}", []).append(record)
+                groups.setdefault(f"name:{str(name_key).strip()}",
+                                  []).append(record)
 
             duplicates = {k: v for k, v in groups.items() if len(v) > 1}
-            listed = [{
-                "group_key": k,
-                "count": len(duplicates[k]),
-                "codes": sorted(str(getattr(m, code_column, ""))
-                                for m in duplicates[k]),
-            } for k in sorted(duplicates)][: max(0, int(max_groups))]
+            listed = [{"group_key": k, "count": len(duplicates[k]),
+                       "codes": sorted(str(getattr(m, code_column, ""))
+                                       for m in duplicates[k])}
+                      for k in sorted(duplicates)][: max(0, int(max_groups))]
 
             contradictions = []
             if has_concept:
@@ -3556,34 +4040,26 @@ class DataConsolidator:
                         label = _default_vocab_key(str(raw).strip())
                     if label:
                         by_name.setdefault(label, set()).add(concept_id)
-                contradictions = [
-                    {"name_key": label, "concept_ids": sorted(ids, key=str)}
-                    for label, ids in sorted(by_name.items()) if len(ids) > 1
-                ]
+                contradictions = [{"name_key": label,
+                                   "concept_ids": sorted(ids, key=str)}
+                                  for label, ids in sorted(by_name.items())
+                                  if len(ids) > 1]
 
             results[table_name] = {
-                "rows_examined": len(records),
-                "name_column": name_column,
+                "rows_examined": len(records), "name_column": name_column,
                 "dimension_key": code_column,
                 "vocabulary": getattr(pack, "pack_id", None),
-                "groups": listed,
-                "group_count": len(duplicates),
+                "groups": listed, "group_count": len(duplicates),
                 "groups_truncated": len(duplicates) > max(0, int(max_groups)),
                 "conflicting_concepts": contradictions[: max(0, int(max_groups))],
-                "conflict_count": len(contradictions),
-            }
+                "conflict_count": len(contradictions)}
             if duplicates:
                 logger.warning("  %s: %d duplicate group(s) across %d row(s)",
                                table_name, len(duplicates), len(records))
         return results
 
     def resolve_fact_table_duplicates(self) -> Dict[str, int]:
-        """Aggregate duplicates that already exist in the fact tables.
-
-        Each table is guarded by an explicit duplicate count, so a clean database
-        touches nothing. Every colliding group is collapsed through the same
-        operators the FK cascade uses, so the two paths cannot disagree.
-        """
+        """Aggregate duplicates already present in the fact tables."""
         logger.info("Resolving fact table duplicates...")
         results: Dict[str, int] = {}
 
@@ -3619,7 +4095,7 @@ class DataConsolidator:
 
     def _collapse_group(self, table_name: str, model, key_columns: List[str],
                         filters: Dict[str, Any]) -> int:
-        """Aggregate one duplicate group in place; NULL every ``derived`` column."""
+        """Aggregate one duplicate group in place; NULL every derived column."""
         spec = _FACT_AGGREGATION_SPEC.get(table_name) or {}
         ops: Dict[str, str] = {}
         for column in spec.get("sums") or ():
@@ -3636,7 +4112,8 @@ class DataConsolidator:
         pk_name = pk_columns[0].name
 
         where, params = _or_where(filters)
-        select_columns = [c.name for c in model.__table__.columns if c.name != pk_name]
+        select_columns = [c.name for c in model.__table__.columns
+                          if c.name != pk_name]
         rows = self.session.execute(text(
             f"SELECT {', '.join(select_columns)} FROM {table_name} "
             f"WHERE {where} ORDER BY {pk_name}"), params).mappings().all()
@@ -3646,7 +4123,8 @@ class DataConsolidator:
         frame = pd.DataFrame([dict(r) for r in rows])
         aggregations: Dict[str, str] = {}
         for column in select_columns:
-            aggregations[column] = "first" if column in derived else ops.get(column, "first")
+            aggregations[column] = ("first" if column in derived
+                                    else ops.get(column, "first"))
         grouped = (frame.groupby(key_columns, dropna=False, sort=True)
                    .agg(aggregations).reset_index())
         for column in derived:
@@ -3654,7 +4132,8 @@ class DataConsolidator:
 
         for row in rows:
             self.session.execute(text(
-                f"DELETE FROM {table_name} WHERE {pk_name} = :pk"), {"pk": row[pk_name]})
+                f"DELETE FROM {table_name} WHERE {pk_name} = :pk"),
+                {"pk": row[pk_name]})
 
         insert_columns = [c for c in grouped.columns if c != pk_name]
         payload = []
@@ -3677,26 +4156,19 @@ class DataConsolidator:
                         country_codes: Optional[List[str]] = None,
                         dry_run: bool = False, *,
                         registry: Optional[VocabularyRegistry] = None,
-                        run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Run every consolidation phase, in the one order that is safe.
+                        run_id: Optional[str] = None,
+                        name_locations: bool = True,
+                        include_grid_names: bool = False,
+                        overwrite_human_names: bool = False
+                        ) -> Dict[str, Any]:
+        """Run every phase in the one safe order.
 
-        FK alignment -> A6 locations (identity merge, hierarchy, grid parents) ->
-        VOCAB load -> A8 reconcile -> A8b dimension values -> A8c fact values ->
-        A9 spatial concepts -> B5 merge -> facts cascade -> orphan audit ->
-        burden expand -> resistance -> duplicate scan -> validation.
+        FK -> A6 locations -> VOCAB load -> A8 reconcile -> A8b -> A8c -> A9
+        spatial -> A9b coordinate naming -> B5 merge -> facts -> orphans ->
+        burden -> resistance -> duplicates -> validation.
 
-        The vocabulary load sits between A6 and A8 deliberately: A6 places every
-        row in the hierarchy, A8 is the first phase that needs ``dim_concept`` to
-        hold anything, and A8b/A8c need A8's ``concept_id`` /
-        ``fact_concept_map`` rows to exist before they can rewrite anything.
-
-        The return dict carries every key ``_log_consolidation_summary`` reads
-        (``locations``, ``foreign_key_alignment``, ``vocabulary_load``,
-        ``vocabulary_standard``, ``value_alignment``, ``fact_value_alignment``,
-        ``alignment_report``, ``vocabulary_consolidate``, ``duplicates``,
-        ``validation``, ``hierarchy``, ``remaining_orphans``, ``burden_fixed``).
-        An earlier revision returned aliases for none of them, so the summary
-        printed zeros while claiming success.
+        A9b needs gadm_gpkg for point-in-polygon and the loaded dim_concept for
+        each unit's label. include_grid_names=False leaves raster pixels unnamed.
         """
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
@@ -3704,22 +4176,24 @@ class DataConsolidator:
                            else getattr(self, "run_id", None))
         countries = [str(c).strip().upper() for c in (country_codes or [])
                      if str(c).strip()]
+        if gadm_gpkg:
+            self._boundary_path = str(gadm_gpkg)
 
         logger.info("=" * 60)
         logger.info("CONSOLIDATING CDM%s", " (dry run)" if dry_run else "")
-        logger.info("  run id:   %s", resolved_run_id or "(none)")
-        logger.info("  registry: %s", (resolved_registry.digest()[:12]
-                                       if resolved_registry is not None else "(none)"))
+        logger.info("  run id:    %s", resolved_run_id or "(none)")
+        logger.info("  registry:  %s", (resolved_registry.digest()[:12]
+                                        if resolved_registry is not None
+                                        else "(none)"))
         logger.info("  countries: %s", countries or "(all)")
+        logger.info("  boundary:  %s", self._boundary_path or "(none)")
         logger.info("=" * 60)
 
         results: Dict[str, Any] = {
             "run_id": resolved_run_id,
             "registry_digest": (resolved_registry.digest()
                                 if resolved_registry is not None else ""),
-            "dry_run": bool(dry_run),
-            "conflicts": 0,
-        }
+            "dry_run": bool(dry_run), "conflicts": 0}
 
         logger.info("-" * 60)
         logger.info("FK: ALIGN FOREIGN KEYS")
@@ -3763,7 +4237,7 @@ class DataConsolidator:
         except RuntimeError as exc:
             logger.warning("  spatial concept attachment skipped: %s", exc)
             admin_result = {"status": "skipped", "reason": str(exc)}
-        except Exception as exc:  # noqa: BLE001 - geography is optional
+        except Exception as exc:  # noqa: BLE001
             logger.warning("  spatial concept attachment failed: %s: %s",
                            type(exc).__name__, exc)
             admin_result = {"status": "error", "reason": str(exc)}
@@ -3778,18 +4252,32 @@ class DataConsolidator:
         if conflicts.get("conflicting"):
             logger.warning(
                 "  %d of %d stamped location row(s) carry a concept_id that "
-                "disagrees with the concept their own standard_code names. "
+                "disagrees with the concept their own standard_code names; "
                 "attach_admin_concepts is the only writer of "
-                "dim_location.concept_id, so this means something else wrote it.",
+                "dim_location.concept_id, so something else wrote it.",
                 conflicts["conflicting"], conflicts["stamped"])
         if conflicts.get("dangling"):
             logger.warning(
                 "  %d location row(s) carry a standard_code that is not a concept "
-                "in %r, so no concept_id could be stamped from it. Expected for "
-                "site rows whose GID was written before the vocabulary load; a "
-                "count that does not fall after a re-run means the codes and the "
-                "pack disagree.",
+                "in %r, so no concept_id could be stamped from it.",
                 conflicts["dangling"], location_vocabulary_id or "(no pack)")
+
+        logger.info("-" * 60)
+        logger.info("A9b: NAME LOCATIONS FROM THEIR COORDINATES")
+        if name_locations:
+            name_report = self.resolve_location_names(
+                gadm_gpkg=gadm_gpkg, dry_run=dry_run,
+                include_grid=include_grid_names,
+                overwrite_human=overwrite_human_names)
+        else:
+            name_report = {"status": "skipped", "reason": "name_locations=False"}
+            logger.info("  skipped (name_locations=False)")
+        results["location_names"] = name_report
+        if isinstance(results.get("locations"), dict):
+            results["locations"]["name_assignment"] = name_report
+            if name_report.get("renamed"):
+                results["locations"]["name_duplicate_groups"] = \
+                    self._location_name_duplicates(limit=50)
 
         logger.info("-" * 60)
         logger.info("B5: MERGE DIMENSION ROWS BY CONCEPT")
@@ -3825,8 +4313,8 @@ class DataConsolidator:
                         pairs += 1
                         continue
                     try:
-                        self._update_fact_references(
-                            model_class, duplicate, canonical)
+                        self._update_fact_references(model_class, duplicate,
+                                                     canonical)
                         pairs += 1
                     except Exception as exc:  # noqa: BLE001
                         failed += 1
@@ -3889,15 +4377,14 @@ class DataConsolidator:
         logger.info("=" * 60)
         logger.info("CONSOLIDATION COMPLETE%s: %d conflict(s), %d orphaned "
                     "reference(s)", " (dry run)" if dry_run else "",
-                    results["conflicts"], sum(results["remaining_orphans"].values()))
+                    results["conflicts"],
+                    sum(results["remaining_orphans"].values()))
         logger.info("=" * 60)
         return results
 
     def summarize_locations(self, *, registry: Any = None,
                             sample_limit: int = 5) -> Dict[str, Any]:
-        """Read-only description of ``dim_location``: coverage, hierarchy health,
-        duplicate names. Duplicate counts are what a name-based merge *would*
-        touch, not a recommendation."""
+        """Read-only description of dim_location: coverage, hierarchy, names."""
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
         pack = None
@@ -3928,10 +4415,14 @@ class DataConsolidator:
         country_codes: Dict[str, int] = {}
         name_groups: Dict[str, List[Any]] = {}
         unparented, conceptless, broken = [], [], []
+        generated_names = 0
 
         for row in rows:
             label = str(row["admin_level"] or "").strip()
             by_level[label] = by_level.get(label, 0) + 1
+
+            if _looks_generated_name(row["name"], row["location_code"]):
+                generated_names += 1
 
             has_concept = row["concept_id"] is not None
             has_standard = bool(str(row["standard_code"] or "").strip())
@@ -3996,53 +4487,44 @@ class DataConsolidator:
         summary = {
             "rows": len(rows),
             "by_admin_level": {l: by_level[l] for l in ordered_levels},
-            "concept_coverage": {
-                "with_concept_id": concept_ids,
-                "with_standard_code": standard_codes,
-                "half_stamped": half_concept,
-                "without_concept": len(rows) - concept_ids,
-            },
+            "concept_coverage": {"with_concept_id": concept_ids,
+                                 "with_standard_code": standard_codes,
+                                 "half_stamped": half_concept,
+                                 "without_concept": len(rows) - concept_ids},
             "coordinate_coverage": {
                 "with_coordinates": with_coords,
                 "half_coordinates": half_coords,
-                "without_coordinates": len(rows) - with_coords - half_coords,
-            },
-            "hierarchy": {
-                "with_parent": with_parent,
-                "without_parent": len(rows) - with_parent,
-                "missing_parent": missing_parent,
-                "self_parent": self_parent,
-                "broken_samples": broken,
-            },
-            "countries": {
-                "distinct": len(country_codes),
-                "by_code": {c: country_codes[c] for c in sorted(country_codes)},
-                "without_country_code": missing_country,
-            },
+                "without_coordinates": len(rows) - with_coords - half_coords},
+            "hierarchy": {"with_parent": with_parent,
+                          "without_parent": len(rows) - with_parent,
+                          "missing_parent": missing_parent,
+                          "self_parent": self_parent,
+                          "broken_samples": broken},
+            "countries": {"distinct": len(country_codes),
+                          "by_code": {c: country_codes[c]
+                                      for c in sorted(country_codes)},
+                          "without_country_code": missing_country},
+            "names": {"generated": generated_names,
+                      "human": len(rows) - generated_names},
             "duplicate_names": {
                 "group_count": len(duplicate_names),
                 "row_count": sum(len(v) for v in duplicate_names.values()),
                 "samples": [{"name_key": k, "count": len(duplicate_names[k]),
                              "location_ids": sorted(duplicate_names[k])[:limit]}
-                            for k in sorted(duplicate_names)[:limit]],
-            },
+                            for k in sorted(duplicate_names)[:limit]]},
             "samples": {"unparented": unparented, "without_concept": conceptless},
             "pack": getattr(pack, "pack_id", None),
         }
 
         logger.info("LOCATION SUMMARY (%d row(s)): %d concept, %d complete coords, "
-                    "%d parented (%d missing, %d self), %d duplicate name group(s)",
-                    len(rows), concept_ids, with_coords, with_parent,
-                    missing_parent, self_parent, len(duplicate_names))
+                    "%d parented (%d missing, %d self), %d generated name(s), "
+                    "%d duplicate name group(s)", len(rows), concept_ids,
+                    with_coords, with_parent, missing_parent, self_parent,
+                    generated_names, len(duplicate_names))
         return summary
 
     def close(self) -> Dict[str, Any]:
-        """Drain the pending resolution buffer, then close the session.
-
-        Drain first (``load_resolutions`` opens its own sessions), commit nothing
-        (every phase commits its own work), then close. A failed drain leaves the
-        buffer in place and reports it.
-        """
+        """Drain the pending resolution buffer, then close the session."""
         if getattr(self, "_closed", False):
             return dict(getattr(self, "_close_report", {}) or {})
 
@@ -4052,12 +4534,11 @@ class DataConsolidator:
         def _offer(candidate: Any) -> None:
             if candidate is None:
                 return
-            key = (
-                str(getattr(candidate, "source_table", "") or "").strip(),
-                str(getattr(candidate, "source_column", "") or "").strip(),
-                "" if getattr(candidate, "source_value", None) is None
-                else str(candidate.source_value),
-                str(getattr(candidate, "run_id", "") or "").strip())
+            key = (str(getattr(candidate, "source_table", "") or "").strip(),
+                   str(getattr(candidate, "source_column", "") or "").strip(),
+                   "" if getattr(candidate, "source_value", None) is None
+                   else str(candidate.source_value),
+                   str(getattr(candidate, "run_id", "") or "").strip())
             if key in seen:
                 return
             seen.add(key)
@@ -4086,7 +4567,8 @@ class DataConsolidator:
             try:
                 from etl.loaders.db_loader import DBLoader
                 report["flushed"] = int(
-                    DBLoader(batch_size=1000, upsert=True).load_resolutions(buffer) or 0)
+                    DBLoader(batch_size=1000, upsert=True)
+                    .load_resolutions(buffer) or 0)
                 report["pending"] = 0
                 self._pending_resolutions = []
                 logger.info("close: flushed %d resolution(s) into "
@@ -4095,8 +4577,8 @@ class DataConsolidator:
             except Exception as exc:  # noqa: BLE001
                 message = f"{type(exc).__name__}: {exc}"
                 report["errors"].append(message)
-                logger.error("close: could not flush %d pending resolution(s) (%s). "
-                             "They are KEPT so a retry is possible.",
+                logger.error("close: could not flush %d pending resolution(s) "
+                             "(%s); they are KEPT so a retry is possible.",
                              len(buffer), message)
                 self._pending_resolutions = list(buffer)
 
@@ -4115,23 +4597,22 @@ class DataConsolidator:
         return report
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Module-level wrapper
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
                       gadm_gpkg: Optional[str] = None,
                       country_codes: Optional[Iterable[str]] = None,
                       dry_run: bool = False, registry: Any = None,
                       run_id: Optional[str] = None,
-                      close: bool = True) -> Dict[str, Any]:
-    """Run the whole consolidation step and close the consolidator.
+                      close: bool = True,
+                      name_locations: bool = True,
+                      include_grid_names: bool = False,
+                      overwrite_human_names: bool = False) -> Dict[str, Any]:
+    """Run consolidation and always close() (the only drain of the buffer).
 
-    ``close()`` is called from a ``finally`` so it runs on the failure path too:
-    it is the only drain for the resolution buffer.
-
-    ``core.vocabulary.*`` keys other than ``gadm_gpkg`` are named in a warning and
-    ignored.
+    core.vocabulary.* keys other than gadm_gpkg are warned about and ignored.
     """
     config = dict(core_cfg or {})
     admin_boundaries = config.get("admin_boundaries") or {}
@@ -4173,10 +4654,11 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
         if run_id is not None:
             consolidator.run_id = run_id
         results = consolidator.consolidate_all(
-            gadm_gpkg=boundary_path,
-            country_codes=normalised or None,
-            dry_run=dry_run, registry=registry, run_id=run_id)
-    except Exception as exc:  # noqa: BLE001 - a wrapper reports, it does not trace
+            gadm_gpkg=boundary_path, country_codes=normalised or None,
+            dry_run=dry_run, registry=registry, run_id=run_id,
+            name_locations=name_locations, include_grid_names=include_grid_names,
+            overwrite_human_names=overwrite_human_names)
+    except Exception as exc:  # noqa: BLE001
         logger.error("consolidation failed: %s: %s", type(exc).__name__, exc,
                      exc_info=True)
         return {"error": f"{type(exc).__name__}: {exc}"}

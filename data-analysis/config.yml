@@ -14,18 +14,18 @@
 vbd-cdm-analysis:
   study_name: "Case Study"
 
-  countries: ["ALL"]            # every country in dim_location
+  # countries: ["ALL"]            # every country in dim_location
   # countries: ["Kenya"]          # ISO alpha-2, or full country name
   # countries: ["KE", "TZ", "UG"] # multiple
-  # countries: ["KE"]
+  countries: ["Kenya"]
 
-  locations: ["ALL"]                  # every location inside the country filter
+  # locations: ["ALL"]                  # every location inside the country filter
   # locations: ["Siaya County"]         # exact or substring match on dim_location.name
   # locations: ["Siaya", "Mombasa"]     # multiple; OR-ed together
   # locations: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
-  # study_area:
-  #  admin_level: "admin2"
-  #  names: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
+  study_area:
+    admin_level: "admin1"
+    names: ["Siaya", "Busia", "Bungoma", "Kakamega", "Kisumu", "Nandi", "Vihiga"]
 
   start_year: 2015
   end_year:   2025
