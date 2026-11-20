@@ -20,9 +20,12 @@
       ~DataConsolidator.consolidate_locations
       ~DataConsolidator.consolidate_vocabulary
       ~DataConsolidator.detect_duplicates
+      ~DataConsolidator.expand_burden_to_daily
       ~DataConsolidator.fix_location_country_codes
       ~DataConsolidator.fix_orphaned_burden_records
       ~DataConsolidator.resolve_fact_table_duplicates
+      ~DataConsolidator.resolve_location_names
+      ~DataConsolidator.standardize_country_codes
       ~DataConsolidator.standardize_vocabularies
       ~DataConsolidator.summarize_locations
       ~DataConsolidator.validate_country_codes

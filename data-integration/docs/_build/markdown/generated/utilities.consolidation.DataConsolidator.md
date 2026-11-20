@@ -4,100 +4,112 @@
 
 Bases: [`object`](https://docs.python.org/3/builtins/functions.html#object)
 
-Consolidates and standardizes data in the CDM.
+Consolidation phases over one CDM session.
 
 #### \_\_init_\_(session: [Session](https://docs.sqlalchemy.org/en/20/orm/session_api.html#sqlalchemy.orm.Session) | [None](https://docs.python.org/3/builtins/constants.html#None) = None)
 
 ### Methods
 
-| [`__init__`](#id0)([session])                                                                                      |                                                                                                   |
-|--------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
-| [`align_all_foreign_keys`](#utilities.consolidation.DataConsolidator.align_all_foreign_keys)([dry_run])            |                                                                                                   |
-| [`close`](#utilities.consolidation.DataConsolidator.close)()                                                       |                                                                                                   |
-| [`consolidate_all`](#utilities.consolidation.DataConsolidator.consolidate_all)([study_region])                     | Run all consolidation steps.                                                                      |
-| [`consolidate_locations`](#utilities.consolidation.DataConsolidator.consolidate_locations)([...])                  | Consolidate locations with country code standardization.                                          |
-| [`consolidate_vocabulary`](#utilities.consolidation.DataConsolidator.consolidate_vocabulary)()                     |                                                                                                   |
-| [`detect_duplicates`](#utilities.consolidation.DataConsolidator.detect_duplicates)()                               |                                                                                                   |
-| [`fix_location_country_codes`](#utilities.consolidation.DataConsolidator.fix_location_country_codes)()             |                                                                                                   |
-| [`fix_orphaned_burden_records`](#utilities.consolidation.DataConsolidator.fix_orphaned_burden_records)()           | Repair fact_disease_burden rows whose location_id does not resolve to a valid dim_location entry. |
-| [`resolve_fact_table_duplicates`](#utilities.consolidation.DataConsolidator.resolve_fact_table_duplicates)()       | Resolve duplicates across fact tables.                                                            |
-| [`standardize_vocabularies`](#utilities.consolidation.DataConsolidator.standardize_vocabularies)([vocab_dir, ...]) |                                                                                                   |
-| [`summarize_locations`](#utilities.consolidation.DataConsolidator.summarize_locations)()                           |                                                                                                   |
-| [`validate_country_codes`](#utilities.consolidation.DataConsolidator.validate_country_codes)()                     |                                                                                                   |
+| [`__init__`](#id0)([session])                                                                                          |                                                                       |
+|------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
+| [`align_all_foreign_keys`](#utilities.consolidation.DataConsolidator.align_all_foreign_keys)([dry_run])                | Repair orphans by name before NULLing what is left (not the reverse). |
+| [`close`](#utilities.consolidation.DataConsolidator.close)()                                                           | Drain the pending resolution buffer, then close the session.          |
+| [`consolidate_all`](#utilities.consolidation.DataConsolidator.consolidate_all)([gadm_gpkg, country_codes, ...])        | Run every phase in the one safe order.                                |
+| [`consolidate_locations`](#utilities.consolidation.DataConsolidator.consolidate_locations)(\*[, gadm_gpkg, ...])       | A6a country -> hierarchy -> detach -> identity merge -> grid parents. |
+| [`consolidate_vocabulary`](#utilities.consolidation.DataConsolidator.consolidate_vocabulary)([merge_policies, ...])    | Merge every dimension in the catalog, not only packed ones.           |
+| [`detect_duplicates`](#utilities.consolidation.DataConsolidator.detect_duplicates)([tables, registry, max_groups])     |                                                                       |
+| [`expand_burden_to_daily`](#utilities.consolidation.DataConsolidator.expand_burden_to_daily)([force, seed, ...])       | Expand yearly burden into daily cases summing to the annual total.    |
+| [`fix_location_country_codes`](#utilities.consolidation.DataConsolidator.fix_location_country_codes)()                 | Deprecated: standardize_country_codes also fixes the spelling.        |
+| [`fix_orphaned_burden_records`](#utilities.consolidation.DataConsolidator.fix_orphaned_burden_records)()               |                                                                       |
+| [`resolve_fact_table_duplicates`](#utilities.consolidation.DataConsolidator.resolve_fact_table_duplicates)()           |                                                                       |
+| [`resolve_location_names`](#utilities.consolidation.DataConsolidator.resolve_location_names)(\*[, gadm_gpkg, ...])     | Name every location from its coordinates.                             |
+| [`standardize_country_codes`](#utilities.consolidation.DataConsolidator.standardize_country_codes)(\*[, dry_run, ...]) | Canonicalise country_code to ISO2 and country_name to its label.      |
+| [`standardize_vocabularies`](#utilities.consolidation.DataConsolidator.standardize_vocabularies)([vocab_dir, ...])     | Reconcile every registered field against its pack.                    |
+| [`summarize_locations`](#utilities.consolidation.DataConsolidator.summarize_locations)(\*[, registry, sample_limit])   | Read-only description of dim_location: coverage, hierarchy, names.    |
+| [`validate_country_codes`](#utilities.consolidation.DataConsolidator.validate_country_codes)()                         | Country coverage, per-code counts, and code/name consistency.         |
 
 #### \_\_init_\_(session: [Session](https://docs.sqlalchemy.org/en/20/orm/session_api.html#sqlalchemy.orm.Session) | [None](https://docs.python.org/3/builtins/constants.html#None) = None)
 
-#### align_all_foreign_keys(dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+#### standardize_country_codes(\*, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, fill_from_geometry: [bool](https://docs.python.org/3/builtins/functions.html#bool) = True, audit_geometry: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, sample_limit: [int](https://docs.python.org/3/builtins/functions.html#int) = 10) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
 
-#### fix_orphaned_burden_records() → [int](https://docs.python.org/3/builtins/functions.html#int)
+Canonicalise country_code to ISO2 and country_name to its label.
 
-Repair fact_disease_burden rows whose location_id does not resolve to
-a valid dim_location entry.
-
-Each orphan is mapped to a target location (name-match, then the most
-common location in fact_disease_case as fallback), then reassigned
-via \_aggregate_and_reassign. When the reassignment collides on the
-(location_id, year, disease_code) unique constraint, the rows are
-aggregated (SUM cases_mean, AVG rates) rather than the orphan being
-dropped.
-
-#### resolve_fact_table_duplicates()
-
-Resolve duplicates across fact tables.
-
-Every rebuild MUST preserve every column of the target table.
-Any column not present in the SELECT list is silently NULLed (or
-reset to its column default) by the rebuild. This method was the
-source of two silent data losses in earlier revisions:
-
-> - fact_insecticide_resistance lost n_insect_susceptible,
->   n_insect_resistant, all vgsc_\* columns, exposure_time,
->   vgsc_generation, and resistance_status.
-> - fact_disease_case lost case_count (reset to 1).
-
-Both are fixed here by enumerating every column explicitly.
-
-Additionally, every block now guards its DELETE-then-INSERT
-rebuild with an explicit duplicate-count check. On a clean
-database, no table is touched at all. This eliminates the
-failure mode where an empty or partially-populated temp table
-combined with an unconditional DELETE would silently wipe an
-entire fact table.
-
-#### consolidate_all(study_region: [str](https://docs.python.org/3/builtins/stdtypes.html#str) = 'Kenya') → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
-
-Run all consolidation steps.
-
-## Ordering rationale
-
-Step 4 (standardize_vocabularies) must run BEFORE step 8
-(consolidate_vocabulary) so that dim_vector rows carry a
-concept_id when the consolidation step groups them.
-
-Step 8 (consolidate_vocabulary) MUST aggregate fact rows rather
-than delete them — see \_aggregate_and_reassign.
-
-Step 9 (resolve_fact_table_duplicates) rebuilds three fact
-tables. It MUST list every column in its SELECTs, otherwise
-those columns are silently lost. See the method docstring.
-
-Step 10 (_compute_resistance_status) MUST run after step 9,
-because step 9’s rebuild drops resistance_status.
-
-#### consolidate_locations(distance_threshold_km: [float](https://docs.python.org/3/builtins/functions.html#float) = 5.0, min_samples: [int](https://docs.python.org/3/builtins/functions.html#int) = 1, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False)
-
-Consolidate locations with country code standardization.
+Ladder: country_code -> country_name -> centroid. Geometry is fill and
+audit only, never correction: a row that states a country keeps it and the
+disagreement is counted. Idempotent; a canonical row is not written.
 
 #### fix_location_country_codes() → [int](https://docs.python.org/3/builtins/functions.html#int)
 
+Deprecated: standardize_country_codes also fixes the spelling.
+
+#### consolidate_locations(\*, gadm_gpkg: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, country_codes: [Iterable](https://docs.python.org/3/library/typing.html#typing.Iterable)[[str](https://docs.python.org/3/builtins/stdtypes.html#str)] = (), dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, audit_country_geometry: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+A6a country -> hierarchy -> detach -> identity merge -> grid parents.
+
+#### resolve_location_names(\*, gadm_gpkg: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, include_grid: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, overwrite_human: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, similarity_threshold: [float](https://docs.python.org/3/builtins/functions.html#float) = 0.8, max_distance_km: [float](https://docs.python.org/3/builtins/functions.html#float) = 25.0, token_fallback: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, precision: [float](https://docs.python.org/3/builtins/functions.html#float) | [None](https://docs.python.org/3/builtins/constants.html#None) = 1e-05, sample_limit: [int](https://docs.python.org/3/builtins/functions.html#int) = 10) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Name every location from its coordinates.
+
+Point-in-polygon at every level; the deepest human-named containing unit
+supplies the label (dim_concept first, else the layer’s NAME_n). The source
+token is evidence only: it can confirm or outvote depth, and its similarity
+is recorded. Ladder: boundary -> nearest_boundary -> ancestor ->
+nearest_anchor -> token (opt-in). Grid cells are skipped by default; a
+pixel has no name and 28k identical labels would break the “<lon>/<lat>”
+fallback in \_assign_grid_parents. location_code is never touched.
+standard_code is NOT stamped: \_merge_locations_by_identity would collapse
+distinct sites inside one ward.
+
+#### standardize_vocabularies(vocab_dir: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, fuzzy_threshold: [float](https://docs.python.org/3/builtins/functions.html#float) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, \*, registry: VocabularyRegistry | [None](https://docs.python.org/3/builtins/constants.html#None) = None, run_id: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Reconcile every registered field against its pack.
+
+Country codes are not here: they are static ISO data, standardised at A6a.
+
+#### consolidate_vocabulary(merge_policies: [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)] | [None](https://docs.python.org/3/builtins/constants.html#None) = None, \*, registry: VocabularyRegistry | [None](https://docs.python.org/3/builtins/constants.html#None) = None, run_id: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Merge every dimension in the catalog, not only packed ones.
+
+A merge is a property of the schema; driving the work list from
+registry.merge_policies() left every dimension with no manifest
+unconsolidated. One table failing rolls back that table and continues.
+
+#### align_all_foreign_keys(dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Repair orphans by name before NULLing what is left (not the reverse).
+
 #### validate_country_codes() → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
 
-#### consolidate_vocabulary() → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+Country coverage, per-code counts, and code/name consistency.
 
-#### detect_duplicates() → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+A non-zero name_mismatches after A6a means something wrote the pair
+directly: country_name is no longer the canonical label for its code.
 
-#### summarize_locations() → DataFrame
+#### fix_orphaned_burden_records() → [int](https://docs.python.org/3/builtins/functions.html#int)
 
-#### close()
+#### expand_burden_to_daily(force: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, seed: [int](https://docs.python.org/3/builtins/functions.html#int) = 42, base_variation: [float](https://docs.python.org/3/builtins/functions.html#float) = 0.25, \*, default_population: [float](https://docs.python.org/3/builtins/functions.html#float) | [None](https://docs.python.org/3/builtins/constants.html#None) = None) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [int](https://docs.python.org/3/builtins/functions.html#int)]
 
-#### standardize_vocabularies(vocab_dir: [str](https://docs.python.org/3/builtins/stdtypes.html#str) = 'vocabularies', fuzzy_threshold: [float](https://docs.python.org/3/builtins/functions.html#float) = 0.85, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+Expand yearly burden into daily cases summing to the annual total.
+
+default_population=None skips (and counts) a location with no SP.POP.TOTL.
+dim_time is extended first, because date_id is a foreign key.
+
+#### detect_duplicates(tables: [Iterable](https://docs.python.org/3/library/typing.html#typing.Iterable)[[str](https://docs.python.org/3/builtins/stdtypes.html#str)] | [None](https://docs.python.org/3/builtins/constants.html#None) = None, \*, registry: [Any](https://docs.python.org/3/library/typing.html#typing.Any) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, max_groups: [int](https://docs.python.org/3/builtins/functions.html#int) = 50) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+#### resolve_fact_table_duplicates() → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [int](https://docs.python.org/3/builtins/functions.html#int)]
+
+#### consolidate_all(gadm_gpkg: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, country_codes: [List](https://docs.python.org/3/library/typing.html#typing.List)[[str](https://docs.python.org/3/builtins/stdtypes.html#str)] | [None](https://docs.python.org/3/builtins/constants.html#None) = None, dry_run: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, \*, registry: VocabularyRegistry | [None](https://docs.python.org/3/builtins/constants.html#None) = None, run_id: [str](https://docs.python.org/3/builtins/stdtypes.html#str) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, name_locations: [bool](https://docs.python.org/3/builtins/functions.html#bool) = True, include_grid_names: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, overwrite_human_names: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False, audit_country_geometry: [bool](https://docs.python.org/3/builtins/functions.html#bool) = False) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Run every phase in the one safe order.
+
+Country codes are canonicalised at A6a, before any phase that groups or
+filters by country. audit_country_geometry=True also cross-checks rows that
+were already canonical, at one coordinate lookup per row.
+
+#### summarize_locations(\*, registry: [Any](https://docs.python.org/3/library/typing.html#typing.Any) | [None](https://docs.python.org/3/builtins/constants.html#None) = None, sample_limit: [int](https://docs.python.org/3/builtins/functions.html#int) = 5) → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Read-only description of dim_location: coverage, hierarchy, names.
+
+#### close() → [Dict](https://docs.python.org/3/library/typing.html#typing.Dict)[[str](https://docs.python.org/3/builtins/stdtypes.html#str), [Any](https://docs.python.org/3/library/typing.html#typing.Any)]
+
+Drain the pending resolution buffer, then close the session.

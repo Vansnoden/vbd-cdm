@@ -33,6 +33,8 @@
       ~DimLocation.location_id
       ~DimLocation.metadata
       ~DimLocation.name
+      ~DimLocation.origin
+      ~DimLocation.parent_location_id
       ~DimLocation.registry
       ~DimLocation.standard_code
    

@@ -2,14 +2,14 @@
 
 ## `utilities.consolidation`
 
-| [`utilities.consolidation.DataConsolidator`](generated/utilities.consolidation.DataConsolidator.md#utilities.consolidation.DataConsolidator)                            | Consolidates and standardizes data in the CDM.                        |
-|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
-| [`utilities.consolidation.get_iso_country_code`](generated/utilities.consolidation.get_iso_country_code.md#utilities.consolidation.get_iso_country_code)                | Get ISO alpha-2 country code from a country name or code.             |
-| [`utilities.consolidation.get_country_name`](generated/utilities.consolidation.get_country_name.md#utilities.consolidation.get_country_name)                            | Get country name from ISO alpha-2 code.                               |
-| [`utilities.consolidation.get_country_from_coords`](generated/utilities.consolidation.get_country_from_coords.md#utilities.consolidation.get_country_from_coords)       | Get ISO country name and code from coordinates.                       |
-| [`utilities.consolidation.haversine_distance`](generated/utilities.consolidation.haversine_distance.md#utilities.consolidation.haversine_distance)                      | Calculate the great circle distance between two points in kilometers. |
-| [`utilities.consolidation.enrich_location_dataframe`](generated/utilities.consolidation.enrich_location_dataframe.md#utilities.consolidation.enrich_location_dataframe) | Enrich location DataFrame with ISO country codes.                     |
-| [`utilities.consolidation.run_consolidation`](generated/utilities.consolidation.run_consolidation.md#utilities.consolidation.run_consolidation)                         |                                                                       |
+| [`utilities.consolidation.DataConsolidator`](generated/utilities.consolidation.DataConsolidator.md#utilities.consolidation.DataConsolidator)                            | Consolidation phases over one CDM session.                                |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------|
+| [`utilities.consolidation.get_iso_country_code`](generated/utilities.consolidation.get_iso_country_code.md#utilities.consolidation.get_iso_country_code)                | Get the ISO 3166-1 alpha-2 country code from a name, alias or code.       |
+| [`utilities.consolidation.get_country_name`](generated/utilities.consolidation.get_country_name.md#utilities.consolidation.get_country_name)                            | Get country name from ISO alpha-2 code.                                   |
+| [`utilities.consolidation.get_country_from_coords`](generated/utilities.consolidation.get_country_from_coords.md#utilities.consolidation.get_country_from_coords)       | Get ISO country name and code from latitude and longitude coordinates.    |
+| [`utilities.consolidation.haversine_distance`](generated/utilities.consolidation.haversine_distance.md#utilities.consolidation.haversine_distance)                      | Calculate the great circle distance between two points in kilometers.     |
+| [`utilities.consolidation.enrich_location_dataframe`](generated/utilities.consolidation.enrich_location_dataframe.md#utilities.consolidation.enrich_location_dataframe) | Fill missing country_code/country_name from centroids, in canonical form. |
+| [`utilities.consolidation.run_consolidation`](generated/utilities.consolidation.run_consolidation.md#utilities.consolidation.run_consolidation)                         | Run consolidation and always close() (the only drain of the buffer).      |
 
 ## `utilities.data_transform_library`
 

@@ -24,25 +24,31 @@ for example, any mapped columns or relationships.
 
 ### Attributes
 
-| [`admin_level`](#database.models.DimLocation.admin_level)     |    |
-|---------------------------------------------------------------|----|
-| [`centroid_lat`](#database.models.DimLocation.centroid_lat)   |    |
-| [`centroid_lon`](#database.models.DimLocation.centroid_lon)   |    |
-| [`concept_id`](#database.models.DimLocation.concept_id)       |    |
-| [`country_code`](#database.models.DimLocation.country_code)   |    |
-| [`country_name`](#database.models.DimLocation.country_name)   |    |
-| [`location_code`](#database.models.DimLocation.location_code) |    |
-| [`location_id`](#database.models.DimLocation.location_id)     |    |
-| `metadata`                                                    |    |
-| [`name`](#database.models.DimLocation.name)                   |    |
-| `registry`                                                    |    |
-| [`standard_code`](#database.models.DimLocation.standard_code) |    |
+| [`admin_level`](#database.models.DimLocation.admin_level)               |                        |
+|-------------------------------------------------------------------------|------------------------|
+| [`centroid_lat`](#database.models.DimLocation.centroid_lat)             |                        |
+| [`centroid_lon`](#database.models.DimLocation.centroid_lon)             |                        |
+| [`concept_id`](#database.models.DimLocation.concept_id)                 |                        |
+| [`country_code`](#database.models.DimLocation.country_code)             |                        |
+| [`country_name`](#database.models.DimLocation.country_name)             |                        |
+| [`location_code`](#database.models.DimLocation.location_code)           | Nullable *and* unique. |
+| [`location_id`](#database.models.DimLocation.location_id)               |                        |
+| `metadata`                                                              |                        |
+| [`name`](#database.models.DimLocation.name)                             |                        |
+| [`origin`](#database.models.DimLocation.origin)                         |                        |
+| [`parent_location_id`](#database.models.DimLocation.parent_location_id) |                        |
+| `registry`                                                              |                        |
+| [`standard_code`](#database.models.DimLocation.standard_code)           |                        |
 
 #### location_id
 
 #### name
 
 #### location_code
+
+Nullable *and* unique. See `DBLoader.NATURAL_KEY_CONFIG` for the
+sentinel this requires: SQL treats NULLs as distinct, so an upsert keyed
+on this column never conflicts for a row whose code is NULL.
 
 #### centroid_lat
 
@@ -57,6 +63,10 @@ for example, any mapped columns or relationships.
 #### standard_code
 
 #### concept_id
+
+#### parent_location_id
+
+#### origin
 
 #### \_\_init_\_(\*\*kwargs)
 
