@@ -962,6 +962,240 @@ def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
     return out
 
 
+# =============================================================================
+# Population denominators for burden expansion
+#
+# `expand_burden_to_daily` needs an annual case total. For a record carrying only
+# an incidence_rate that total is (rate / 100_000) * population, so the pass is
+# only as correct as its denominator lookup.
+#
+# The old lookup was `{location_id: value for row in ...}`: keyed on one half of
+# the real key, and therefore wrong twice over.
+#
+#   * A CDM normally holds a NATIONAL series at the country's own dim_location
+#     row while the burden rows sit on grid cells or administrative units. A
+#     lookup keyed on location_id finds nothing for every one of them, so a
+#     populated fact_socioeconomic_condition produces `no_population` for the
+#     entire run.
+#   * A location with several population years collapses to one value - whichever
+#     the driver returned last - so a 2009 burden row would be expanded against
+#     the latest population on record.
+#
+# The index below keys on (location_id, year) first, then the location's own
+# nearest year, then the country's series for that year - and the last two tiers
+# are opt-in, because using a country total for a sub-national unit is a decision
+# the caller has to make on purpose.
+# =============================================================================
+
+#: How many per-record lines to log before switching to a tally. A run over
+#: hundreds of thousands of records otherwise writes hundreds of thousands of
+#: identical INFO lines, which is how a real diagnostic gets scrolled past.
+_BURDEN_LOG_SAMPLE = 10
+
+#: The two measures a burden record can carry, and which wins when it carries
+#: both. `cases_mean` is an absolute case count for the cell-year: it needs no
+#: population, no allocation and no unit assumption, so it is the better measure
+#: whenever it is present. MAP publishes both, so "both" is the common case and
+#: the ordering here decides almost every record.
+_BURDEN_MEASURE_CASES_MEAN = "cases_mean"
+_BURDEN_MEASURE_INCIDENCE_RATE = "incidence_rate"
+_BURDEN_MEASURE_PREFERENCES = (_BURDEN_MEASURE_CASES_MEAN,
+                               _BURDEN_MEASURE_INCIDENCE_RATE)
+
+#: Divisors for `incidence_rate`. The column's scale is not documented in the
+#: schema, and the two readings differ by five orders of magnitude, so it is a
+#: parameter rather than a literal: `per_100k` (the classic rate convention) or
+#: `per_person` (cases per person per year, which is how MAP publishes it).
+_RATE_SCALES: Dict[str, float] = {"per_100k": 100_000.0, "per_person": 1.0}
+
+
+def _positive(value: Any) -> Optional[float]:
+    """``float(value)`` when it is a usable positive number, else None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+@dataclass(frozen=True)
+class _PopulationHit:
+    """Where a record's denominator came from, so the log can name it."""
+
+    value: float
+    tier: str               # location_year | location_nearest_year |
+                            # country_year | country_nearest_year | default
+    year: Optional[int]
+
+    @property
+    def is_country_level(self) -> bool:
+        """True when the value describes a whole country, not this location."""
+        return self.tier.startswith("country")
+
+
+class _PopulationIndex:
+    """Denominators for burden expansion, keyed the way the data actually is.
+
+    Parameters
+    ----------
+    session : sqlalchemy.orm.Session
+        Read-only use.
+    indicator : str
+        The ``fact_socioeconomic_condition.indicator_code`` to read. Literal:
+        a row stored under another code is not found, and the caller is told so.
+
+    Notes
+    -----
+    ``country_of`` is populated for **every** ``dim_location`` row, not only the
+    ones carrying population, because the expansion needs to map a *burden*
+    location to its country. ``single_country`` is the one country holding any
+    population at all; it is used only when a burden location's own
+    ``country_code`` is NULL, which is common for raster grid cells, and only for
+    a database that holds exactly one country's data - a two-country CDM would
+    otherwise be allocated the wrong one's people.
+    """
+
+    def __init__(self, session, indicator: str = "SP.POP.TOTL") -> None:
+        self.session = session
+        self.indicator = str(indicator).strip() or "SP.POP.TOTL"
+        self._series: Dict[int, Dict[int, float]] = {}
+        self._country_series: Dict[str, Dict[int, float]] = {}
+        self.country_of: Dict[int, str] = {}
+        self.single_country: Optional[str] = None
+        self.location_rows = 0
+        self.series_locations = 0
+
+    # -- loading ---------------------------------------------------------
+
+    def load(self) -> "_PopulationIndex":
+        """Read the population rows and the location->country map. Idempotent."""
+        for location_id, country_code, _admin_level in self.session.execute(text(
+            "SELECT location_id, country_code, admin_level FROM dim_location "
+            "ORDER BY location_id")).fetchall():
+            if location_id is None:
+                continue
+            self.country_of[int(location_id)] = str(country_code or "").strip().upper()
+
+        rows = self.session.execute(text(
+            "SELECT location_id, year, indicator_value "
+            "FROM fact_socioeconomic_condition "
+            "WHERE indicator_code = :i "
+            "  AND indicator_value IS NOT NULL AND indicator_value > 0 "
+            "ORDER BY location_id, year"), {"i": self.indicator}).fetchall()
+
+        for location_id, year, value in rows:
+            if location_id is None or year is None:
+                continue
+            try:
+                number = float(value)
+                when = int(year)
+            except (TypeError, ValueError):
+                continue
+            if number <= 0:
+                continue
+            self._series.setdefault(int(location_id), {})[when] = number
+            self.location_rows += 1
+
+        self.series_locations = len(self._series)
+
+        # A location's series is also its country's series: in a CDM whose only
+        # population row is the country row itself, these are the same values.
+        for location_id in sorted(self._series):
+            country = self.country_of.get(location_id) or ""
+            if not country:
+                continue
+            bucket = self._country_series.setdefault(country, {})
+            for year, value in self._series[location_id].items():
+                bucket.setdefault(year, value)
+
+        countries = [code for code in self._country_series if code]
+        self.single_country = countries[0] if len(countries) == 1 else None
+
+        logger.info(
+            "  population index: %d row(s) under %r across %d location(s); "
+            "country series for %s%s",
+            self.location_rows, self.indicator, self.series_locations,
+            ", ".join(sorted(self._country_series)) or "(none)",
+            " (single country, used for locations with no country_code)"
+            if self.single_country else "")
+        return self
+
+    # -- inspection ------------------------------------------------------
+
+    def countries(self) -> Tuple[str, ...]:
+        """The country codes that have a series, sorted. Deterministic."""
+        return tuple(sorted(code for code in self._country_series if code))
+
+    def country_for(self, location_id: Any) -> Optional[str]:
+        """The country a location belongs to, for allocation bookkeeping."""
+        try:
+            key = int(location_id)
+        except (TypeError, ValueError):
+            return None
+        return self.country_of.get(key) or self.single_country
+
+    # -- lookup ----------------------------------------------------------
+
+    @staticmethod
+    def _nearest_year(series: Mapping[int, float],
+                      year: Optional[int]) -> Optional[int]:
+        """The year closest to ``year``; ties go to the earlier year.
+
+        Earlier on a tie, not later: an epidemiology figure should not be
+        silently rounded up to a projection when the actual year is equidistant.
+        """
+        if not series:
+            return None
+        if year is None:
+            return max(series)
+        return min(series, key=lambda candidate: (abs(candidate - year), candidate))
+
+    def resolve(self, location_id: Any, year: Any, *,
+                allow_country: bool = False) -> Optional[_PopulationHit]:
+        """The denominator for one (location, year), or None.
+
+        Tiers, strongest first, and a weaker tier is never used while a stronger
+        one exists for the same record:
+
+        1. ``(location_id, year)`` - exact.
+        2. ``location_id``, nearest year - the location's own series, off-year.
+        3. ``(country_code, year)`` - the country's series, opt-in.
+        4. ``country_code``, nearest year - the country's series, opt-in.
+        """
+        try:
+            key = int(location_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            when = None if year is None else int(year)
+        except (TypeError, ValueError):
+            when = None
+
+        series = self._series.get(key)
+        if series:
+            if when is not None and when in series:
+                return _PopulationHit(series[when], "location_year", when)
+            nearest = self._nearest_year(series, when)
+            if nearest is not None:
+                return _PopulationHit(series[nearest],
+                                      "location_nearest_year", nearest)
+
+        if not allow_country:
+            return None
+
+        country = self.country_for(key)
+        country_series = self._country_series.get(country or "")
+        if not country_series:
+            return None
+        if when is not None and when in country_series:
+            return _PopulationHit(country_series[when], "country_year", when)
+        nearest = self._nearest_year(country_series, when)
+        if nearest is None:
+            return None
+        return _PopulationHit(country_series[nearest],
+                              "country_nearest_year", nearest)
+
+
 # -- DataConsolidator ------------------------------------------------------
 
 class DataConsolidator:
@@ -3670,18 +3904,117 @@ class DataConsolidator:
         logger.info("Repaired %d orphan location group(s)", fixed)
         return fixed
 
-    def expand_burden_to_daily(self, force: bool = False, seed: int = 42,
-                               base_variation: float = 0.25, *,
-                               default_population: Optional[float] = None
-                               ) -> Dict[str, int]:
-        """Expand yearly burden into daily cases summing to the annual total.
 
-        default_population=None skips (and counts) a location with no SP.POP.TOTL.
-        dim_time is extended first, because date_id is a foreign key.
+    def expand_burden_to_daily(
+        self,
+        force: bool = False,
+        seed: int = 42,
+        base_variation: float = 0.25,
+        *,
+        default_population: Optional[float] = None,
+        population_indicator: str = "SP.POP.TOTL",
+        national_allocation: bool = False,
+        population_divisor: Optional[float] = None,
+        rate_scale: str = "per_100k",
+        prefer: str = _BURDEN_MEASURE_CASES_MEAN,
+        group_by_level: Optional[str] = None,
+        locations: Optional[Iterable[int]] = None,
+        years: Optional[Iterable[int]] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Expand yearly burden into daily cases summing to each annual total.
+
+        A record carries one of two measures, or both:
+
+        ``cases_mean``
+            An absolute case count for the cell-year. Self-contained: no
+            population, no allocation, no unit assumption.
+        ``incidence_rate``
+            A rate whose scale is not documented in the schema. Converted with
+            ``rate / _RATE_SCALES[rate_scale] * population``.
+
+        **``prefer`` decides which is used when both are present**, and it
+        defaults to ``cases_mean``. Preferring the rate instead means discarding a
+        measured absolute count in favour of an assumed population denominator,
+        which is what the previous ordering did: every record carrying both was
+        routed to the rate branch, found no denominator, and was counted in
+        ``no_population``.
+
+        Parameters
+        ----------
+        force : bool
+            Delete and re-insert the ESTIMATE rows already present for a record's
+            own ``(location, year, disease, source)`` window.
+        seed, base_variation : int, float
+            Passed to :func:`_burden_generate_daily_case_counts`, which combines
+            the seed with ``(location_id, year)``. Same inputs, same series.
+        default_population : float, optional
+            Used only when a rate record has no denominator from any tier. **Not**
+            divided by the allocation divisor: it is a number the caller chose,
+            and silently scaling it would make the flag mean something it does not
+            say.
+        population_indicator : str
+            The indicator code to read. Literal - a series stored under another
+            code is not found, and the summary says so.
+        national_allocation : bool
+            Allow a location with no series of its own to use its **country's**
+            series, divided by the number of burden locations in that country.
+            Off by default: attributing a country total to a grid cell is a
+            decision, not a fallback.
+        population_divisor : float, optional
+            Override the computed per-country divisor.
+        rate_scale : str
+            ``'per_100k'`` or ``'per_person'``. Affects only records whose only
+            usable measure is ``incidence_rate``.
+        prefer : str
+            ``'cases_mean'`` or ``'incidence_rate'``.
+        group_by_level : str, optional
+            Write the daily series at this administrative grain: ``'admin3'``,
+            ``'admin2'``, ``'parent'`` (the cell's immediate parent), or ``None``
+            / ``'grid'`` for per-cell. The measure is still summed per record and
+            then grouped into the target, so grouping changes the write
+            granularity and nothing else.
+        locations, years, limit : optional
+            Restrict the run. ``years``/``locations`` filter records; ``limit``
+            caps them after ordering by ``burden_id``, so a smoke test is the same
+            code path as the real run.
+
+        Returns
+        -------
+        dict
+            ``inserted``, ``already_present``, ``skipped``, ``no_population``,
+            ``errors`` - the five keys the CLI has always read - plus ``records``,
+            ``groups``, ``merged``, ``zero``, ``years_prepared``, ``tiers``,
+            ``basis``, ``grain``, ``grain_targets`` and ``unparented_cells``.
+
+        Notes
+        -----
+        Records that share one ``(location, year, disease, source)`` are **summed
+        into one series before writing**. ``uq_fact_case_natural`` has no pathogen
+        column, so two burden rows for one disease in one place and year would
+        otherwise expand to the same 365 keys and the second insert would violate
+        the constraint.
+
+        The delete window includes ``source_code``: it is part of the case key, so
+        clearing a window without it would delete another source's rows.
+
+        ``_ensure_dim_time`` runs once per **year**, not once per record.
         """
+        if rate_scale not in _RATE_SCALES:
+            raise ValueError(
+                f"rate_scale must be one of {sorted(_RATE_SCALES)}, got "
+                f"{rate_scale!r}")
+        if prefer not in _BURDEN_MEASURE_PREFERENCES:
+            raise ValueError(
+                f"prefer must be one of {list(_BURDEN_MEASURE_PREFERENCES)}, got "
+                f"{prefer!r}")
+        scale = float(_RATE_SCALES[rate_scale])
+
         logger.info("=" * 60)
         logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
+        logger.info("  measure: %s (rate scale %r)", prefer, rate_scale)
         logger.info("=" * 60)
+
         try:
             self.session.execute(text("SELECT case_count FROM fact_disease_case "
                                       "LIMIT 1"))
@@ -3689,6 +4022,7 @@ class DataConsolidator:
             logger.error("case_count column missing; run `alembic upgrade head`.")
             raise RuntimeError("Missing case_count column; run migrations first.") \
                 from exc
+
         self.session.execute(text(
             "INSERT INTO dim_identification_method "
             "(method_code, method_name, method_type) "
@@ -3696,30 +4030,232 @@ class DataConsolidator:
             "ON CONFLICT (method_code) DO NOTHING"))
         self.session.commit()
 
+        empty: Dict[str, Any] = {
+            "inserted": 0, "already_present": 0, "skipped": 0,
+            "no_population": 0, "errors": 0, "records": 0, "groups": 0,
+            "merged": 0, "zero": 0, "years_prepared": 0, "tiers": {},
+            "basis": {}, "grain": "grid cell", "grain_targets": 0,
+            "unparented_cells": 0}
+
         if not self._scalar_or_zero("SELECT COUNT(*) FROM fact_disease_burden"):
             logger.info("No burden records found; nothing to expand.")
-            return {"inserted": 0, "already_present": 0, "skipped": 0,
-                    "no_population": 0, "errors": 0}
-        population_map = {
-            int(row[0]): float(row[1])
-            for row in self.session.execute(text(
-                "SELECT location_id, indicator_value "
-                "FROM fact_socioeconomic_condition "
-                "WHERE indicator_code = 'SP.POP.TOTL'")).fetchall()
-            if row[1] is not None}
-        burden_records = self.session.execute(text(
-            "SELECT burden_id, location_id, year, disease_code, source_code, "
-            "incidence_rate, cases_mean FROM fact_disease_burden "
-            "WHERE (incidence_rate IS NOT NULL AND incidence_rate > 0) "
-            "   OR (cases_mean IS NOT NULL AND cases_mean > 0) "
-            "ORDER BY burden_id")).fetchall()
-        if not burden_records:
-            logger.warning("No burden records with valid data found.")
-            return {"inserted": 0, "already_present": 0, "skipped": 0,
-                    "no_population": 0, "errors": 0}
+            return empty
 
-        stats = {"inserted": 0, "already_present": 0, "skipped": 0,
-                 "no_population": 0, "errors": 0}
+        # ---- denominators ------------------------------------------------
+        index = _PopulationIndex(self.session, population_indicator).load()
+        divisors = (self._burden_locations_per_country(index)
+                    if national_allocation else {})
+        if national_allocation:
+            if divisors:
+                logger.warning(
+                    "  national allocation is ON: a location with no series of its "
+                    "own uses its country's population divided by the number of "
+                    "burden locations in that country (%s). Totals stay correct; "
+                    "the spatial pattern is uniform, not measured.",
+                    ", ".join(f"{c}={n}" for c, n in sorted(divisors.items())))
+            else:
+                logger.warning("  national allocation is ON but no country "
+                               "population series could be mapped; it will not "
+                               "apply.")
+
+        def _divisor_for(location_id: Any) -> float:
+            if population_divisor is not None:
+                return max(1e-9, float(population_divisor))
+            country = index.country_for(location_id) or "(unknown)"
+            return float(max(1, divisors.get(country, 1)))
+
+        # ---- write grain -------------------------------------------------
+        case_location_of: Dict[int, int] = {}
+        grain_label = "grid cell"
+        if group_by_level:
+            requested = str(group_by_level).strip().lower()
+            if requested in ("", "none", "cell", "grid"):
+                pass
+            elif requested in ("parent", "parent_location", "one-hop"):
+                for location_id, parent_location_id in self.session.execute(text(
+                    "SELECT location_id, parent_location_id FROM dim_location "
+                    "ORDER BY location_id")).fetchall():
+                    if location_id is not None and parent_location_id is not None:
+                        case_location_of[int(location_id)] = int(parent_location_id)
+                grain_label = "each cell's parent_location_id"
+            else:
+                case_location_of = self._ancestor_map(requested)
+                grain_label = f"admin_level={requested}"
+            if case_location_of:
+                logger.info("  writing at %s: %d cell(s) map to %d target(s)",
+                            grain_label, len(case_location_of),
+                            len(set(case_location_of.values())))
+            elif requested not in ("", "none", "cell", "grid"):
+                logger.warning(
+                    "  grouping to %r mapped no grid cell; writing per cell "
+                    "instead.", requested)
+
+        # ---- which records ----------------------------------------------
+        where: List[str] = [
+            "((incidence_rate IS NOT NULL AND incidence_rate > 0) "
+            " OR (cases_mean     IS NOT NULL AND cases_mean     > 0))"]
+        params: Dict[str, Any] = {}
+
+        wanted_locations = sorted({int(v) for v in (locations or [])
+                                   if v is not None})
+        if wanted_locations:
+            placeholders = ", ".join(f":loc{i}" for i in range(len(wanted_locations)))
+            where.append(f"location_id IN ({placeholders})")
+            params.update({f"loc{i}": value
+                           for i, value in enumerate(wanted_locations)})
+
+        wanted_years = sorted({int(v) for v in (years or []) if v is not None})
+        if wanted_years:
+            placeholders = ", ".join(f":yr{i}" for i in range(len(wanted_years)))
+            where.append(f"year IN ({placeholders})")
+            params.update({f"yr{i}": value for i, value in enumerate(wanted_years)})
+
+        sql = ("SELECT burden_id, location_id, year, disease_code, source_code, "
+               "       incidence_rate, cases_mean FROM fact_disease_burden "
+               f"WHERE {' AND '.join(where)} ORDER BY burden_id")
+        if limit is not None:
+            sql += " LIMIT :lim"
+            params["lim"] = max(1, int(limit))
+
+        burden_records = self.session.execute(text(sql), params).fetchall()
+        if not burden_records:
+            logger.warning("No burden records matched the selected filters.")
+            return empty
+
+        # ---- annual totals, grouped by case key -------------------------
+        annual_by_key: Dict[Tuple[int, int, str, str], float] = {}
+        tier_counts: Dict[str, int] = {}
+        basis_counts: Dict[str, int] = {}
+        prepared_years: Set[int] = set()
+        unparented_cells: Set[int] = set()
+        skipped = no_population = 0
+        failures = 0
+        logged_skips = 0
+        logged_allocations = 0
+
+        def _prepare_year(year_value: int) -> bool:
+            if year_value in prepared_years:
+                return True
+            try:
+                self._ensure_dim_time(int(year_value))
+            except Exception as exc:  # noqa: BLE001
+                logger.error("  could not extend dim_time to %s: %s",
+                             year_value, exc)
+                return False
+            prepared_years.add(int(year_value))
+            return True
+
+        for (burden_id, location_id, year, disease_code,
+             source_code, incidence_rate, cases_mean) in burden_records:
+            if location_id is None or year is None or disease_code is None:
+                skipped += 1
+                continue
+            try:
+                location_key, year_key = int(location_id), int(year)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+
+            rate_value = _positive(incidence_rate)
+            mean_value = _positive(cases_mean)
+
+            # Which measure this record uses. `prefer` decides when both exist;
+            # the loser is not used and is not an error.
+            if prefer == _BURDEN_MEASURE_INCIDENCE_RATE:
+                use_rate = rate_value is not None
+                use_mean = (not use_rate) and mean_value is not None
+            else:
+                use_mean = mean_value is not None
+                use_rate = (not use_mean) and rate_value is not None
+
+            if not use_rate and not use_mean:
+                skipped += 1
+                continue
+
+            population: Optional[float] = None
+            tier = _BURDEN_MEASURE_CASES_MEAN if use_mean else "none"
+
+            if use_rate:
+                # The denominator is resolved ONLY for a rate record. This is the
+                # ordering the previous version got wrong: it resolved (or skipped
+                # resolving) before deciding the measure, so a record carrying both
+                # ended up in the rate branch with no population.
+                hit = index.resolve(location_key, year_key,
+                                    allow_country=national_allocation)
+                if hit is not None:
+                    population, tier = hit.value, hit.tier
+                    if hit.is_country_level:
+                        divisor = _divisor_for(location_key)
+                        population = population / divisor
+                        if logged_allocations < _BURDEN_LOG_SAMPLE:
+                            logged_allocations += 1
+                            logger.info(
+                                "  allocation: burden_id %s (location=%s, year=%s) "
+                                "uses %s population %s / %s = %.0f",
+                                burden_id, location_key, year_key, hit.tier,
+                                f"{hit.value:,.0f}", f"{divisor:,.0f}", population)
+                elif default_population is not None:
+                    population, tier = float(default_population), "default"
+
+                if population is None or population <= 0:
+                    no_population += 1
+                    if logged_skips < _BURDEN_LOG_SAMPLE:
+                        logged_skips += 1
+                        logger.info(
+                            "  skipping burden_id %s (location=%s, year=%s, "
+                            "disease=%s): no %r row for this location and no "
+                            "country series%s.",
+                            burden_id, location_key, year_key, disease_code,
+                            population_indicator,
+                            "" if national_allocation
+                            else " (national allocation is OFF)")
+                    continue
+                annual_cases = (rate_value / scale) * float(population)
+            else:
+                annual_cases = float(mean_value)
+
+            if not _prepare_year(year_key):
+                failures += 1
+                continue
+
+            case_location = case_location_of.get(location_key, location_key)
+            if case_location == location_key and case_location_of:
+                unparented_cells.add(location_key)
+
+            key = (case_location, year_key, str(disease_code),
+                   str(source_code or ""))
+            annual_by_key[key] = annual_by_key.get(key, 0.0) + annual_cases
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+            basis = (_BURDEN_MEASURE_CASES_MEAN if use_mean
+                     else _BURDEN_MEASURE_INCIDENCE_RATE)
+            basis_counts[basis] = basis_counts.get(basis, 0) + 1
+
+        merged = len(burden_records) - skipped - no_population - len(annual_by_key)
+        if merged > 0:
+            logger.info(
+                "  %d burden record(s) shared a case key with another and were "
+                "SUMMED: uq_fact_case_natural has no pathogen column, so one "
+                "daily series per (location, year, disease, source) is the only "
+                "shape fact_disease_case can hold.", merged)
+
+        # ---- write -------------------------------------------------------
+        stats: Dict[str, Any] = {
+            "inserted": 0, "already_present": 0, "skipped": skipped,
+            "no_population": no_population, "errors": failures,
+            "records": len(burden_records), "groups": len(annual_by_key),
+            "merged": max(0, merged), "zero": 0,
+            "years_prepared": len(prepared_years), "tiers": tier_counts,
+            "basis": basis_counts, "grain": grain_label,
+            "grain_targets": len(set(case_location_of.values())),
+            "unparented_cells": len(unparented_cells)}
+
+        if not annual_by_key:
+            logger.warning(
+                "Nothing to expand: %d record(s) examined, %d had no denominator, "
+                "%d were skipped for a missing location/year/disease.",
+                len(burden_records), no_population, skipped)
+            return stats
+
         statement = text(
             "INSERT INTO fact_disease_case ("
             "  location_id, date_id_onset, date_id_reported, disease_code, "
@@ -3728,83 +4264,169 @@ class DataConsolidator:
             ") VALUES ("
             "  :loc_id, :date_id, :date_id, :disease, 'ESTIMATE', :src_code, "
             "  'confirmed', 'human', 'all', 'unknown', 'unknown', :case_count)")
-        window_sql = text(
-            "DELETE FROM fact_disease_case WHERE location_id = :loc_id "
-            "AND date_id_onset >= :start_date AND date_id_onset <= :end_date "
-            "AND disease_code = :disease AND identification_method_code = 'ESTIMATE'")
-        count_sql = text(
-            "SELECT COUNT(*) FROM fact_disease_case WHERE location_id = :loc_id "
-            "AND date_id_onset >= :start_date AND date_id_onset <= :end_date "
-            "AND disease_code = :disease AND identification_method_code = 'ESTIMATE'")
 
-        for (burden_id, location_id, year, disease_code,
-             source_code, incidence_rate, cases_mean) in burden_records:
-            population = population_map.get(int(location_id))
-            if incidence_rate is not None and incidence_rate > 0:
-                if population is None:
-                    population = default_population
-                if population is None or population <= 0:
-                    stats["no_population"] += 1
-                    logger.info("  skipping burden_id %s (location=%s, year=%s): no "
-                                "population and no default_population given.",
-                                burden_id, location_id, year)
-                    continue
-                annual_cases = (float(incidence_rate) / 100_000.0) * float(population)
-            elif cases_mean is not None and cases_mean > 0:
-                annual_cases = float(cases_mean)
-            else:
-                stats["skipped"] += 1
+        window_where = (
+            "WHERE location_id = :loc_id "
+            "AND date_id_onset >= :start_date AND date_id_onset <= :end_date "
+            "AND disease_code = :disease "
+            "AND identification_method_code = 'ESTIMATE' "
+            "AND ((:src_code IS NULL AND source_code IS NULL) "
+            "     OR source_code = :src_code)")
+        window_sql = text(f"DELETE FROM fact_disease_case {window_where}")
+        count_sql = text(f"SELECT COUNT(*) FROM fact_disease_case {window_where}")
+
+        for key in sorted(annual_by_key):
+            location_key, year_key, disease_code, source_code = key
+            annual_cases = annual_by_key[key]
+
+            target = int(round(max(0.0, annual_cases)))
+            if target <= 0:
+                stats["zero"] = int(stats["zero"]) + 1
+                logger.debug("  skipping (%s, %s, %s, %s): annual total %.3f "
+                             "rounds to 0", location_key, year_key, disease_code,
+                             source_code, annual_cases)
                 continue
 
-            window = {"loc_id": location_id, "start_date": f"{year}-01-01",
-                      "end_date": f"{year}-12-31", "disease": disease_code}
-            try:
-                self._ensure_dim_time(int(year))
-            except Exception as exc:  # noqa: BLE001
-                logger.error("  could not extend dim_time to %s: %s", year, exc)
-                stats["errors"] += 1
-                continue
+            window = {"loc_id": location_key,
+                      "start_date": f"{year_key}-01-01",
+                      "end_date": f"{year_key}-12-31",
+                      "disease": disease_code,
+                      "src_code": source_code or None}
             existing = int(self.session.execute(count_sql, window).scalar() or 0)
             if existing and not force:
-                logger.info("  skipping burden_id %s (location=%s, year=%s, "
-                            "disease=%s): %d ESTIMATE row(s) present.", burden_id,
-                            location_id, year, disease_code, existing)
-                stats["already_present"] += 1
+                stats["already_present"] = int(stats["already_present"]) + 1
                 continue
 
             daily = _burden_generate_daily_case_counts(
-                annual_cases=annual_cases, year=int(year),
-                location_id=int(location_id), base_variation=base_variation,
+                annual_cases=annual_cases, year=year_key,
+                location_id=location_key, base_variation=base_variation,
                 seed=seed)
-            logger.info("  burden_id %s (location=%s, year=%s): %d day(s), sum=%d "
-                        "(annual %.0f), mean=%.1f, max=%d",
-                        burden_id, location_id, year, len(daily),
-                        int(daily["case_count"].sum()), annual_cases,
-                        float(daily["case_count"].mean()),
-                        int(daily["case_count"].max()))
             try:
                 if existing:
                     deleted = self.session.execute(window_sql, window).rowcount or 0
-                    logger.info("    deleted %d existing ESTIMATE row(s)", deleted)
-                payload = [{"loc_id": int(location_id), "date_id": row["date_id"],
-                            "disease": disease_code, "src_code": source_code,
+                    logger.debug("    deleted %d existing ESTIMATE row(s)", deleted)
+                payload = [{"loc_id": location_key, "date_id": row["date_id"],
+                            "disease": disease_code,
+                            "src_code": source_code or None,
                             "case_count": int(row["case_count"])}
                            for row in daily.to_dict(orient="records")]
                 for start in range(0, len(payload), 5000):
                     self.session.execute(statement, payload[start:start + 5000])
                 self.session.commit()
-                stats["inserted"] += len(payload)
+                stats["inserted"] = int(stats["inserted"]) + len(payload)
             except Exception as exc:  # noqa: BLE001
-                logger.error("    Error expanding burden_id %s: %s: %s",
-                             burden_id, type(exc).__name__, exc)
+                logger.error("    error expanding (%s, %s, %s, %s): %s: %s",
+                             location_key, year_key, disease_code, source_code,
+                             type(exc).__name__, exc)
                 self.session.rollback()
-                stats["errors"] += 1
+                stats["errors"] = int(stats["errors"]) + 1
 
-        logger.info("BURDEN EXPANSION COMPLETE: %d inserted, %d present, %d skipped, "
-                    "%d no-population, %d error(s)", stats["inserted"],
-                    stats["already_present"], stats["skipped"],
-                    stats["no_population"], stats["errors"])
+        logger.info(
+            "BURDEN EXPANSION COMPLETE: %d inserted, %d present, %d zero-total, "
+            "%d no-population, %d skipped, %d error(s); %d record(s) -> %d group(s), "
+            "%d summed",
+            stats["inserted"], stats["already_present"], stats["zero"],
+            stats["no_population"], stats["skipped"], stats["errors"],
+            stats["records"], stats["groups"], stats["merged"])
+        logger.info("  measures: %s", ", ".join(
+            f"{name}={count}" for name, count in sorted(basis_counts.items()))
+            or "(none)")
+        logger.info("  denominators: %s", ", ".join(
+            f"{name}={count}" for name, count in sorted(tier_counts.items()))
+            or "(none)")
+        if case_location_of:
+            logger.info(
+                "  written at %s: %d target(s)%s. A large `summed` count here is "
+                "NORMAL at a coarser grain (cells sharing a target), not a "
+                "duplicate.",
+                grain_label, stats["grain_targets"],
+                f"; {len(unparented_cells)} cell(s) had no such ancestor and kept "
+                f"their own location_id" if unparented_cells else "")
+        if stats["no_population"]:
+            logger.warning(
+                "  %d rate record(s) had no denominator for %r. They are the only "
+                "records that need one: a %r record is self-contained. Use "
+                "--national-allocation if the population is a national series.",
+                stats["no_population"], population_indicator,
+                _BURDEN_MEASURE_CASES_MEAN)
+        if stats["zero"]:
+            logger.warning(
+                "  %d group(s) round to 0 cases and were not written. If that is "
+                "all of them on a %r run, the rate scale is wrong: try "
+                "--rate-scale per_person (cell shares are small, so a per-100k "
+                "assumption yields fractions of a case).",
+                stats["zero"], _BURDEN_MEASURE_INCIDENCE_RATE)
         return stats
+
+
+    def _burden_locations_per_country(self, index: "_PopulationIndex") -> Dict[str, int]:
+        """How many distinct burden locations each country holds.
+
+        This is the allocation divisor: giving each of N cells ``P/N`` makes the
+        sum over those cells exactly ``P``, so the national total is preserved
+        even though the spatial pattern is uniform. Computed over **all** burden
+        locations, not over the selected subset, so ``--limit`` cannot silently
+        change the divisor.
+        """
+        counts: Dict[str, int] = {}
+        try:
+            rows = self.session.execute(text(
+                "SELECT DISTINCT location_id FROM fact_disease_burden "
+                "WHERE location_id IS NOT NULL")).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("  could not count burden locations per country (%s); "
+                           "the allocation divisor will be 1.", exc)
+            return counts
+        for (location_id,) in rows:
+            country = index.country_for(location_id) or "(unknown)"
+            counts[country] = counts.get(country, 0) + 1
+        return counts
+
+    def _ancestor_map(self, target_level: str, *, grid_level: str = "grid",
+                      max_hops: int = 8) -> Dict[int, int]:
+        """``grid cell -> its nearest ancestor at target_level``.
+
+        Walks ``parent_location_id`` once per cell with a cycle guard. A cell
+        whose chain never reaches ``target_level`` is simply absent from the map,
+        and the expansion then keeps that cell at its own ``location_id`` - it
+        does not drop the record and does not invent an ancestor.
+
+        Read-only, one query. ``max_hops`` bounds a corrupted parent chain: a
+        two-node cycle would otherwise loop forever, and a plausible-looking
+        wrong ancestor is worse than no ancestor.
+        """
+        rows = self.session.execute(text(
+            "SELECT location_id, admin_level, parent_location_id "
+            "FROM dim_location ORDER BY location_id")).fetchall()
+
+        parent_of: Dict[int, Optional[int]] = {}
+        level_of: Dict[int, str] = {}
+        for location_id, admin_level, parent_location_id in rows:
+            if location_id is None:
+                continue
+            key = int(location_id)
+            level_of[key] = str(admin_level or "").strip().lower()
+            parent_of[key] = (None if parent_location_id is None
+                              else int(parent_location_id))
+
+        wanted = str(target_level).strip().lower()
+        start_level = str(grid_level).strip().lower()
+        found: Dict[int, int] = {}
+        for key, label in level_of.items():
+            if label != start_level:
+                continue
+            current = parent_of.get(key)
+            hops = 0
+            seen = {key}
+            while current is not None and hops < max_hops and current not in seen:
+                if level_of.get(current) == wanted:
+                    found[key] = current
+                    break
+                seen.add(current)
+                current = parent_of.get(current)
+                hops += 1
+        return found
+
 
     def _ensure_dim_time(self, year: int) -> int:
         """Insert missing dim_time rows for year (date_id is a foreign key)."""
