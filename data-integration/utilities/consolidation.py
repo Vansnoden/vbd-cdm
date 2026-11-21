@@ -3178,7 +3178,7 @@ class DataConsolidator:
 
     # -- A8 ----------------------------------------------------------------
 
-        def _match_column(self, table: str, column: str, pack: Any,
+    def _match_column(self, table: str, column: str, pack: Any,
                       resolver: ConceptResolver, *, dry_run: bool = False,
                       run_id: Optional[str] = None,
                       settled_values: Optional[Set[str]] = None,
@@ -3830,7 +3830,8 @@ class DataConsolidator:
                 logger.info("  %d unreferenced record(s) in %s (kept)",
                             len(orphaned), dim_table)
 
-        def _align_dimension_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
+    
+    def _align_dimension_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
         """NULL fact FKs pointing at a dimension key that does not exist.
 
         A NOT NULL FK cannot be NULLed, so those columns are reported and left
@@ -6013,7 +6014,7 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
         results = dict(results)
         results["close"] = close_report
     return results
-    
+
 
 __all__ = [
     "DataConsolidator",
