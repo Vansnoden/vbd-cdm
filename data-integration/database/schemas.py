@@ -4,32 +4,25 @@ Pydantic schemas for the CDM.
 """
 
 from __future__ import annotations
-
 import json
 from datetime import date, datetime
 from typing import Any, FrozenSet, Optional
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-#: Shared config for every Response schema: build from ORM objects.
-#:
-#: Defined before any class uses it. That ordering is the whole point of this
-#: file's repair (review §5.12); a name used before assignment here raised
-#: ``NameError`` at import and took ``import database`` down with it.
 _FROM_ATTRS = ConfigDict(from_attributes=True)
-
-
 _DECISIONS_CACHE: dict[str, FrozenSet[str]] = {}
+SUPPORTED_ENV_VARIABLES = frozenset({
+    "2t", "t2m", "tp", "d2m", "rh", "ndvi", "evi", "lst_day", "lst_night",
+    "temperature_mean", "temperature_min", "temperature_max",
+    "rainfall_total", "relative_humidity", "aridity_index",
+    "potential_breeding_sites",
+})
 
 
 def _canonical_decisions() -> FrozenSet[str]:
-    """The four decision values, from their single definition.
+    """The four decision values, from their single definition."""
 
-    See the module docstring for why the import is deferred. Raises
-    ``ImportError`` rather than falling back to a permissive answer: a schema
-    that accepts any decision string is a schema that validates nothing.
-    """
     cached = _DECISIONS_CACHE.get("v1")
     if cached is not None:
         return cached
@@ -46,8 +39,6 @@ def _canonical_decisions() -> FrozenSet[str]:
 
         values = frozenset(_DECISIONS)
     except ImportError:
-        # `DECISIONS` is not in concept_resolver yet (batch 6B adds it). These
-        # are the module's own constants, imported above — not a second copy.
         values = frozenset({AUTO_ACCEPTED, NEEDS_REVIEW, REJECTED, UNRESOLVED})
 
     _DECISIONS_CACHE["v1"] = values
@@ -55,17 +46,8 @@ def _canonical_decisions() -> FrozenSet[str]:
 
 
 def _normalise_candidates(value: Any) -> Optional[str]:
-    """Accept backend text or a Python list; store canonical JSON text.
+    """Accept backend text or a Python list; store canonical JSON text."""
 
-    Defined before the validators that reference it (review §5.12). The column
-    is ``Text``, so:
-
-    * ``None`` stays ``None``;
-    * a ``str`` is validated as JSON and returned **unchanged** — a reader must
-      get back exactly the text the resolver wrote, not a re-serialisation;
-    * a list/tuple/dict is serialised with ``sort_keys`` and fixed separators so
-      two runs produce byte-identical evidence.
-    """
     if value is None:
         return None
     if isinstance(value, str):
@@ -81,14 +63,8 @@ def _normalise_candidates(value: Any) -> Optional[str]:
 
 
 def _normalise_json_object(value: Any) -> Optional[str]:
-    """Accept a JSON object as text or a mapping; store canonical JSON text.
+    """Accept a JSON object as text or a mapping; store canonical JSON text."""
 
-    For ``dim_concept.extra`` and ``dim_vocabulary.extra``. A JSON *list* is
-    rejected: both columns are objects by contract (synonyms/definition/
-    centroid, and the checksum artefact discriminator), and accepting a bare
-    list would let a legacy pipe-delimited synonym list be written as the whole
-    payload.
-    """
     if value is None:
         return None
     if isinstance(value, str):
@@ -154,7 +130,6 @@ class DimTimeCreate(BaseModel):
 
 
 class DimLocationCreate(BaseModel):
-    # Optional on create because the database autoincrements it.
     location_id: Optional[int] = None
     location_code: Optional[str] = None
     name: str
@@ -249,18 +224,7 @@ class DimSocioeconomicIndicatorCreate(BaseModel):
 
 
 class DimSourceCreate(BaseModel):
-    """A data source's provenance row.
-
-    Deliberately carries **no** resolution fields. ``decision``,
-    ``candidates``, ``resolver_version``, ``run_id`` and ``resolved_at`` were
-    pasted in here by an earlier batch (review §3.4), which made
-    ``run_id``/``decision`` required to insert a source and put two unrelated
-    concepts in one class. They belong to :class:`ResolutionLogCreate`, where
-    they now live.
-
-    ``standard_code`` and ``concept_id`` *do* belong here: ``DimSource`` carries
-    both, and the registry writes them through a source-domain pack.
-    """
+    """A data source's provenance row."""
 
     source_code: str = Field(..., max_length=20)
     source_name: str
@@ -273,13 +237,7 @@ class DimSourceCreate(BaseModel):
 
 
 class DimVocabularyCreate(BaseModel):
-    """A vocabulary release. ``vocabulary_id`` is version-qualified.
-
-    ``checksum`` is the SHA-256 of *an* artefact, and ``extra`` must say which:
-    the registry hashes a pack manifest, the loader hashes a CSV, and both write
-    this column (contract Amendment §5.4). A reader that does not consult
-    ``extra["checksum_artefact"]`` cannot tell them apart.
-    """
+    """A vocabulary release. ``vocabulary_id`` is version-qualified."""
 
     vocabulary_id: str = Field(..., max_length=100, description="e.g. 'gadm@4.1'")
     vocabulary_name: str = Field(..., max_length=1000)
@@ -311,14 +269,8 @@ class DimVocabularyCreate(BaseModel):
     @field_validator("extra")
     @classmethod
     def _check_checksum_artefact(cls, v: Optional[str]) -> Optional[str]:
-        """Require the discriminator whenever a checksum is accompanied by it.
+        """Require the discriminator whenever a checksum is accompanied by it."""
 
-        The check is one-directional on purpose: ``extra`` is optional (a
-        pre-registry row has no artefact to declare), but when it carries a
-        ``checksum_artefact`` the value must be one this codebase writes. A
-        typo here would make a reader's lookup miss and silently treat a CSV
-        digest as a manifest digest.
-        """
         if v is None:
             return v
         payload = json.loads(v)
@@ -404,8 +356,6 @@ class FactDiseaseCaseCreate(BaseModel):
     age_group: Optional[str] = None
     sex: Optional[str] = None
     outcome: Optional[str] = "unknown"
-    # Number of cases represented by this row: 1 for an individual record,
-    # >1 for an aggregated daily surveillance / burden-expanded row.
     case_count: Optional[int] = Field(1, ge=1)
 
     @field_validator("date_id_onset", "date_id_reported")
@@ -432,31 +382,18 @@ class FactDiseaseCaseCreate(BaseModel):
 
 
 class FactInsecticideResistanceCreate(BaseModel):
-    """Aligned with ``FactInsecticideResistance``.
-
-    A resistance test is a first-class entity, not a child of a vector
-    observation: it carries its own location, date, vector code, insecticide,
-    test type and source.
-    """
-
     location_id: int
     date_id: str
     vector_code: str
     insecticide_code: str
     test_type_code: str
     source_code: str
-
-    # Test conditions
     concentration: Optional[float] = None
     exposure_time: Optional[int] = None
-
-    # Raw counts
     n_insect_tested: Optional[int] = None
     n_insect_susceptible: Optional[int] = None
     n_insect_resistant: Optional[int] = None
     n_insect_dead: Optional[int] = None
-
-    # VGSC knockdown-resistance genotype counts
     vgsc_n_insect_tested: Optional[int] = None
     vgsc995l_vgsc995l_n: Optional[int] = None
     vgsc995l_vgsc995f_n: Optional[int] = None
@@ -465,8 +402,6 @@ class FactInsecticideResistanceCreate(BaseModel):
     vgsc995s_vgsc995s_n: Optional[int] = None
     vgsc995f_vgsc995s_n: Optional[int] = None
     vgsc_generation: Optional[str] = None
-
-    # Outcome
     mortality: Optional[float] = Field(
         None, description="Mortality percentage (0-100)"
     )
@@ -480,8 +415,6 @@ class FactInsecticideResistanceCreate(BaseModel):
     @field_validator("mortality")
     @classmethod
     def _check_mortality(cls, v: Optional[float]) -> Optional[float]:
-        # Percentage, matching the WHO bioassay convention and the
-        # consolidation.py / fix_resistance_status.py pipeline.
         if v is not None and not (0.0 <= v <= 100.0):
             raise ValueError("mortality must be a percentage between 0 and 100")
         return v
@@ -498,15 +431,13 @@ class FactInsecticideResistanceCreate(BaseModel):
 
 
 class FactBionomicsCreate(BaseModel):
-    """Aligned with ``FactBionomics`` — no ``vector_observation_id``."""
-
     location_id: int
     date_id: str
     vector_code: str
     source_code: str
     biting_rate: Optional[float] = None
-    feeding_preference: Optional[str] = None   # anthropophagic | zoophagic | mixed
-    biting_location: Optional[str] = None      # endophagic | exophagic | mixed
+    feeding_preference: Optional[str] = None   
+    biting_location: Optional[str] = None      
     resting_behavior: Optional[str] = None
     larval_site_type: Optional[str] = None
 
@@ -517,12 +448,6 @@ class FactBionomicsCreate(BaseModel):
 
 
 class FactInterventionCreate(BaseModel):
-    """Aligned with ``FactIntervention``.
-
-    ``date_start`` / ``date_end`` are ``dim_time.date_id`` strings, not Python
-    dates.
-    """
-
     location_id: int
     date_start: str
     date_end: Optional[str] = None
@@ -613,13 +538,6 @@ class FactDiseaseBurdenCreate(BaseModel):
 
 
 class FactEnvironmentalCreate(BaseModel):
-    """Aligned with ``FactEnvironment`` — long format.
-
-    ``variable`` is free text, but the ETL and analysis pipelines expect the set
-    in :data:`SUPPORTED_ENV_VARIABLES`. An unexpected variable is allowed; the
-    caller logs it.
-    """
-
     location_id: int
     date_id: str
     variable: str = Field(..., max_length=50)
@@ -632,26 +550,12 @@ class FactEnvironmentalCreate(BaseModel):
         return _validate_yyyy_mm_dd(v)
 
 
-#: Environmental variable names the analysis pipeline understands.
-SUPPORTED_ENV_VARIABLES = frozenset({
-    "2t", "t2m", "tp", "d2m", "rh", "ndvi", "evi", "lst_day", "lst_night",
-    "temperature_mean", "temperature_min", "temperature_max",
-    "rainfall_total", "relative_humidity", "aridity_index",
-    "potential_breeding_sites",
-})
-
-
 # =============================================================================
 # CONCEPT MAPPING AND THE RESOLUTION LEDGER
 # =============================================================================
 
 class _FactConceptMapFields(BaseModel):
-    """Field and single-field-validator set shared by the concept-map schemas.
-
-    Extracted so :class:`FactConceptMapCreate` can carry the reviewer rule and
-    :class:`FactConceptMapResponse` can inherit the *fields* without it. See the
-    Response class for why that split is deliberate.
-    """
+    """Field and single-field-validator set shared by the concept-map schemas."""
 
     source_table: str = Field(..., max_length=100)
     source_column: str = Field(..., max_length=100)
@@ -670,7 +574,6 @@ class _FactConceptMapFields(BaseModel):
     reviewed_by: Optional[str] = Field(None, max_length=100)
     reviewed_at: Optional[datetime] = None
 
-    # Human review only: None = unreviewed, True = approved, False = rejected.
     is_approved: Optional[bool] = None
 
     @field_validator("decision")
@@ -687,14 +590,7 @@ class _FactConceptMapFields(BaseModel):
 
 
 class FactConceptMapCreate(_FactConceptMapFields):
-    """The current decision for one raw value, keyed by the source triple.
-
-    ``is_approved`` is the *human* verdict and is three-state; writing one is a
-    review, and a review has an author. The validator below makes that
-    structural rather than conventional — a row claiming a human approved it,
-    with no ``reviewed_by``, is a provenance hole the database cannot detect
-    (review C4, contract Amendment).
-    """
+    """The current decision for one raw value, keyed by the source triple."""
 
     @model_validator(mode="after")
     def _review_needs_an_author(self) -> "FactConceptMapCreate":
@@ -710,15 +606,7 @@ class FactConceptMapCreate(_FactConceptMapFields):
 
 
 class FactConceptMapResponse(_FactConceptMapFields):
-    """A stored concept-map row.
-
-    Derives from the field-only base rather than from ``FactConceptMapCreate``
-    on purpose: the reviewer rule is a *write-side* constraint. A pre-refactor
-    row can legitimately carry ``is_approved = TRUE`` with ``reviewed_by =
-    NULL`` — the batch-1 migration deliberately does not backfill a reviewer
-    nobody can name — and validating that on read would make the API unable to
-    return its own legacy data.
-    """
+    """A stored concept-map row."""
 
     map_id: int
     mapped_at: Optional[datetime] = None
@@ -726,42 +614,26 @@ class FactConceptMapResponse(_FactConceptMapFields):
 
 
 class ResolutionLogCreate(BaseModel):
-    """One append-only resolution witness, scoped to a run id.
-
-    ``source_table``, ``source_column``, ``decision`` and ``run_id`` are all
-    required because all four are ``NOT NULL`` in ``fact_resolution_log``, and
-    ``run_id`` is part of that table's unique key — SQL treats NULLs as
-    distinct, so a NULL run id would silently allow duplicate witnesses of one
-    decision.
-    """
+    """One append-only resolution witness, scoped to a run id."""
 
     source_table: str = Field(..., max_length=100)
     source_column: str = Field(..., max_length=100)
     source_value: str = Field(..., max_length=300)
-
     vocabulary_id: Optional[str] = Field(None, max_length=100)
     vocabulary_version: Optional[str] = Field(None, max_length=100)
     concept_code: Optional[str] = Field(None, max_length=100)
     match_method: Optional[str] = Field(None, max_length=30)
     match_score: Optional[float] = None
-
     decision: str = Field(..., max_length=20)
-
-    # JSON text, or a list which is serialised deterministically.
     candidates: Optional[str] = None
-
     resolver_version: Optional[str] = Field(None, max_length=50)
     run_id: str = Field(..., max_length=50)
-
-    # NOT NULL in the table; the model supplies a Python-side default when this
-    # is omitted on an ORM insert.
     resolved_at: Optional[datetime] = None
 
     @field_validator("decision")
     @classmethod
     def _check_decision(cls, v: str) -> str:
         validated = _require_decision(v)
-        # `_require_decision` is Optional-tolerant; here the column is NOT NULL.
         assert validated is not None
         return validated
 
@@ -779,14 +651,8 @@ class ResolutionLogCreate(BaseModel):
 
     @model_validator(mode="after")
     def _concept_code_only_when_accepted(self) -> "ResolutionLogCreate":
-        """A withheld decision must not carry an applied concept.
+        """A withheld decision must not carry an applied concept."""
 
-        Contract Amendment: ``concept_code`` is not ``None`` only for
-        ``auto_accepted``. The resolver enforces it, ``DimensionEntry`` enforces
-        it structurally, and this is the transport-level check — a client
-        posting ``decision='needs_review'`` with a code would otherwise write a
-        row that the review queue reads as applied.
-        """
         if self.concept_code and self.decision != "auto_accepted":
             raise ValueError(
                 f"decision {self.decision!r} cannot carry concept_code "
@@ -797,12 +663,7 @@ class ResolutionLogCreate(BaseModel):
 
 
 class ResolutionLogResponse(ResolutionLogCreate):
-    """A stored ledger row.
-
-    ``ResolutionLogCreate`` is fully defined above — that ordering is the
-    finding §5.12 repair: the pre-batch file inherited from a class that did not
-    exist yet and the module could not be imported.
-    """
+    """A stored ledger row."""
 
     log_id: int
     model_config = _FROM_ATTRS

@@ -5,12 +5,10 @@ FileExtractor - Reads various file formats into a pandas DataFrame using data_tr
 import os
 import logging
 from typing import Optional, Dict, Any, Union, List
-
 import pandas as pd
-
-# Import the data transformation functions
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
 from utilities.data_transform_library import (
     cog_to_df, tif_to_df,
     nc_to_df, grib_to_df, tif_to_df_chunked, timeseries_to_df, timeseries_to_csv,
@@ -19,6 +17,7 @@ from utilities.data_transform_library import (
     json_to_df, tsv_to_df, xlsx_to_df, xml_to_df,
     load_yaml_config 
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,7 @@ class FileExtractor:
         """
         self.extract_mode = extract_mode
         self.large_df_threshold = large_df_threshold
+
 
     def extract(self, file_path: str, **reader_kwargs) -> pd.DataFrame:
         """
@@ -66,7 +66,6 @@ class FileExtractor:
         # Dispatch based on extension
         if ext in ('cog', 'tif', 'tiff'):
             if self.extract_mode == 'chunked':
-                # Return a generator
                 window_size      = reader_kwargs.pop('window_size', 512)
                 band             = reader_kwargs.pop('band', 1)
                 nodata_threshold = reader_kwargs.pop('nodata_threshold', -9999.0)
@@ -83,7 +82,6 @@ class FileExtractor:
                 
         elif ext in ('nc', 'nc4', 'grib', 'grib2'):
             if self.extract_mode == 'single':
-                # Use single‑variable, single‑time reader
                 variable = reader_kwargs.pop('variable', None)
                 time_idx = reader_kwargs.pop('time_idx', 0)
                 if ext in ('grib', 'grib2'):

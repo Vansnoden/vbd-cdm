@@ -25,52 +25,6 @@ def build_disease_vocabulary(
     max_synonyms: int = 8,
 ) -> "pd.DataFrame":
     """Build the disease vocabulary CSV from an OBO/OWL ontology.
-
-    Every row's ``vocabulary_id`` comes from ``vocabulary_id`` via
-    :func:`_detect_vocab_id`, never from ``obo_path``. That is the whole point of
-    the signature: the file tells you what to parse, the caller tells you what
-    the concepts *are*, and the two are not allowed to be confused.
-
-    Parameters
-    ----------
-    obo_path : str or pathlib.Path
-        The ontology file. Any format ``pronto`` can open.
-    output_path : str or pathlib.Path
-        Where the CSV is written. Parent directories are created.
-    vocabulary_id : str
-        Keyword-only and required. The identity every row is stamped with, e.g.
-        ``'IDOMAL'``. Must not look like a path.
-    ontology_prefix : str, optional
-        Keep only concepts whose code starts with this prefix (``'IDOMAL:'``).
-        ``None`` keeps every term, which is right for a single-disease ontology
-        and wrong for a multi-species one.
-    include_obsolete : bool
-        Keep terms flagged obsolete in the source. Off by default: an obsolete
-        term must not be matched against a live record.
-    max_synonyms : int
-        Cap on the synonym list per concept, so one verbose term cannot produce a
-        megabyte-wide CSV cell. Order is the ontology's own declaration order,
-        preserved, so the file is reproducible.
-
-    Returns
-    -------
-    pandas.DataFrame
-        The frame written, with columns ``vocabulary_id``, ``concept_code``,
-        ``concept_name``, ``concept_class``, ``parent_code``, ``definition``,
-        ``synonyms`` (pipe-joined) — the shape
-        ``VocabularyLoader.load_csv`` reads.
-
-    Raises
-    ------
-    ValueError
-        If the identity is absent or path-like, if the file produces no usable
-        concept, or if the result contains a duplicate ``concept_code``.
-
-    Notes
-    -----
-    An empty build raises rather than writing a header-only CSV. A vocabulary
-    with no concepts resolves nothing, and the failure mode is a run that reports
-    success while standardising nothing — review C10, one layer up.
     """
     identity = _detect_vocab_id(vocabulary_id)
 
@@ -99,11 +53,6 @@ def build_disease_vocabulary(
 
     def _synonyms(term: Any) -> List[str]:
         """The term's synonyms as declarative strings, de-duplicated, capped.
-
-        ``pronto`` yields ``Synonym`` objects whose ``str()`` is the declarative
-        form (``"malaria" EXACT []``); only the quoted label is wanted, so a
-        leading/trailing quote and any trailing qualifier are removed. Order is
-        the ontology's, never a set's, so two builds produce the same CSV.
         """
         seen: List[str] = []
         try:
@@ -218,40 +167,6 @@ def _infer_class(term) -> str:
 
 def _detect_vocab_id(vocab_id: Optional[str] = None) -> str:
     """Return the vocabulary identity the caller declares, or raise.
-
-    Review C11: this function used to infer identity from a filename substring
-    (``"idomal" in path.lower() -> "IDOMAL"``). Building from ``mondo.obo``
-    therefore stamped MONDO codes on rows that ``standardize_vocabularies`` then
-    loaded under the id ``"IDOMAL"`` — two vocabularies silently became one, and
-    the only way to detect it was to read the CSV. Identity from a path is
-    precisely the implicit coupling invariant 1 forbids.
-
-    There is no inference here and no default. The caller (``build.py``) owns the
-    identity string, because it is the only place that knows which release the
-    operator asked for.
-
-    A path is rejected explicitly rather than silently accepted. That is not
-    inference: it is a guard against the one mistake this refactor invites —
-    forwarding ``obo_path`` where an id now belongs, which would otherwise write
-    a full filesystem path into every ``vocabulary_id`` and every FK that points
-    at it.
-
-    Parameters
-    ----------
-    vocab_id : str
-        The vocabulary identity, e.g. ``'IDOMAL'``, ``'MONDO'``, ``'IDO'``.
-
-    Returns
-    -------
-    str
-        The identity, stripped, otherwise unchanged. Case is preserved: the
-        caller decides how the id is spelled, and
-        ``dim_vocabulary.vocabulary_id`` is compared literally.
-
-    Raises
-    ------
-    ValueError
-        If no id was supplied, or if the supplied value looks like a path.
     """
     if vocab_id is None:
         raise ValueError(

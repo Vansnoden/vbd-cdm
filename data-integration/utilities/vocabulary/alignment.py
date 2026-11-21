@@ -1,27 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Load the shipped vocabularies, then align stored values to them.
-
-The value-alignment chain, in the order it must run:
-
-1. :func:`load_shipped_vocabularies` — ``dim_concept`` is written only by
-   ``VocabularyLoader.load_csv``, and nothing called it. Reconciliation
-   therefore ran against an empty dictionary and marked every value
-   ``unresolved``.
-2. ``DataConsolidator.standardize_vocabularies`` — matches values and writes
-   ``concept_id`` / ``standard_code`` on a dimension, or a decision row in
-   ``fact_concept_map`` for a fact column.
-3. :func:`align_dimension_values` — rewrites a dimension's label column to the
-   canonical concept name, so two rows that resolved to one concept stop
-   carrying two spellings even before the merge pass groups them.
-4. :func:`align_fact_values` — the same rewrite for a fact table's free-text
-   column, which has no ``concept_id`` and is joined through
-   ``fact_concept_map`` instead.
-
-:func:`describe_target` and :func:`require_data` exist because the first
-question a zero-everywhere report must answer is whether it read the database
-the pipeline wrote. ``database.session`` fixes ``DATABASE_URL`` at import time,
-so an entry point that does not load ``.env`` first resolves the fallback and
-SQLite silently creates an empty file with the full schema.
+"""
+Load the shipped vocabularies, then align stored values to them.
 """
 
 from __future__ import annotations
@@ -33,12 +12,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Loaded before anything that touches `database`: session.py resolves its URL at
-# import time and a later load_dotenv() is a no-op for this process.
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except Exception:  # noqa: BLE001 - python-dotenv is optional here
+except Exception:  
     pass
 
 from sqlalchemy import text
@@ -58,14 +35,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_ROOT = PROJECT_ROOT / "vocabularies" / "registry"
 VOCABULARY_ROOT = PROJECT_ROOT / "vocabularies"
 
-#: Dimension label columns that are never rewritten to the canonical name.
-#:
-#: ``dim_location.name`` is here for a specific reason:
-#: ``resolve_parent_locations`` stamps a ``standard_code`` on **every** row whose
-#: centroid falls inside a boundary polygon, including survey sites and grid
-#: cells. A concept-driven rename would therefore overwrite a site's own name
-#: with its district's, destroying the identity the site exists to carry. A
-#: location's name is its own; its boundary membership is ``standard_code``.
 NEVER_RENAME = frozenset({"dim_location.name"})
 
 
@@ -126,11 +95,6 @@ def describe_target(session) -> Dict[str, Any]:
 
 def require_data(session, *, allow_empty: bool = False) -> Dict[str, Any]:
     """Abort unless the database this process is reading holds data.
-
-    ``dim_location`` is the probe: every ingest writes some, so zero means a
-    different (or brand-new) database. Aborting with the URL beats emitting a
-    report of zeros, which reads as "nothing resolved" when the truth is
-    "nothing was looked at".
     """
     info = describe_target(session)
     empty = (info.get("locations") or 0) == 0 and (info.get("sources_loaded") or 0) == 0
@@ -156,11 +120,6 @@ def require_data(session, *, allow_empty: bool = False) -> Dict[str, Any]:
 
 def _csv_candidates(pack: Any) -> List[Path]:
     """CSVs that could hold ``pack``'s concepts, in a fixed order.
-
-    Filesystem-based because a ``concepts_csv`` manifest key cannot be added
-    without editing ``registry.REQUIRED_KEYS``. Conventions, in order:
-    ``vocabularies/registry/<pack_id>/*.csv``, ``vocabularies/<pack_id>.csv``,
-    ``vocabularies/<pack_id>.<version>.csv``.
     """
     pack_id = _clean(getattr(pack, "pack_id", ""))
     version = _clean(getattr(pack, "version", ""))
@@ -214,11 +173,6 @@ def _concept_count(session, vocabulary_id: str) -> int:
 def load_shipped_vocabularies(session, registry: Any, *,
                               dry_run: bool = False) -> Dict[str, Any]:
     """Load every CSV that ships with a concept pack into ``dim_concept``.
-
-    Idempotent by checksum: a pack whose ``dim_vocabulary.checksum`` already
-    matches its CSV is skipped, so a re-run costs one hash and no writes. A pack
-    with no CSV is reported, not fatal — the registry may describe a vocabulary
-    the operator has not built yet.
     """
     result: Dict[str, Any] = {"packs": {}, "loaded": 0, "skipped": 0,
                               "no_csv": 0, "errors": 0, "concepts": 0}
@@ -319,17 +273,6 @@ def load_shipped_vocabularies(session, registry: Any, *,
 def align_dimension_values(session, registry: Any, *,
                            dry_run: bool = False) -> Dict[str, Any]:
     """Rewrite a dimension's label column to the concept's canonical name.
-
-    Runs after reconciliation, so ``concept_id`` is populated only on rows whose
-    decision was ``auto_accepted``; a row awaiting review has no ``concept_id``
-    and is left exactly as the source sent it.
-
-    The source spelling is not lost: ``fact_concept_map`` keeps
-    ``(source_table, source_column, source_value, concept_code, match_method,
-    match_score)``, so the rewrite is auditable and reversible.
-
-    Idempotent: the predicate requires the stored label to differ from the
-    concept name, so a second run reports 0 and writes nothing.
     """
     result: Dict[str, Any] = {"fields": {}, "updated": 0, "dry_run": bool(dry_run)}
 
@@ -403,14 +346,6 @@ def align_dimension_values(session, registry: Any, *,
 def align_fact_values(session, registry: Any, *,
                       dry_run: bool = False) -> Dict[str, Any]:
     """Rewrite a fact table's free-text column to the canonical concept name.
-
-    A fact table has no ``concept_id``, so the decision lives only in
-    ``fact_concept_map``. The join is therefore
-    ``fact_concept_map.source_value = the table's own column``, restricted to
-    ``decision = 'auto_accepted'`` and to the vocabulary that produced it.
-
-    Nothing is rewritten when no pack governs the column, which is the honest
-    outcome: it means no vocabulary has an opinion about ``life_stage`` yet.
     """
     result: Dict[str, Any] = {"fields": {}, "updated": 0,
                               "ungoverned": [], "dry_run": bool(dry_run)}
@@ -529,11 +464,6 @@ def _distinct_count(session, table: str, column: str) -> int:
 
 def alignment_report(session, registry: Any) -> Dict[str, Any]:
     """Per-field reconciliation state, plus every field no pack governs.
-
-    Read-only. This separates the three failure modes: a pack with 0 concepts
-    (never loaded), a field with values and 0 ``auto_accepted`` (loaded but not
-    matching), and a table with 0 rows (wrong database — see
-    :func:`describe_target`).
     """
     report: Dict[str, Any] = {"vocabularies": [], "fields": [],
                               "ungoverned": []}

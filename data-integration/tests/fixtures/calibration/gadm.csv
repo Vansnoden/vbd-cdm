@@ -1,6 +1,0 @@
-# path: tests/fixtures/calibration/gadm.csv
-# status: NEW FILE
-raw_value,expected_code,expected_method
-"Siaya",GID_2_KEN.3_1,exact
-"Kisumu",GID_2_KEN.3_2,alias
-"Someplace That Does Not Exist",,unresolved

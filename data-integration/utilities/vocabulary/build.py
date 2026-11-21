@@ -104,8 +104,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     if args.command == "locations":
-        # The boundary builder keeps its own entry point: it needs geopandas and
-        # a manifest-declared layer layout, neither of which this batch touches.
         logger.error(
             "the 'locations' builder is not re-wired by batch 6D; call "
             "build_location_vocabulary directly with the boundary pack."
@@ -135,9 +133,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.load:
         return 0
 
-    # ---- optional load into the CDM ------------------------------------
-    # Imported lazily: building a CSV must not require a database, and
-    # `database.session` binds an engine at import time.
     try:
         from database.session import SessionLocal
         from utilities.vocabulary.loader import VocabularyLoader

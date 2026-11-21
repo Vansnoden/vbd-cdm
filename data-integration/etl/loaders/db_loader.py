@@ -22,25 +22,6 @@ from database.session import DATABASE_URL, SessionLocal, engine
 logger = logging.getLogger(__name__)
 
 
-# -----------------------------------------------------------------------------
-# Natural-key configuration
-#
-# Each entry maps a table name to:
-#   'columns'   — the conflict target. MUST match a real unique constraint.
-#   'sentinels' — values substituted for NULLs in nullable natural-key columns
-#                 before insert. PostgreSQL and SQLite treat NULL as distinct in
-#                 a unique index, so without a sentinel the constraint does not
-#                 bite for those rows.
-#   'in_batch_key' — optional extra key used ONLY to collapse duplicates within
-#                 one batch, for tables whose real conflict target can be NULL.
-#                 It does not change the ON CONFLICT clause.
-#
-# `dim_location` and `fact_disease_burden.pathogen_species` are the two places
-# where a nullable column sits inside a unique constraint. Neither can take a
-# sentinel without inventing data, so both get an in-batch key instead and the
-# limitation is logged. The real fix is a schema change (a NOT NULL code, or
-# PostgreSQL 15's NULLS NOT DISTINCT), and is out of this file's scope.
-# -----------------------------------------------------------------------------
 NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     # ---------- Dimensions ----------
     "dim_location": {
@@ -102,13 +83,8 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     },
 }
 
-#: The only decision that authorises applying a concept to a dimension row.
 _APPLIED_DECISION = "auto_accepted"
 
-#: The COPY NULL marker. PostgreSQL's ``COPY ... NULL '\N'`` reads an *unquoted*
-#: ``\N`` as NULL, which means a genuine two-character ``\N`` in a cell becomes
-#: NULL. Pandas only quotes when it must, so the load path checks for the literal
-#: before writing and refuses rather than silently nulling a value.
 _COPY_NULL_MARKER = "\\N"
 
 
@@ -148,6 +124,7 @@ class DBLoader:
                 model_map[obj.__tablename__] = obj
         return model_map
 
+
     def _detect_db_type(self) -> str:
         if DATABASE_URL.startswith("postgresql"):
             return "postgresql"
@@ -157,9 +134,11 @@ class DBLoader:
             return "mysql"
         raise ValueError(f"Unsupported database type: {DATABASE_URL}")
 
+
     def _get_primary_key_columns(self, table_name: str) -> List[str]:
         inspector = inspect(engine)
         return inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
+
 
     def _get_column_types(self, table_name: str) -> Dict[str, str]:
         inspector = inspect(engine)
@@ -168,14 +147,10 @@ class DBLoader:
             for col in inspector.get_columns(table_name)
         }
 
-    def _get_conflict_targets(self, table_name: str, pk_cols: List[str]) -> List[str]:
-        """The natural-key columns that form the ``ON CONFLICT`` target.
 
-        Falls back to the primary key only when the table has no declared
-        natural key, which is what ``fact_concept_map`` and ``fact_resolution_log``
-        rely on — both are keyed by a surrogate and written by dedicated SQL
-        rather than through this path.
-        """
+    def _get_conflict_targets(self, table_name: str, pk_cols: List[str]) -> List[str]:
+        """The natural-key columns that form the ``ON CONFLICT`` target."""
+
         config = NATURAL_KEY_CONFIG.get(table_name)
         if config and config["columns"]:
             return list(config["columns"])
@@ -192,14 +167,6 @@ class DBLoader:
            unique constraint catches duplicates reliably.
         2. Collapse duplicate rows within the batch. PostgreSQL rejects a
            multi-row ``ON CONFLICT`` that touches the same target row twice.
-
-        Step 2 uses the declared conflict target when every one of its columns is
-        present and non-null; otherwise it falls back to ``in_batch_key``. A row
-        that has a NULL in the conflict target cannot participate in the
-        constraint at all — SQL treats each NULL as distinct — so without the
-        fallback, re-ingesting a source that omits ``location_code`` multiplies
-        ``dim_location`` on every run and leaves the consolidation phase to merge
-        the copies back.
         """
         config = NATURAL_KEY_CONFIG.get(table_name)
         if not config:
@@ -241,9 +208,6 @@ class DBLoader:
             before = len(df)
             df = df.sort_values(by=natural_cols, kind="mergesort")
             df = df.drop_duplicates(subset=natural_cols, keep="last")
-            # Restore the caller's row order as far as it can be restored; the
-            # sort above only exists so drop_duplicates keeps a deterministic
-            # survivor when two rows disagree.
             df = df.reset_index(drop=True)
             dropped = before - len(df)
             if dropped:
@@ -260,21 +224,7 @@ class DBLoader:
 
     def _copy_upsert_postgresql(self, df: pd.DataFrame, table_name: str,
                                 model: Any) -> int:
-        """Bulk-load via ``COPY`` into a temp table, then merge.
-
-        Three defects from the previous version are fixed here:
-
-        * it called ``session.commit()`` between ``CREATE TEMP TABLE`` and the
-          ``COPY``. A commit returns the connection to the pool, and a ``TEMP``
-          table is connection-scoped — so the staging table could be gone by the
-          time the copy ran. Everything now happens on one ``session.connection()``
-          with no commit in between.
-        * it built the whole file in a ``StringIO``. That is kept (a staging
-          table with no rows has to be filled somehow) but the size is logged, so
-          a multi-million-row batch is visible rather than a memory spike.
-        * a literal ``\\N`` in a cell silently became NULL. Checked and refused
-          before the copy.
-        """
+        """Bulk-load via ``COPY`` into a temp table, then merge."""
         pk_cols = self._get_primary_key_columns(table_name)
         conflict_targets = self._get_conflict_targets(table_name, pk_cols)
 
@@ -286,7 +236,6 @@ class DBLoader:
             if col not in df.columns:
                 df[col] = None
 
-        # Autoincrement PKs that are entirely NULL are left to the database.
         for pk in pk_cols:
             if pk in df.columns and df[pk].isna().all():
                 df = df.drop(columns=[pk])
@@ -428,16 +377,11 @@ class DBLoader:
 
         return total_written
 
+
     def _upsert_sqlite(self, df: pd.DataFrame, table_name: str,
                        model: Any) -> int:
-        """``ON CONFLICT DO UPDATE`` for SQLite.
+        """``ON CONFLICT DO UPDATE`` for SQLite."""
 
-        Uses ``DO UPDATE`` rather than ``INSERT OR REPLACE`` so an
-        autoincremented primary key is never deleted and regenerated. Only
-        columns with at least one non-null value in this batch participate in the
-        ``SET`` clause, so a source that does not populate a column cannot clobber
-        a value another source wrote at the same natural key.
-        """
         from sqlalchemy.dialects.sqlite import insert
 
         pk_cols = self._get_primary_key_columns(table_name)
@@ -488,13 +432,10 @@ class DBLoader:
 
         return total_written
 
-    def _simple_insert(self, df: pd.DataFrame, table_name: str) -> int:
-        """Plain append. Bypasses every sentinel and dedup rule above.
 
-        Only reached when ``upsert=False``. ``to_sql(method='multi')`` is used
-        because it emits one multi-row ``INSERT``; it will fail on a duplicate,
-        which is the point of the setting.
-        """
+    def _simple_insert(self, df: pd.DataFrame, table_name: str) -> int:
+        """Plain append. Bypasses every sentinel and dedup rule above."""
+
         written = 0
         for start in range(0, len(df), self.batch_size):
             chunk = df.iloc[start:start + self.batch_size]
@@ -509,23 +450,8 @@ class DBLoader:
     # -------------------------------------------------------------------------
 
     def load_table(self, table_name: str, df: pd.DataFrame) -> int:
-        """Load a DataFrame into ``table_name``. Returns rows actually written.
+        """Load a DataFrame into ``table_name``. Returns rows actually written."""
 
-        Two passes over the NOT NULL columns of the target table:
-
-        *Stage 1* fills NaN from the model's Python-side default when one is a
-        plain scalar. This rescues ``fact_disease_case.case_count``, which is NOT
-        NULL with ``server_default='1'`` but which the mapping leaves as None when
-        the source omits the column.
-
-        *Stage 2* drops rows that are still NaN in a NOT NULL column with **no**
-        default, and refuses to drop rows whose column has only a server default
-        (an explicit NULL in the INSERT column list cannot be rescued by one, so
-        dropping would hide a configuration bug).
-
-        Autoincrement primary keys are exempt throughout: their absence means "the
-        database will assign one", not "this row is malformed".
-        """
         if df.empty:
             logger.info("No data to load for table %s", table_name)
             return 0
@@ -639,6 +565,7 @@ class DBLoader:
         )
         return written
 
+
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """Load multiple tables. Returns ``{table: rows written}``."""
         return {
@@ -651,38 +578,8 @@ class DBLoader:
     # -------------------------------------------------------------------------
 
     def load_resolutions(self, resolutions: "List[Any]") -> int:
-        """Persist a run's resolutions: append the ledger, project the current state.
+        """Persist a run's resolutions: append the ledger, project the current state."""
 
-        ``fact_resolution_log``
-            Append-only, keyed ``(source_table, source_column, source_value,
-            run_id)``. ``ON CONFLICT DO NOTHING`` — a decision that can be
-            rewritten is not a record of what was decided. **Every** resolution is
-            written here, including ``unresolved`` and ``needs_review``.
-
-        ``fact_concept_map``
-            The current state: one row per source triple, upserted. Only
-            resolutions whose ``decision`` is ``auto_accepted`` appear here. A
-            withheld decision has no applied concept, so a row claiming one would
-            be a lie about the database's state; the evidence lives in the ledger.
-
-        A human review is protected. The projection's ``DO UPDATE`` carries a
-        ``WHERE`` that refuses to change ``concept_code`` on a row whose
-        ``is_approved = TRUE`` — otherwise a re-run would silently re-decide a
-        row a reviewer approved, while leaving ``reviewed_by`` and ``reviewed_at``
-        in place and attributing the new decision to that reviewer. The number of
-        refusals is counted and logged.
-
-        Columns never written to ``fact_concept_map``: ``is_approved``,
-        ``reviewed_by``, ``reviewed_at``, ``mapped_at``. Those are the human's
-        verdict and the row's creation time, and a re-run must not clear them.
-
-        Returns
-        -------
-        int
-            Distinct ledger rows submitted. Duplicates within the call collapse;
-            ``DO NOTHING`` may reduce the number inserted; unusable rows are not
-            counted. A summary line states all three.
-        """
         if not resolutions:
             logger.info("No resolutions to load")
             return 0
@@ -747,10 +644,6 @@ class DBLoader:
                 withheld += 1
                 continue
             if concept_code is None:
-                # Contract: auto_accepted implies a concept. A writer that
-                # produced the opposite is excluded from the projection and
-                # named, rather than being allowed to smuggle a conceptless
-                # "applied" row into the table the pipeline reads.
                 inconsistent += 1
                 continue
 
@@ -807,8 +700,6 @@ class DBLoader:
             """
         )
 
-        # The `WHERE` on DO UPDATE is the review guarantee. SQLite has no
-        # `IS NOT DISTINCT FROM`, so the comparison is spelled out.
         upsert_projection = text(
             """
             INSERT INTO fact_concept_map
@@ -904,6 +795,7 @@ class DBLoader:
             "Projected %d current-state row(s) into fact_concept_map", projected
         )
         return submitted
+
 
     def _count_protected(self, projection_batch: List[Dict[str, Any]]) -> int:
         """How many projections the review guard will refuse to apply."""

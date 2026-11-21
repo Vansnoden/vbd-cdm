@@ -1,15 +1,5 @@
 # -*- coding: utf-8 -*-
 """Post-ingestion consolidation.
-
-FK -> A6 (A6a country -> hierarchy -> identity merge -> grid parents) -> VOCAB load
--> A8 reconcile -> A8b dim values -> A8c fact values -> A9 spatial concepts
--> A9b coordinate naming -> B5 merge -> facts -> orphans -> burden -> resistance
--> dedupe -> validation.
-
-Load precedes A8 (dim_concept has one writer); A8b/A8c follow A8 (they need
-concept_id); A9b follows A9. A6a precedes the hierarchy because every country-keyed
-pool below ("kenya" vs "KE") would otherwise split. Dimension->fact links come from
-Base.metadata, never a literal map. Geo helpers live in database.geoutils.
 """
 
 from __future__ import annotations
@@ -767,25 +757,7 @@ def _resistance_thresholds(registry=None) -> Tuple[float, float]:
     return susceptible, suspected
 
 
-# -- burden expansion ------------------------------------------------------
-#
-# The daily series produced here is a *model*, not a measurement, so where the
-# weights that shape it come from is a provenance question rather than a style
-# question. When they were literals in this module, any seasonal pattern
-# recovered from fact_disease_case was a recovery of these constants, and could
-# not be reported as a finding about transmission.
-#
-# They now come from a parameter pack (`burden-expansion/manifest.yaml`) with a
-# version, a citation and a digest, and their use is recorded in run_manifest.
-# Their absence is a defined state: with no pack the generator allocates
-# uniformly, which is the defensible null model, and says so.
-
-#: Parameter-pack key carrying the allocation policy.
 BURDEN_KERNEL_KEY = "burden_expansion"
-
-#: Defaults for keys a pack may omit. Zero for the dispersion parameters is
-#: deliberate: a pack declaring only `seasonality` gets a smooth, seeded but
-#: deterministic curve rather than an implicit sigma nobody chose.
 _BURDEN_KERNEL_DEFAULTS: Dict[str, Any] = {
     "intra_month_amplitude": 0.0,
     "base_variation": 0.0,
@@ -793,24 +765,12 @@ _BURDEN_KERNEL_DEFAULTS: Dict[str, Any] = {
     "spike_mean_excess": 0.5,
 }
 
-#: ``MM-DD``. Validated structurally only: ``02-31`` is accepted here and never
-#: matches a real date, which is the right outcome for a declaration error that
-#: does not warrant failing a run.
 _HOLIDAY_KEY_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 
 
 @dataclass(frozen=True, eq=False)
 class _BurdenKernel:
     """Weights that distribute an annual total across the days of a year.
-
-    ``origin`` names where the weights came from and is recorded with every run
-    that uses them: ``"pack:<pack_id>@<version>"`` or ``"flat"``. A flat kernel
-    has every weight equal to one, so allocation is uniform and the seed cannot
-    affect the result.
-
-    ``eq=False`` because two kernels are never compared; the field holds
-    mappings, and the inherited ``__hash__`` would fail on them if anything ever
-    hashed the object.
     """
 
     monthly: Mapping[int, float]
@@ -849,9 +809,6 @@ class _BurdenKernel:
         }
 
 
-#: The null model: uniform allocation. Used when no policy pack is shipped, or
-#: when one is present but unreadable. Never silently substituted for a pack that
-#: is present and valid.
 FLAT_BURDEN_KERNEL = _BurdenKernel(
     monthly={}, weekly={}, holidays={}, intra_amplitude=0.0,
     base_variation=0.0, spike_probability=0.0, spike_mean_excess=0.5,
@@ -868,12 +825,6 @@ def _kernel_float(value: Any, default: float) -> float:
 
 
 def _kernel_month_map(value: Any) -> Dict[int, float]:
-    """``{1..12: weight}`` from a mapping or a 12-item list. Empty on failure.
-
-    Out-of-range months are dropped rather than clamped: a manifest declaring
-    month 13 is a typo, and clamping it would hide the typo while silently
-    reweighting the year.
-    """
     if isinstance(value, Mapping):
         items = value.items()
     elif isinstance(value, (list, tuple)):
@@ -895,7 +846,6 @@ def _kernel_month_map(value: Any) -> Dict[int, float]:
 
 
 def _kernel_weekday_map(value: Any) -> Dict[int, float]:
-    """``{1..7: weight}``, Monday = 1 (``datetime.isocalendar()[2]``)."""
     if not isinstance(value, Mapping):
         return {}
     out: Dict[int, float] = {}
@@ -913,7 +863,6 @@ def _kernel_weekday_map(value: Any) -> Dict[int, float]:
 
 
 def _kernel_holiday_map(value: Any) -> Dict[str, float]:
-    """``{"MM-DD": weight}``. A malformed key costs that entry, not the pack."""
     if not isinstance(value, Mapping):
         return {}
     out: Dict[str, float] = {}
@@ -929,23 +878,6 @@ def _kernel_holiday_map(value: Any) -> Dict[str, float]:
 
 def load_burden_kernel(registry: Any = None) -> _BurdenKernel:
     """The allocation policy for this run.
-
-    Reads ``burden_expansion`` from a parameter pack. Three outcomes, each stated
-    in the log so that a stored database can be attributed:
-
-    * a usable pack -> its weights, ``origin="pack:<id>@<version>"``;
-    * a pack that exists but cannot be parsed -> **flat**, with a WARNING naming
-      what failed. Degrading to flat is deliberate: a run must not fail over a
-      cosmetic weight, and a uniform allocation is a defensible statement where a
-      half-parsed one is not;
-    * no pack at all -> **flat**, at INFO, because a registry may legitimately
-      describe vocabularies only.
-
-    Parameters
-    ----------
-    registry : VocabularyRegistry, optional
-        ``None`` yields the flat kernel, so a consolidator built without a
-        registry still runs.
     """
     loaded = _load_registry(registry)
     if loaded is None:
@@ -969,8 +901,6 @@ def load_burden_kernel(registry: Any = None) -> _BurdenKernel:
 
     block = pack.parameters.get(BURDEN_KERNEL_KEY)
     if block is None:
-        # The registry also accepts the policy spread across top-level keys, so a
-        # manifest declaring `seasonality:` directly still works.
         block = {key: pack.parameters.get(key)
                  for key in ("seasonality", "weekly_pattern", "holidays",
                              "holiday_factors", "intra_month_amplitude",
@@ -1054,19 +984,6 @@ def _burden_generate_daily_case_counts(
     arithmetic rather than statistical: weights are normalised, truncated to
     integers, and the residual distributed by largest remainder, so the daily
     column sums to the rounded annual total whatever the weights are.
-
-    Parameters
-    ----------
-    base_variation : float, optional
-        Overrides ``kernel.base_variation``. ``None`` (the default) uses the
-        kernel's value, so a caller cannot re-introduce a hard-coded sigma by
-        omitting the argument.
-    kernel : _BurdenKernel, optional
-        Defaults to :data:`FLAT_BURDEN_KERNEL`, which allocates uniformly.
-    stable_key : int, optional
-        From :func:`_stable_location_key`. ``None`` falls back to the surrogate
-        ``location_id``, reproducing the pre-revision behaviour, which is *not*
-        stable across rebuilds; every caller in this module passes it.
     """
     active = kernel or FLAT_BURDEN_KERNEL
     variation = (active.base_variation if base_variation is None
@@ -1196,7 +1113,7 @@ def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
             continue
         try:
             name, code = get_country_from_coords(float(lat), float(lon))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  
             logger.debug("country lookup failed for (%s, %s): %s", lat, lon, exc)
             continue
         iso2, canonical = _canonical_country(code) if code else (None, None)
@@ -1256,50 +1173,13 @@ def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
     return out
 
 
-# =============================================================================
-# Population denominators for burden expansion
-#
-# `expand_burden_to_daily` needs an annual case total. For a record carrying only
-# an incidence_rate that total is (rate / 100_000) * population, so the pass is
-# only as correct as its denominator lookup.
-#
-# The old lookup was `{location_id: value for row in ...}`: keyed on one half of
-# the real key, and therefore wrong twice over.
-#
-#   * A CDM normally holds a NATIONAL series at the country's own dim_location
-#     row while the burden rows sit on grid cells or administrative units. A
-#     lookup keyed on location_id finds nothing for every one of them, so a
-#     populated fact_socioeconomic_condition produces `no_population` for the
-#     entire run.
-#   * A location with several population years collapses to one value - whichever
-#     the driver returned last - so a 2009 burden row would be expanded against
-#     the latest population on record.
-#
-# The index below keys on (location_id, year) first, then the location's own
-# nearest year, then the country's series for that year - and the last two tiers
-# are opt-in, because using a country total for a sub-national unit is a decision
-# the caller has to make on purpose.
-# =============================================================================
-
-#: How many per-record lines to log before switching to a tally. A run over
-#: hundreds of thousands of records otherwise writes hundreds of thousands of
-#: identical INFO lines, which is how a real diagnostic gets scrolled past.
 _BURDEN_LOG_SAMPLE = 10
 
-#: The two measures a burden record can carry, and which wins when it carries
-#: both. `cases_mean` is an absolute case count for the cell-year: it needs no
-#: population, no allocation and no unit assumption, so it is the better measure
-#: whenever it is present. MAP publishes both, so "both" is the common case and
-#: the ordering here decides almost every record.
 _BURDEN_MEASURE_CASES_MEAN = "cases_mean"
 _BURDEN_MEASURE_INCIDENCE_RATE = "incidence_rate"
 _BURDEN_MEASURE_PREFERENCES = (_BURDEN_MEASURE_CASES_MEAN,
                                _BURDEN_MEASURE_INCIDENCE_RATE)
 
-#: Divisors for `incidence_rate`. The column's scale is not documented in the
-#: schema, and the two readings differ by five orders of magnitude, so it is a
-#: parameter rather than a literal: `per_100k` (the classic rate convention) or
-#: `per_person` (cases per person per year, which is how MAP publishes it).
 _RATE_SCALES: Dict[str, float] = {"per_100k": 100_000.0, "per_person": 1.0}
 
 
@@ -1317,8 +1197,7 @@ class _PopulationHit:
     """Where a record's denominator came from, so the log can name it."""
 
     value: float
-    tier: str               # location_year | location_nearest_year |
-                            # country_year | country_nearest_year | default
+    tier: str
     year: Optional[int]
 
     @property
@@ -1328,26 +1207,6 @@ class _PopulationHit:
 
 
 class _PopulationIndex:
-    """Denominators for burden expansion, keyed the way the data actually is.
-
-    Parameters
-    ----------
-    session : sqlalchemy.orm.Session
-        Read-only use.
-    indicator : str
-        The ``fact_socioeconomic_condition.indicator_code`` to read. Literal:
-        a row stored under another code is not found, and the caller is told so.
-
-    Notes
-    -----
-    ``country_of`` is populated for **every** ``dim_location`` row, not only the
-    ones carrying population, because the expansion needs to map a *burden*
-    location to its country. ``single_country`` is the one country holding any
-    population at all; it is used only when a burden location's own
-    ``country_code`` is NULL, which is common for raster grid cells, and only for
-    a database that holds exactly one country's data - a two-country CDM would
-    otherwise be allocated the wrong one's people.
-    """
 
     def __init__(self, session, indicator: str = "SP.POP.TOTL") -> None:
         self.session = session
@@ -1358,15 +1217,8 @@ class _PopulationIndex:
         self.single_country: Optional[str] = None
         self.location_rows = 0
         self.series_locations = 0
-        #: ``country_code -> {"admin_level", "locations"}``: which level the
-        #: country series was summed from, and how many units contributed.
         self.country_series_level: Dict[str, Dict[str, Any]] = {}
 
-    # -- loading ---------------------------------------------------------
-
-    #: The shallowest administrative label present in ``dim_location``. Used to
-    #: decide which rows may contribute to a *country* series; anything deeper is
-    #: a subdivision whose value is a fraction of the country, not the country.
     _LEVEL_RANK: Mapping[str, int] = {
         "country": 0, "nation": 0,
         "admin1": 1, "region": 1, "province": 1, "county": 1, "state": 1,
@@ -1384,22 +1236,6 @@ class _PopulationIndex:
         """Read the population rows and the location->country map. Idempotent.
 
         Builds two indexes from one location read:
-
-        ``_series``
-            ``location_id -> {year: value}``, for the exact and nearest-year
-            tiers.
-
-        ``_country_series``
-            ``country_code -> {year: value}``, for the opt-in country tiers.
-            This is the delicate one. A country series is built by **summing**
-            every location at the shallowest administrative level that carries
-            data in that country, not by taking whichever location the driver
-            returned first. The previous version took the first, so a CDM whose
-            population was loaded at admin-1 produced a "country" series equal to
-            a single region's population, then divided it across every burden
-            cell - a plausible, uniformly wrong denominator, with no warning.
-            Summing is correct whether the shallowest level is the country row
-            itself (one location) or the units that tile it (many).
         """
         levels: Dict[int, str] = {}
         for location_id, country_code, admin_level in self.session.execute(text(
@@ -1433,8 +1269,6 @@ class _PopulationIndex:
 
         self.series_locations = len(self._series)
 
-        # Group the locations carrying a series by country and by level, so the
-        # shallowest *populated* level per country is chosen explicitly.
         by_country: Dict[str, Dict[int, List[int]]] = {}
         for location_id in sorted(self._series):
             country = self.country_of.get(location_id) or ""
@@ -1516,13 +1350,6 @@ class _PopulationIndex:
                 allow_country: bool = False) -> Optional[_PopulationHit]:
         """The denominator for one (location, year), or None.
 
-        Tiers, strongest first, and a weaker tier is never used while a stronger
-        one exists for the same record:
-
-        1. ``(location_id, year)`` - exact.
-        2. ``location_id``, nearest year - the location's own series, off-year.
-        3. ``(country_code, year)`` - the country's series, opt-in.
-        4. ``country_code``, nearest year - the country's series, opt-in.
         """
         try:
             key = int(location_id)
@@ -2022,7 +1849,6 @@ class DataConsolidator:
             parent = parent_of.get(location_id)
             return 0 if parent is None else 1 + _depth(parent, seen)
 
-        # Parent-first, so from_ancestor reads the in-memory result.
         ordered = sorted(rows, key=lambda r: (_depth(int(r["location_id"])),
                                               int(r["location_id"])))
 
@@ -2047,8 +1873,6 @@ class DataConsolidator:
                 report["grid_skipped"] += 1
                 continue
 
-            # The canonical label counts as a country token, so "kenya" or "KE"
-            # in the identity is dropped either way.
             country_tokens = [row["country_name"], country,
                               ISO_TO_COUNTRY_NAME.get(country, ""),
                               _country_name_for(country)]
@@ -2149,7 +1973,6 @@ class DataConsolidator:
                     "similarity": (round(_name_similarity(identity, chosen), 3)
                                    if identity else None)})
 
-        # Pass B: coordinates known, no polygon and no named ancestor.
         pending: Dict[str, List[Dict[str, Any]]] = {}
         for entry in deferred:
             if entry.get("reason") in ("no_polygon", "candidate_not_human"):
@@ -2186,7 +2009,6 @@ class DataConsolidator:
                             entry["identity"], chosen), 3)
                             if entry["identity"] else None)})
 
-        # Pass C: what is left, and why.
         resolved_ids = {entry["location_id"] for entry in updates}
         for entry in deferred:
             location_id = int(entry["row"]["location_id"])
@@ -2431,7 +2253,6 @@ class DataConsolidator:
             return {"examined": 0, "placed": 0}
         from utilities.admin_alignment import _parent_gid
 
-        # standard_code first: after the spatial pass the GID lives there.
         id_by_gid: Dict[str, int] = {}
         for loc_id, standard_code, location_code in self.session.execute(text(
             "SELECT location_id, standard_code, location_code FROM dim_location "
@@ -3015,7 +2836,7 @@ class DataConsolidator:
             try:
                 result = self._aggregate_and_reassign_bulk(
                     [record], spec=normalized, dry_run=dry_run)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  
                 errors += 1
                 logger.error("aggregate: record %d failed (%s: %s)",
                              seen, type(exc).__name__, exc)
@@ -4714,11 +4535,6 @@ class DataConsolidator:
                 default_population, seed, group_by_level)
             return stats
 
-        # `case_status = 'estimated'`, not `'confirmed'`: a modelled figure is not
-        # an observed case, and the previous value asserted that it was.
-        # `age_group` and `sex` take the documented '' sentinel, because both sit
-        # inside uq_fact_case_natural and a reader filtering on the sentinel must
-        # find these rows.
         statement = text(
             "INSERT INTO fact_disease_case ("
             "  location_id, date_id_onset, date_id_reported, disease_code, "

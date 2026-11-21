@@ -8,22 +8,6 @@
 #   ./run.sh etl-summary --run 2                # second-most-recent run
 #   ./run.sh etl-summary --top 40 --log-level INFO
 #   ./run.sh etl-summary --fail-on-error        # exit 1 if any ERROR/CRITICAL
-#
-# Why this script is tied to specific strings
-# -------------------------------------------
-# Every section below greps for a message that exists in the current code, and
-# each pattern carries a comment naming the function that emits it. When the
-# pipeline changes, a pattern stops matching and the section prints "(none)" —
-# which looks exactly like "no problems found". Section 15 (PATTERN COVERAGE)
-# exists to make that difference visible: it reports, per pattern, whether the
-# run block contains it at all.
-#
-# The log is opened in append mode by main.py, so it accumulates every run.
-# By default this script reports the LAST run only, sliced from its
-# "Loaded configuration from" line. --all aggregates the whole file, which mixes
-# runs and is only useful for trend questions.
-#
-# Output is plain text, designed to be pasted into a chat/debugging thread.
 
 set -uo pipefail
 

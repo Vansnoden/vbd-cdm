@@ -18,7 +18,7 @@ import pandas as pd
 from Bio import Entrez
 from typing import Any, Dict, List, Optional
 
-# Curated list of vector genera relevant to VBD surveillance.
+
 VECTOR_TAXA = [
     "Anopheles",
     "Aedes",
@@ -173,8 +173,6 @@ def build_species_vocabulary(
         subtree_ids = _get_subtree_ids(genus_taxid)
         print(f"[{genus}] {len(subtree_ids)} taxa in subtree", flush=True)
 
-        # Remove the genus record itself from the fetch so we only get
-        # species/subspecies/etc.
         subtree_ids = [i for i in subtree_ids if i != genus_taxid]
 
         rows = _fetch_taxa(subtree_ids, genus)

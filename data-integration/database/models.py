@@ -1,68 +1,45 @@
 # -*- coding: utf-8 -*-
 
 import datetime
-
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer,
     String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
-
 from database.session import Base
 
 
 # ========================= DIMENSIONS =========================
 
 class DimVocabulary(Base):
-    """Registry of external vocabularies used for standardization.
-
-    One row per (pack, release). ``vocabulary_id`` is version-qualified
-    (``'gadm@4.1'``) so two releases coexist without a schema change;
-    ``pack_id`` is the unversioned grouping key the registry selects on.
-
-    ``checksum`` is written by two different writers with two different
-    artefacts — the registry hashes a pack *manifest*, the loader hashes a
-    vocabulary *CSV*. ``extra`` carries
-    ``{"checksum_artefact": "manifest" | "csv"}`` so a reader can tell which
-    (contract Amendment §5.4). ``extra`` is NULL for rows written before
-    revision ``d5e2a8c71b93``, which reads as "artefact unknown".
-    """
+    """Registry of external vocabularies used for standardization."""
     __tablename__ = "dim_vocabulary"
 
-    vocabulary_id   = Column(String(100), primary_key=True)   # 'gadm@4.1', legacy 'GADM'
+    vocabulary_id = Column(String(100), primary_key=True)  
     vocabulary_name = Column(String(1000), nullable=False)
-    source_url      = Column(String(1000))
-    version         = Column(String(100))                     # '4.1'; 'unknown' if never recorded
-    description     = Column(String(1000))
-    loaded_at       = Column(DateTime, default=datetime.datetime.utcnow)
-
-    # Appended after `loaded_at` to match the migration's ADD COLUMN order.
-    pack_id         = Column(String(100))                      # manifest key, e.g. 'gadm'
-    checksum        = Column(String(64))                       # SHA-256, hex
-    released_with   = Column(String(20))                       # tool release that shipped this pack
-    #: JSON: ``{"checksum_artefact": "manifest" | "csv"}``. Nullable, because a
-    #: digest written before the discriminator existed has an unknown artefact.
-    extra           = Column(Text)
+    source_url = Column(String(1000))
+    version = Column(String(100))                     
+    description = Column(String(1000))
+    loaded_at = Column(DateTime, default=datetime.datetime.utcnow)
+    pack_id = Column(String(100))                      
+    checksum = Column(String(64))                       
+    released_with = Column(String(20))                       
+    extra = Column(Text)
 
 
 class DimConcept(Base):
     """Standard concepts extracted from an external vocabulary."""
     __tablename__ = "dim_concept"
 
-    concept_id    = Column(Integer, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, primary_key=True, autoincrement=True)
     vocabulary_id = Column(String(100), ForeignKey("dim_vocabulary.vocabulary_id"), nullable=False)
-    concept_code  = Column(String(100), nullable=False)        # 'GID_2_KEN.3_1', 'IDOMAL:0000657'
-    concept_name  = Column(String(300), nullable=False)         # preferred label
-    concept_class = Column(String(100))                        # 'admin2', 'species', 'disease'
-    domain        = Column(String(100))                        # 'location', 'vector', 'disease'
-    parent_code   = Column(String(100))                        # hierarchy
-    extra         = Column(Text)                               # JSON: synonyms, definition, centroid, rank
-
-    # Appended after `extra` to match the migration's ADD COLUMN order.
-    # Populated by the vocabulary loader using
-    # utilities.vocabulary.normalizers.compose(pack.normalizer_chain), so the
-    # L2 (normalised) rung of the ladder is reproducible from the stored key.
-    concept_norm  = Column(String(300))
+    concept_code = Column(String(100), nullable=False)        
+    concept_name = Column(String(300), nullable=False)        
+    concept_class = Column(String(100))                        
+    domain = Column(String(100))                        
+    parent_code = Column(String(100))                        
+    extra = Column(Text)
+    concept_norm = Column(String(300))
 
     __table_args__ = (
         UniqueConstraint("vocabulary_id", "concept_code", name="uq_concept_vocab_code"),
@@ -73,34 +50,23 @@ class DimConcept(Base):
 
 
 class ResolutionLog(Base):
-    """Append-only ledger of every resolution decision, per run.
-
-    One row per (source_table, source_column, source_value, run_id). Writing is
-    insert-or-ignore against that key, so re-running a run id is a no-op while a
-    new run adds a new witness. Nothing in the codebase updates or deletes from
-    this table: the current decision lives in FactConceptMap, the history lives
-    here.
-
-    Fields mirror ``Resolution`` in interface_contract.md one-for-one, plus a
-    surrogate primary key and ``resolved_at``.
-    """
-
+    """Append-only ledger of every resolution decision, per run."""
     __tablename__ = "fact_resolution_log"
 
-    log_id             = Column(Integer, primary_key=True, autoincrement=True)
-    source_table       = Column(String(100), nullable=False)
-    source_column      = Column(String(100), nullable=False)
-    source_value       = Column(String(300), nullable=False)
-    vocabulary_id      = Column(String(100))    # 'gadm@4.1'; no FK, see migration comment
+    log_id = Column(Integer, primary_key=True, autoincrement=True)
+    source_table = Column(String(100), nullable=False)
+    source_column = Column(String(100), nullable=False)
+    source_value = Column(String(300), nullable=False)
+    vocabulary_id = Column(String(100))    
     vocabulary_version = Column(String(100))
-    concept_code       = Column(String(100))
-    match_method       = Column(String(30))     # exact|normalized|alias|fuzzy|ambiguous|unresolved
-    match_score        = Column(Float)
-    decision           = Column(String(20), nullable=False)
-    candidates         = Column(Text)           # JSON list, rank order
-    resolver_version   = Column(String(50))
-    run_id             = Column(String(50), nullable=False)
-    resolved_at        = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
+    concept_code = Column(String(100))
+    match_method = Column(String(30))     
+    match_score = Column(Float)
+    decision = Column(String(20), nullable=False)
+    candidates = Column(Text)           
+    resolver_version = Column(String(50))
+    run_id = Column(String(50), nullable=False)
+    resolved_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
 
     __table_args__ = (
         UniqueConstraint(
@@ -113,43 +79,24 @@ class ResolutionLog(Base):
 
 
 class RunManifest(Base):
-    """One row per pipeline invocation: what produced this database.
-
-    The CDM records vocabulary provenance per resolution. This table records
-    *run* provenance: the tool version, the git commit, the registry digests, the
-    hashes of the configuration and the mapping files, the installed versions of
-    every package that can change a stored number, and a JSON ``parameters``
-    object that each phase extends (most importantly
-    ``{"expansion": {...}}``, which names the policy behind every modelled case
-    row).
-
-    It is upserted rather than append-only: a run learns about itself as it
-    proceeds, so ``record_run`` writes identity at start-up and later phases
-    merge their parameters in. ``finished_at`` is NULL for a run that did not
-    complete, which distinguishes an interrupted run from a finished one.
-
-    No foreign keys, deliberately: a manifest must survive the database being
-    partially rebuilt. A researcher who drops and re-ingests a fact table has not
-    invalidated the record of the run that first populated it.
-    """
+    """One row per pipeline invocation: what produced this database."""
 
     __tablename__ = "run_manifest"
 
-    run_id                    = Column(String(50), primary_key=True)
-    started_at                = Column(DateTime, nullable=False,
-                                       default=datetime.datetime.utcnow)
-    finished_at               = Column(DateTime)
-    tool_version              = Column(String(20))
-    git_sha                   = Column(String(64))
-    registry_digest           = Column(String(64))
+    run_id = Column(String(50), primary_key=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
+    finished_at = Column(DateTime)
+    tool_version = Column(String(20))
+    git_sha = Column(String(64))
+    registry_digest = Column(String(64))
     registry_digest_with_kind = Column(String(64))
-    countries                 = Column(Text)      # JSON list
-    config_path               = Column(String(1000))
-    config_sha256             = Column(String(64))
-    parameters                = Column(Text)      # JSON object, merged per phase
-    package_versions          = Column(Text)      # JSON object
-    row_counts                = Column(Text)      # JSON object
-    notes                     = Column(Text)
+    countries = Column(Text) 
+    config_path = Column(String(1000))
+    config_sha256 = Column(String(64))
+    parameters = Column(Text)      
+    package_versions = Column(Text)
+    row_counts = Column(Text)
+    notes  = Column(Text)
 
     __table_args__ = (
         Index("idx_run_manifest_started", "started_at"),
@@ -176,9 +123,6 @@ class DimLocation(Base):
 
     location_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(1000), nullable=False)
-    #: Nullable *and* unique. See ``DBLoader.NATURAL_KEY_CONFIG`` for the
-    #: sentinel this requires: SQL treats NULLs as distinct, so an upsert keyed
-    #: on this column never conflicts for a row whose code is NULL.
     location_code = Column(String, unique=True)
     centroid_lat = Column(Float)
     centroid_lon = Column(Float)
@@ -299,44 +243,33 @@ class DimSource(Base):
 # ========================= FACT TABLES =========================
 
 class FactConceptMap(Base):
-    """The **current** decision for one raw value, keyed on the source triple.
-
-    One row per ``(source_table, source_column, source_value)``, holding whatever
-    decision is in force now — ``auto_accepted``, ``needs_review``, ``rejected``
-    or ``unresolved``. ``concept_code`` is non-NULL only for ``auto_accepted``
-    (contract Amendment §5.6), so a reader must key the decision, never the mere
-    presence of a code. ``fact_resolution_log`` holds the same values plus one
-    row per run, which is the history; this table is the state.
-
-    ``is_approved`` is the **human** verdict and is three-state: ``None`` means
-    nobody has reviewed it, ``True`` a human approved, ``False`` a human
-    rejected. No automated writer touches it, and the projection's upsert refuses
-    to change ``concept_code`` on a row whose ``is_approved`` is ``True``.
-    """
+    """The **current** decision for one raw value, keyed on the source triple."""
     __tablename__ = "fact_concept_map"
 
-    map_id         = Column(Integer, primary_key=True, autoincrement=True)
-    source_table   = Column(String(100), nullable=False)
-    source_column  = Column(String(100), nullable=False)
-    source_value   = Column(String(300), nullable=False)
-    vocabulary_id  = Column(String(100), ForeignKey("dim_vocabulary.vocabulary_id"))
-    concept_code   = Column(String(100))
-    match_method   = Column(String(30))
-    match_score    = Column(Float)
-
-    decision           = Column(String(20))
+    map_id = Column(Integer, primary_key=True, autoincrement=True)
+    source_table = Column(String(100), nullable=False)
+    source_column = Column(String(100), nullable=False)
+    source_value = Column(String(300), nullable=False)
+    vocabulary_id = Column(String(100), ForeignKey("dim_vocabulary.vocabulary_id"))
+    concept_code = Column(String(100))
+    match_method = Column(String(30))
+    match_score = Column(Float)
+    decision = Column(String(20))
     vocabulary_version = Column(String(100))
-    resolver_version   = Column(String(50))
-    last_run_id        = Column(String(50))
-
-    is_approved    = Column(Boolean, nullable=True)
-    reviewed_by    = Column(String(100))
-    reviewed_at    = Column(DateTime)
-    mapped_at      = Column(DateTime, default=datetime.datetime.utcnow)
+    resolver_version = Column(String(50))
+    last_run_id = Column(String(50))
+    is_approved = Column(Boolean, nullable=True)
+    reviewed_by = Column(String(100))
+    reviewed_at = Column(DateTime)
+    mapped_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("source_table", "source_column", "source_value",
-                         name="uq_concept_map_source"),
+        UniqueConstraint(
+            "source_table", 
+            "source_column", 
+            "source_value", 
+            name="uq_concept_map_source"
+        ),
         Index("idx_concept_map_source", "source_table", "source_column"),
         Index("idx_concept_map_approved", "is_approved"),
         Index("idx_concept_map_decision", "decision"),
@@ -351,7 +284,6 @@ class FactVectorObservation(Base):
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     vector_code = Column(String(100), ForeignKey("dim_vector.vector_code"), nullable=False)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     life_stage = Column(String(100))
     sex = Column(String(10))
     collection_method = Column(String(100))
@@ -360,7 +292,6 @@ class FactVectorObservation(Base):
     tested_for_pathogen = Column(String(100))
     infection_status = Column(String(100))
     infection_rate = Column(Float)
-
     location = relationship("DimLocation")
     time = relationship("DimTime", foreign_keys=[date_id])
     vector = relationship("DimVector")
@@ -391,7 +322,6 @@ class FactDiseaseCase(Base):
         String(100), ForeignKey("dim_identification_method.method_code"), nullable=False
     )
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     case_status = Column(String(100))
     host_type = Column(String(100))
     age_years = Column(Integer)
@@ -402,7 +332,6 @@ class FactDiseaseCase(Base):
         nullable=False,
         default=1,
         server_default="1")
-
     location = relationship("DimLocation")
     onset_date = relationship("DimTime", foreign_keys=[date_id_onset])
     reported_date = relationship("DimTime", foreign_keys=[date_id_reported])
@@ -439,7 +368,6 @@ class FactInsecticideResistance(Base):
         String(100), ForeignKey("dim_resistance_test_type.test_type_code"), nullable=False
     )
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     concentration = Column(Float)
     exposure_time = Column(Integer)
     n_insect_tested = Column(Integer)
@@ -456,7 +384,6 @@ class FactInsecticideResistance(Base):
     vgsc_generation = Column(String)
     mortality = Column(Float)
     resistance_status = Column(String(30))
-
     location = relationship("DimLocation")
     insecticide = relationship("DimInsecticide")
     test_type = relationship("DimResistanceTestType")
@@ -485,13 +412,11 @@ class FactBionomics(Base):
     date_id = Column(String(10), ForeignKey("dim_time.date_id"), nullable=False)
     vector_code = Column(String(100), ForeignKey("dim_vector.vector_code"), nullable=False)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     biting_rate = Column(Float)
     feeding_preference = Column(String(100))
     biting_location = Column(String(100))
     resting_behavior = Column(String(100))
     larval_site_type = Column(String(100))
-
     location = relationship("DimLocation")
     source = relationship("DimSource")
     time = relationship("DimTime", foreign_keys=[date_id])
@@ -519,15 +444,13 @@ class FactIntervention(Base):
         String(100), ForeignKey("dim_disease.disease_code"), nullable=False
     )
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
-    intervention_type = Column(String(100))
-    coverage = Column(Float)
-
     location = relationship("DimLocation")
     start_date = relationship("DimTime", foreign_keys=[date_start])
     end_date = relationship("DimTime", foreign_keys=[date_end])
     target_disease = relationship("DimDisease")
     source = relationship("DimSource")
+    intervention_type = Column(String(100))
+    coverage = Column(Float)
 
     __table_args__ = (
         UniqueConstraint(
@@ -553,14 +476,12 @@ class FactSocioeconomicCondition(Base):
         ForeignKey("dim_socioeconomic_indicator.indicator_code"),
         nullable=False,
     )
-    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
-    indicator_value = Column(Float)
-
     location = relationship("DimLocation")
     indicator = relationship("DimSocioeconomicIndicator")
     source = relationship("DimSource")
-
+    source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
+    indicator_value = Column(Float)
+    
     __table_args__ = (
         UniqueConstraint(
             "location_id", "year", "indicator_code",
@@ -580,13 +501,11 @@ class FactHealthFacility(Base):
     facility_code = Column(String(100), unique=True, nullable=False)
     location_id = Column(Integer, ForeignKey("dim_location.location_id"), nullable=False)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     name = Column(String(1000))
     lat = Column(Float)
     lon = Column(Float)
     type = Column(String(100))
     catchment_population = Column(Integer)
-
     location = relationship("DimLocation")
     source = relationship("DimSource")
 
@@ -605,15 +524,13 @@ class FactDiseaseBurden(Base):
     disease_code = Column(String(100), ForeignKey("dim_disease.disease_code"), nullable=False)
     pathogen_species = Column(String(50), nullable=True)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
+    location = relationship("DimLocation")
+    disease = relationship("DimDisease")
+    source = relationship("DimSource")
     incidence_rate = Column(Float)
     prevalence_rate = Column(Float)
     mortality_rate = Column(Float)
     cases_mean = Column(Float)
-
-    location = relationship("DimLocation")
-    disease = relationship("DimDisease")
-    source = relationship("DimSource")
 
     __table_args__ = (
         UniqueConstraint(
@@ -637,7 +554,6 @@ class FactEnvironment(Base):
     variable = Column(String(100), nullable=False)   # 'temperature_mean', 'rainfall_total'
     value = Column(Float, nullable=False)
     source_code = Column(String(100), ForeignKey("dim_source.source_code"), nullable=False)
-
     location = relationship("DimLocation")
     time = relationship("DimTime", foreign_keys=[date_id])
     source = relationship("DimSource")

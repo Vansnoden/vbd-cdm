@@ -1,31 +1,5 @@
 # -*- coding: utf-8 -*-
 """The CDM's resolution surface: which target fields a vocabulary may govern.
-
-``FIELD_CATALOG`` maps a target field (``dim_vector.species_name``) to its
-domain, table, key and value type. It is derived from the schema, never from
-user configuration.
-
-A field belongs here when it is one of
-
-* a human-readable label column on a ``dim_*`` table that carries a
-  ``concept_id`` **foreign key** — the column a resolved concept is stamped
-  onto; or
-* a free-text category column on a ``fact_*`` table. Those carry no
-  ``concept_id``, so a decision about one is recorded in ``fact_concept_map`` and
-  the value itself is rewritten to the canonical name. They are in the catalog so
-  a pack manifest may name them: ``ConceptPack.from_manifest`` rejects a
-  ``field_scope`` entry that is not here.
-
-Natural-code columns (``vector_code``, ``disease_code``, ...) are deliberately
-absent. Codes are *assigned* by ``DimensionKeyIndex`` and rewritten by
-``_update_fact_references``; they are never resolved *to* a concept, and listing
-them would invite a mapper to try.
-
-``_assert_concept_id_coverage()`` runs at import and refuses to load the module if
-a dimension that can be stamped has no binding. The test is "holds a foreign key
-to ``dim_concept.concept_id``", not "has a column called concept_id":
-``dim_concept`` itself has such a column and it is the primary key of the concept
-dictionary, so counting it demanded a catalog entry for the vocabulary table.
 """
 
 from __future__ import annotations
@@ -37,19 +11,14 @@ from typing import Iterator
 from database import models  # noqa: F401  (registers every table)
 from database.session import Base
 
-#: The concept dictionary and the column a dimension points at.
 _CONCEPT_TABLE = "dim_concept"
 _CONCEPT_COLUMN = "concept_id"
 
-#: Columns a dimension needs before a concept can be stamped onto it.
 _STAMP_COLUMNS = ("concept_id", "standard_code")
 
 
 class FieldNotInCatalog(KeyError):
     """Raised when a target field is not a resolvable CDM field.
-
-    Carries ``difflib`` candidates so the message suggests what the caller
-    probably meant instead of only saying no.
     """
 
     def __init__(self, target_field: str, candidates: tuple[str, ...] = ()) -> None:
@@ -69,11 +38,11 @@ class FieldNotInCatalog(KeyError):
 class FieldBinding:
     """What one target field resolves to."""
 
-    target_field: str       # 'dim_vector.species_name'
-    domain: str             # 'vector'
-    dimension_table: str    # 'dim_vector'
-    dimension_key: str      # 'vector_code' — the column a fact row's FK holds
-    value_type: str         # 'text' | 'iso3166_alpha2'
+    target_field: str       
+    domain: str             
+    dimension_table: str    
+    dimension_key: str      
+    value_type: str        
 
     def as_dict(self) -> dict[str, str]:
         """The dict shape ``FIELD_CATALOG`` exposes, for symmetry."""
@@ -166,8 +135,6 @@ if len(_BY_FIELD) != len(_BINDINGS):
     )
 
 
-#: Public, contract-shaped view: field -> {domain, dimension_table,
-#: dimension_key, value_type}.
 FIELD_CATALOG: dict[str, dict[str, str]] = {
     b.target_field: b.as_dict() for b in _BINDINGS
 }
@@ -175,12 +142,6 @@ FIELD_CATALOG: dict[str, dict[str, str]] = {
 
 def _build_domain_map() -> dict[str, str]:
     """Derive domain -> table, asserting the mapping is a function.
-
-    Every domain must name exactly one table: a pack declares one ``domain``, and
-    ``ConceptPack.from_manifest`` refuses a ``field_scope`` entry whose catalog
-    domain disagrees. Two tables under one domain would make that check
-    unanswerable, so the two ``sex`` columns are ``vector_sex`` and ``case_sex``
-    rather than both ``sex``.
     """
     reverse: dict[str, str] = {}
     for binding in _BINDINGS:
@@ -195,18 +156,11 @@ def _build_domain_map() -> dict[str, str]:
     return reverse
 
 
-#: domain -> the single table a resolved concept for that domain lives in.
 DOMAIN_TO_DIM_TABLE: dict[str, str] = _build_domain_map()
 
 
 def resolve_field(target_field: str) -> FieldBinding:
     """Return the binding for ``target_field``.
-
-    Raises
-    ------
-    FieldNotInCatalog
-        With up to five ``difflib`` candidates, so a caller sees
-        "did you mean dim_vector.species_name" rather than a bare ``KeyError``.
     """
     key = (target_field or "").strip()
     binding = _BY_FIELD.get(key)
@@ -222,11 +176,6 @@ def resolve_field(target_field: str) -> FieldBinding:
 def can_stamp(target_field: str) -> bool:
     """Whether ``target_field``'s table can hold ``concept_id`` and
     ``standard_code``.
-
-    True for every ``dim_*`` dimension, False for every ``fact_*`` table. A
-    resolution still gets recorded for a fact column — ``fact_concept_map`` is
-    the provenance — but nothing is stamped, so a writer must not emit an
-    ``UPDATE ... SET concept_id`` against it.
     """
     try:
         binding = resolve_field(target_field)
@@ -275,10 +224,6 @@ def iter_bindings() -> Iterator[FieldBinding]:
 
 def _references_concept(table) -> bool:
     """Whether ``table``'s ``concept_id`` column is a foreign key to ``dim_concept``.
-
-    A column *named* ``concept_id`` is not enough. ``dim_concept.concept_id`` is
-    that table's primary key — the identity of a concept — so it has no foreign
-    keys at all and is correctly reported as not referencing a concept.
     """
     column = table.columns.get(_CONCEPT_COLUMN)
     if column is None:

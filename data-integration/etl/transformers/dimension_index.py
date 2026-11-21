@@ -1,27 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 In-run dimension key index: one raw value, one CDM code, one concept.
-
-What this file is for
----------------------
-``MappingTransformer`` used to resolve a ``{"ref": "dim_location.location_code"}``
-mapping with one ``SELECT ... WHERE field == value`` per distinct value, against
-an unindexed column, returning only the surrogate key. That is review C12's
-fourth notion of "matches": exact ``==``, no case folding, no vocabulary, no
-record of what was decided.
-
-This index replaces it with one query per (table, field) and a dictionary
-thereafter, and it returns the *code* and the *concept* as well as the PK, so a
-caller does not read the FK from one place and the concept from another (C7).
-
-The two invariants, enforced in ``DimensionEntry.__post_init__`` rather than by
-convention:
-
-* a decision may only be ``auto_accepted``;
-* a decision implies a ``concept_code``.
-
-A ``needs_review`` or ``ambiguous`` resolution is evidence for
-``fact_resolution_log``; it is not an instruction to stamp a dimension row.
 """
 
 from __future__ import annotations
@@ -49,20 +28,8 @@ logger = logging.getLogger(__name__)
 # Vocabulary
 # =============================================================================
 
-#: ``cdm_code = raw value, stripped`` — byte-for-byte what
-#: ``MappingTransformer`` writes today (``vector_code = "Anopheles gambiae"``).
-#: The default, because wiring this file in must not change a single code.
 CODE_POLICY_IDENTITY = "identity"
-
-#: ``cdm_code = lower-case alphanumeric slug`` — for sources whose labels carry
-#: characters a natural key column should not (parentheses, commas, species
-#: authority suffixes). Lossy by construction, so two raw values can collide;
-#: collisions merge with a warning and are counted in ``stats()``.
 CODE_POLICY_SLUG = "slug"
-
-#: ``cdm_code = the accepted concept's concept_code``, falling back to identity
-#: when the value is unresolved. Makes the code a function of the vocabulary
-#: rather than of the source spelling.
 CODE_POLICY_CONCEPT = "concept"
 
 CODE_POLICIES = frozenset({
@@ -71,14 +38,10 @@ CODE_POLICIES = frozenset({
     CODE_POLICY_CONCEPT,
 })
 
-#: The entry was created by ``assign`` from a source value.
 ORIGIN_ASSIGNED = "assigned"
 
-#: The entry was created by ``register``/``from_session`` from a database row.
 ORIGIN_SEEDED = "seeded"
 
-#: Columns never set by ``update`` — the code is the key, and ``raw_key`` is
-#: derived from the key function rather than from data.
 _IMMUTABLE_FIELDS = frozenset({"code", "raw_key"})
 
 _WHITESPACE = re.compile(r"\s+")
@@ -96,19 +59,14 @@ def _as_text(value: Any) -> str:
     if type(value).__name__ in ("NAType", "NaTType"):
         return ""
     try:
-        if value != value:  # NaN, and anything else unequal to itself
+        if value != value:  
             return ""
-    except Exception:  # noqa: BLE001 - a sentinel that raises on compare
+    except Exception:  
         return ""
     return str(value)
 
 
 def _coerce_int(value: Any) -> Optional[int]:
-    """``int(value)`` or None. Never raises.
-
-    Numeric strings are accepted because SQLite returns some integer columns as
-    text after a ``CAST``-free round trip; a float ``12.0`` becomes ``12``.
-    """
     text_value = _as_text(value).strip()
     if not text_value:
         return None
@@ -123,18 +81,11 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 def _default_key(value: str) -> str:
-    """The default in-run key: trimmed, whitespace-collapsed, case-folded.
-
-    Deliberately minimal. This is not the matcher — the resolver owns
-    normalisation, per pack, in ``pack.normalizer_chain`` — it only has to be
-    strict enough that ``"Siaya"``, ``"SIAYA"`` and ``" Siaya "`` are one key so a
-    run cannot create three codes for one place.
-    """
+    """The default in-run key: trimmed, whitespace-collapsed, case-folded."""
     return _WHITESPACE.sub(" ", value.strip()).casefold()
 
 
 def _slugify(value: str) -> str:
-    """``CODE_POLICY_SLUG``'s derivation: lower-case, ``[^a-z0-9] -> _``."""
     folded = _WHITESPACE.sub(" ", value.strip()).casefold()
     return _SLUG_PUNCT.sub("_", folded).strip("_")
 
@@ -149,23 +100,8 @@ def _read_field(source: Any, name: str) -> Any:
 
 
 def _concept_fields(concept: Any) -> tuple[dict[str, Any], Optional[str]]:
-    """Translate a resolution into ``DimensionEntry`` fields.
+    """Translate a resolution into ``DimensionEntry`` fields."""
 
-    Accepts anything that exposes the concept attributes by attribute (a
-    ``Resolution`` from ``etl.transformers.concept_resolver``) or by key (a dict
-    from ``VocabularyLoader``). Both are read the same way, so this file needs no
-    import of either.
-
-    Returns ``(fields, blocked_reason)``:
-
-    * ``fields`` is empty when there is nothing to attach — no concept, no
-      concept code, or a concept whose decision is not ``auto_accepted``;
-    * ``blocked_reason`` is a short string when a concept was supplied but
-      withheld, so the caller can log *why* without re-deriving the decision.
-
-    ``standard_code`` defaults to the concept code when the resolution does not
-    carry its own, which is what ``DataConsolidator._match_column`` writes.
-    """
     if concept is None:
         return {}, None
 
@@ -173,8 +109,6 @@ def _concept_fields(concept: Any) -> tuple[dict[str, Any], Optional[str]]:
     decision = _as_text(_read_field(concept, "decision")).strip()
 
     if not concept_code:
-        # An `unresolved` or `ambiguous` resolution lands here: it is a
-        # legitimate outcome, not a blocked one.
         return {}, None
 
     if decision and decision != AUTO_ACCEPTED:
@@ -205,37 +139,7 @@ def _concept_fields(concept: Any) -> tuple[dict[str, Any], Optional[str]]:
 
 @dataclass(frozen=True)
 class DimensionEntry:
-    """One dimension row as the transform loop needs it.
-
-    ``code``
-        The natural key: ``location_code``, ``vector_code``, ``disease_code``.
-        This is what a dimension row is identified by and what
-        ``_update_fact_references`` rewrites when two rows merge.
-    ``pk``
-        The surrogate primary key: ``location_id``, and the value a fact row's FK
-        holds.
-    ``concept_code`` / ``concept_id`` / ``concept_name``
-        The vocabulary concept this code resolved to. ``concept_id`` is that
-        concept's ``dim_concept`` PK, which the index cannot derive and which a
-        caller supplies with ``update`` or ``register``.
-    ``standard_code``
-        What gets written to ``dim_*.standard_code``. Defaults to
-        ``concept_code``.
-    ``decision``
-        The verdict that authorised attaching the concept. Only
-        ``auto_accepted`` is allowed, and only alongside a ``concept_code``.
-    ``raw`` / ``raw_key``
-        The source spelling that first created this entry, and its in-run key.
-        ``raw_key`` is None for a seeded row that has not yet been matched
-        against a source value.
-    ``origin``
-        ``assigned`` (created by ``assign``) or ``seeded`` (created by
-        ``register``/``from_session``).
-
-    Frozen: an entry is a snapshot of what the run knows, and writing to one in
-    place would make two loops over the same index disagree. Mutations go through
-    ``DimensionKeyIndex``, which replaces.
-    """
+    """One dimension row as the transform loop needs it."""
 
     code: str
     pk: Optional[int] = None
@@ -309,34 +213,7 @@ class DimensionEntry:
 # =============================================================================
 
 class DimensionKeyIndex:
-    """In-run map raw value -> CDM code, and code -> concept + PK.
-
-    One instance is scoped to one run (or one source, if a caller wants a
-    separate code space per source — nothing here is global). It is not
-    thread-safe: ``assign`` mutates two dicts and the resolver's callers are
-    single-threaded by construction.
-
-    Two maps, and the distinction matters:
-
-    ``_by_code``  ``code -> DimensionEntry``. The authoritative record.
-    ``_by_key``   ``in-run key -> code``. The memoisation table that makes
-                  ``assign`` O(1) and that binds a second spelling of one value
-                  to the code the first spelling produced.
-
-    Parameters
-    ----------
-    code_policy : str
-        One of :data:`CODE_POLICIES`. Default ``"identity"``, which reproduces
-        the codes ``MappingTransformer`` writes today exactly.
-    key : callable, optional
-        ``str -> str`` applied to a raw value to decide whether two spellings are
-        the same thing. Defaults to :func:`_default_key`. Pass
-        ``pack.normalizer()`` to make the key match a vocabulary's
-        canonicalisation.
-    label : str, optional
-        Name used in log lines and in ``snapshot()`` — normally the dimension
-        table name.
-    """
+    """In-run map raw value -> CDM code, and code -> concept + PK."""
 
     def __init__(self, *, code_policy: str = CODE_POLICY_IDENTITY,
                  key: Optional[Callable[[str], str]] = None,
@@ -355,12 +232,8 @@ class DimensionKeyIndex:
         self.code_policy = policy
         self.label = _as_text(label).strip() or "dimension"
         self._key_fn: Callable[[str], str] = key or _default_key
-
-        #: code -> entry. The authoritative record.
         self._by_code: dict[str, DimensionEntry] = {}
-        #: in-run key -> code. The memoisation table.
         self._by_key: dict[str, str] = {}
-        #: (code, reason) pairs already logged, so a warning fires once.
         self._warned: set[tuple[str, str]] = set()
         self._stats: Counter = Counter()
 
@@ -377,28 +250,8 @@ class DimensionKeyIndex:
                      concept_name_field: Optional[str] = None,
                      alias_field: Optional[str] = None,
                      **kwargs: Any) -> "DimensionKeyIndex":
-        """Seed an index from the dimension table it describes.
-
-        One ``SELECT ... ORDER BY <code_field>``. The ordering is not cosmetic:
-        it makes the seed order a property of the data rather than of the storage
-        engine, so two databases holding the same rows seed identically.
-
-        ``alias_field`` additionally binds a second column as a raw value for the
-        same code. That is what replaces the *two* lookups
-        ``_lookup_dimension_id`` performed: a mapping CSV with
-        ``ref: dim_location.location_code`` matches on the code, and one that
-        names a human-readable column matches on the name. With
-        ``alias_field="name"`` both resolve to the same entry.
-
-        Read-only with respect to the database. Every identifier is validated by
-        :func:`require_identifier` before it is interpolated, because it *is*
-        interpolated.
-
-        Raises
-        ------
-        ValueError
-            On an unsafe identifier.
-        """
+        """Seed an index from the dimension table it describes."""
+        
         identifier_args = {
             "table": _require_identifier(table),
             "code_field": _require_identifier(code_field, what="column name"),
@@ -476,55 +329,8 @@ class DimensionKeyIndex:
     def assign(self, raw: Any, concept: Any = None, *,
                code: Optional[str] = None,
                pk: Any = None) -> Optional[str]:
-        """Record one raw value against a dimension code, returning that code.
+        """Record one raw value against a dimension code, returning that code."""
 
-        Contract (Amendment §5.9): **a blank raw value returns ``None`` and does
-        not raise.** An empty cell is a value with no concept, which is exactly
-        what ``None`` says, and no caller should have to guard a case the
-        contract says is not an error.
-
-        Parameters
-        ----------
-        raw : Any
-            The raw cell. ``None``, ``NaN``, ``pd.NA``, ``pd.NaT`` and
-            whitespace-only strings all return ``None``.
-        concept : Any, optional
-            The concept the raw value resolved to. Only ``concept_code``,
-            ``concept_name``, ``concept_id``, ``standard_code``, ``pk`` and
-            ``decision`` are read; a ``Resolution``, a ``DimensionEntry``, a dict
-            and ``None`` all work. A concept whose decision is not
-            ``auto_accepted`` is **not** attached, and the reason is logged once.
-        code : str, optional
-            The CDM code to record. Wins over the policy derivation. A concept's
-            own code does **not** become the CDM code unless ``code_policy`` is
-            ``CODE_POLICY_CONCEPT``: the code identifies the row, the concept
-            describes it, and conflating them would make the natural key depend
-            on whether the vocabulary happened to load.
-        pk : Any, optional
-            The dimension's primary key, when the dimension is surrogate-keyed
-            (``dim_location.location_id``).
-
-        Returns
-        -------
-        str or None
-            The CDM code the raw value maps to, or ``None`` for a blank raw
-            value. A repeated assignment of the same raw value returns the code
-            already held for it, so the method is idempotent per raw value.
-
-        Notes
-        -----
-        Three cases, in this order:
-
-        1. **the key is already bound** — return its code, and enrich the entry
-           with the concept/``pk`` if this call supplies one;
-        2. **the derived code is already held** by another raw value — bind this
-           spelling to that code and say so, rather than creating a second entry;
-        3. **neither** — create the entry.
-
-        Case 2 is the ``CODE_POLICY_SLUG`` collision path and the
-        second-spelling path of ``CODE_POLICY_IDENTITY``; both are legitimate and
-        both are logged once per (code, key).
-        """
         raw_text = _as_text(raw)
         if not raw_text.strip():
             logger.debug(
@@ -544,23 +350,18 @@ class DimensionKeyIndex:
         source = raw_text.strip()
         fields, blocked = _concept_fields(concept)
 
-        # ---- 1. already bound? -------------------------------------------
         bound_code = self._by_key.get(key)
         if bound_code is not None:
             held = self._by_code.get(bound_code)
             if held is None:
-                # A binding pointing at a code that is not in the index is
-                # corruption in this object, not in the data; rebuild it.
                 self._by_key.pop(key, None)
             else:
                 if blocked:
                     self._note_blocked(held.code, source, blocked)
                 return self._finish(held, fields, pk, source)
 
-        # ---- 2. derive the code ------------------------------------------
         cdm_code = _as_text(code).strip() or self._derive_code(source, fields)
 
-        # ---- 3. a different spelling of a known code ---------------------
         collision = self._by_code.get(cdm_code)
         if collision is not None:
             self._by_key[key] = collision.code
@@ -570,7 +371,6 @@ class DimensionKeyIndex:
             self._stats["aliased"] += 1
             return self._finish(collision, fields, pk, source)
 
-        # ---- 4. new entry ------------------------------------------------
         entry = DimensionEntry(
             code=cdm_code,
             raw=source,
@@ -590,12 +390,7 @@ class DimensionKeyIndex:
         return self._finish(entry, fields, pk, source)
 
     def resolve(self, raw: Any, concept: Any = None) -> Optional[DimensionEntry]:
-        """``assign`` then ``lookup``, returning the entry.
-
-        The transform loop's one-liner: it wants the code *and* the concept *and*
-        the PK, and asking three times is what made the old code path slow and
-        racy.
-        """
+        """``assign`` then ``lookup``, returning the entry."""
         return self.lookup(self.assign(raw, concept))
 
     # -------------------------------------------------------------------------
@@ -603,12 +398,7 @@ class DimensionKeyIndex:
     # -------------------------------------------------------------------------
 
     def lookup(self, code: Any) -> Optional[DimensionEntry]:
-        """The entry for ``code``, or None.
-
-        ``None`` means "this code is not in this run's index" — it has not been
-        seeded and nothing has been assigned to it. That is a legitimate answer,
-        not an error, so it is not raised.
-        """
+        """The entry for ``code``, or None."""
         return self._by_code.get(_as_text(code).strip())
 
     def lookup_raw(self, raw: Any) -> Optional[DimensionEntry]:
@@ -645,19 +435,8 @@ class DimensionKeyIndex:
                  concept_code: Any = None, concept_name: Any = None,
                  concept_id: Any = None, standard_code: Any = None,
                  origin: str = ORIGIN_SEEDED) -> DimensionEntry:
-        """Record a known mapping without inventing anything.
+        """Record a known mapping without inventing anything."""
 
-        Used by ``from_session`` and available to a caller that already holds
-        dimension rows in memory (a ``dim_dfs`` frame, say) and would rather not
-        query for them twice.
-
-        Merging, not overwriting: a code that already exists keeps its
-        ``raw_key`` and its existing non-null fields, and this call fills the
-        gaps. That is what makes seeding idempotent.
-
-        ``raw``, when supplied, is bound as a value for this code, so a later
-        ``assign`` of the same value returns this code rather than deriving one.
-        """
         code_text = _as_text(code).strip()
         if not code_text:
             raise ValueError(
@@ -707,27 +486,8 @@ class DimensionKeyIndex:
         return entry
 
     def update(self, code: Any, **fields: Any) -> DimensionEntry:
-        """Enrich an existing entry. Fills gaps; never clears a value.
+        """Enrich an existing entry. Fills gaps; never clears a value."""
 
-        The method a caller needs after its own ``dim_concept`` query, to supply
-        the ``concept_id`` a ``Resolution`` cannot carry::
-
-            code = index.assign(raw, resolution)
-            index.update(code, concept_id=concept_ids[resolution.concept_code])
-
-        ``code`` and ``raw_key`` are not settable: the code is the key and the key
-        is derived from the key function, so neither is data.
-
-        Raises
-        ------
-        KeyError
-            If ``code`` is unknown. Enriching a row that does not exist means the
-            caller has confused two codes, and silently creating one would hide
-            it.
-        ValueError
-            On an unknown field name, or if the merge would produce an invalid
-            entry.
-        """
         code_text = _as_text(code).strip()
         current = self._by_code.get(code_text)
         if current is None:
@@ -827,14 +587,8 @@ class DimensionKeyIndex:
         return entry.code
 
     def _make_key(self, value: str) -> str:
-        """Apply the injected key function, surviving one that raises.
+        """Apply the injected key function, surviving one that raises."""
 
-        A key function is a pure ``str -> str`` and should not raise, but one
-        built from a pack's normaliser chain can. Degrading to the default key
-        keeps the run alive and still guarantees "one key per spelling of one
-        string"; the ERROR line names the callable and the exception so the defect
-        is visible rather than absorbed.
-        """
         try:
             key = self._key_fn(value)
         except Exception as exc:  # noqa: BLE001 - a key function must not kill a run
@@ -866,8 +620,6 @@ class DimensionKeyIndex:
             concept_code = _as_text(fields.get("concept_code")).strip()
             if concept_code:
                 return concept_code
-            # Unresolved values still need a code; identity is the only
-            # non-inventing choice, and it is what they would have got anyway.
             logger.debug(
                 "%s: %r has no accepted concept; CODE_POLICY_CONCEPT falls back "
                 "to identity",
@@ -888,20 +640,6 @@ class DimensionKeyIndex:
 
     def _merge(self, current: DimensionEntry,
                incoming: DimensionEntry) -> DimensionEntry:
-        """Fill ``current``'s gaps from ``incoming``, keeping ``current``'s values.
-
-        Field-by-field "first non-null wins", with three deliberate rules:
-
-        * ``raw``/``raw_key`` come from ``current`` when it has them, so a seeded
-          row keeps the DB's own spelling and an assigned row keeps the first
-          source spelling;
-        * ``origin`` stays ``seeded`` if either side was seeded, because an entry
-          that came from the database has a ``pk`` and pretending otherwise would
-          misreport where the PK came from;
-        * a conflicting ``concept_code`` is reported, and ``current``'s wins. Two
-          resolutions disagreeing about one value is a resolver defect; the index
-          records the first and says so.
-        """
         merged: dict[str, Any] = {}
         conflicts: list[str] = []
 
@@ -936,6 +674,7 @@ class DimensionKeyIndex:
             )
 
         return replace(current, **merged)
+
 
     def _attach(self, code: str, fields: Mapping[str, Any], *,
                 source: str) -> DimensionEntry:
@@ -975,9 +714,11 @@ class DimensionKeyIndex:
             self._stats["with_concept"] += 1
         return entry
 
+
     def _store(self, entry: DimensionEntry) -> None:
         """Write an entry into the code map."""
         self._by_code[entry.code] = entry
+
 
     def _bind(self, raw: str, code: str) -> str:
         """Bind a raw spelling to a code without creating anything."""
@@ -995,6 +736,7 @@ class DimensionKeyIndex:
         self._by_key[key] = code
         return code
 
+
     def _note_blocked(self, code: str, value: str, reason: str) -> None:
         """Record that a concept was withheld, once per code and reason."""
         self._warn_once(
@@ -1005,6 +747,7 @@ class DimensionKeyIndex:
             "concept.",
             self.label, value, reason, code,
         )
+
 
     def _note_collision(self, code: str, existing: DimensionEntry,
                         key: str, value: str) -> None:
@@ -1019,6 +762,7 @@ class DimensionKeyIndex:
             self.label, existing.raw, value, code, self.code_policy,
         )
 
+
     def _warn_once(self, code: str, reason: str, message: str,
                    *args: Any) -> None:
         """Emit a warning the first time (code, reason) is seen."""
@@ -1029,9 +773,6 @@ class DimensionKeyIndex:
         logger.warning(message, *args)
 
 
-# =============================================================================
-# Convenience
-# =============================================================================
 
 def seed_from_rows(index: DimensionKeyIndex, rows: Iterable[Mapping[str, Any]],
                    *, code_field: str = "code",
@@ -1041,16 +782,6 @@ def seed_from_rows(index: DimensionKeyIndex, rows: Iterable[Mapping[str, Any]],
                    concept_id_field: Optional[str] = None,
                    standard_code_field: Optional[str] = None,
                    concept_name_field: Optional[str] = None) -> int:
-    """Seed an index from in-memory rows (a frame's ``to_dict("records")``).
-
-    The alternative to ``DimensionKeyIndex.from_session`` when the caller already
-    holds the dimension rows and does not want a second query. Returns the number
-    of rows registered.
-
-    ``code_field`` names the column in the *mapping* (not in the database), so
-    the defaults line up with ``DimensionEntry``'s own field names and a caller
-    holding entries-as-dicts can pass them straight through.
-    """
     registered = 0
     for row in rows:
         code = row.get(code_field)

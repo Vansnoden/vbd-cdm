@@ -1,10 +1,5 @@
 """
 Build a location vocabulary from GADM administrative boundaries.
-
-GADM 4.1 layout (verified against gadm41_KEN.gpkg):
-  - Layers:    ADM_ADM_0, ADM_ADM_1, ADM_ADM_2, ADM_ADM_3
-  - Level 0:   name lives in COUNTRY  (no NAME_0)
-  - Levels 1+  name lives in NAME_<n>, variant in VARNAME_<n>
 """
 
 import geopandas as gpd

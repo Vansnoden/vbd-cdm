@@ -13,7 +13,7 @@ from database.constants import COUNTRY_LOOKUP
 
 logger = logging.getLogger(__name__)
 
-# ISO 3166-1 alpha-2 to alpha-3 mapping
+
 ISO_COUNTRY_CODES = {
     'KE': 'KEN', 'GH': 'GHA', 'NG': 'NGA', 'ZA': 'ZAF', 'TZ': 'TZA',
     'UG': 'UGA', 'ET': 'ETH', 'DZ': 'DZA', 'AO': 'AGO', 'BJ': 'BEN',
@@ -28,7 +28,7 @@ ISO_COUNTRY_CODES = {
     'TN': 'TUN', 'ZM': 'ZMB', 'ZW': 'ZWE'
 }
 
-# Country names to ISO codes mapping
+
 COUNTRY_NAME_TO_ISO = {
     'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 'South Africa': 'ZA',
     'Tanzania': 'TZ', 'Uganda': 'UG', 'Ethiopia': 'ET', 'Algeria': 'DZ',
@@ -92,7 +92,6 @@ _FOLDED_COUNTRY_NAMES: Dict[str, str] = {
 }
 
 
-# ISO code to country name mapping
 ISO_TO_COUNTRY_NAME = {v: k for k, v in COUNTRY_NAME_TO_ISO.items()}
 
 
@@ -143,25 +142,20 @@ def get_country_from_coords(lat: float, lon: float) -> Tuple[Optional[str], Opti
         logger.warning(f"Invalid coordinates: ({lat}, {lon})")
         return None, None
     
-    # Method 1: Try reverse_geocode first (most accurate)
     try:
         result = rg.search([(lat, lon)])
         if result and len(result) > 0:
             country_name = result[0].get('country')
             country_code_raw = result[0].get('country_code')
             
-            # Normalize to ISO alpha-2
             if country_code_raw:
                 country_code = country_code_raw.upper()
-                # Ensure we have the correct ISO code
                 if len(country_code) == 3:
-                    # Convert alpha-3 to alpha-2
                     for iso2, iso3 in ISO_COUNTRY_CODES.items():
                         if iso3 == country_code:
                             country_code = iso2
                             break
                 elif len(country_code) == 2:
-                    # Already alpha-2, just verify
                     pass
                 else:
                     country_code = None
@@ -178,12 +172,10 @@ def get_country_from_coords(lat: float, lon: float) -> Tuple[Optional[str], Opti
     except Exception as e:
         logger.debug(f"Reverse geocode failed for ({lat}, {lon}): {e}")
     
-    # Method 2: Nearest known coordinate lookup
     country_name, country_code = _get_country_from_nearest(lat, lon)
     if country_code:
         return country_name, country_code
     
-    # Method 3: Bounding box fallback for known regions
     country_name, country_code = _get_country_from_bounding_box(lat, lon)
     if country_code:
         return country_name, country_code
@@ -273,21 +265,6 @@ def _get_country_from_bounding_box(lat: float, lon: float) -> Tuple[Optional[str
 def get_iso_country_code(country: str) -> Optional[str]:
     """Get the ISO 3166-1 alpha-2 country code from a name, alias or code.
 
-    Resolution order — deterministic, and the earlier a rule is, the less
-    guessing it does:
-
-    1. the folded value is an alpha-2 code already (``'KE'``);
-    2. it is an alpha-3 code (``'KEN'``);
-    3. it is a declared alias (``'Ivory Coast'``, ``'Swaziland'``);
-    4. it is a country name, folded (``"Côte d'Ivoire"``, ``'kenya'``);
-    5. it *contains* a country name, and the longest such name wins, with an
-       alphabetical tie-break.
-
-    Step 5 is the only heuristic, and it is last for a reason: it is what turns
-    ``'Kenya (Siaya)'`` into ``KE``. Ranking by length first keeps
-    ``'Guinea-Bissau'`` from resolving to ``GN`` through ``'Guinea'``, which is
-    the bug the previous first-match loop had.
-
     Parameters
     ----------
     country : str
@@ -311,26 +288,21 @@ def get_iso_country_code(country: str) -> Optional[str]:
     if not folded:
         return None
 
-    # 1. already alpha-2
     if folded in ISO_COUNTRY_CODES:
         return folded
 
-    # 2. already alpha-3
     for iso2, iso3 in ISO_COUNTRY_CODES.items():
         if iso3 == folded:
             return iso2
 
-    # 3. a declared alias
     alias = COUNTRY_ALIASES.get(folded)
     if alias:
         return alias
 
-    # 4. an exact country name
     exact = _FOLDED_COUNTRY_NAMES.get(folded)
     if exact:
         return exact
 
-    # 5. the longest country name contained in the value
     best: Optional[str] = None
     for folded_name in sorted(_FOLDED_COUNTRY_NAMES):
         if not folded_name or folded_name not in folded:

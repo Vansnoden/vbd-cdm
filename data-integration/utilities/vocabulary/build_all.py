@@ -1,18 +1,5 @@
 # -*- coding: utf-8 -*-
 """Build every vocabulary CSV the registry needs, into the pack directories.
-
-The chain that was missing: ``dim_concept`` is written only by
-``VocabularyLoader.load_csv``, which reads a CSV, and no code path produced one.
-Each builder in this package (``locations``, ``diseases``, ``species``) already
-knows how to extract concepts from its source; this module only decides *where*
-the result goes so the loader finds it without a manifest change:
-
-    vocabularies/registry/<pack_id>/concepts.csv
-
-That is the first place ``alignment._csv_candidates`` looks. Sources are named on
-the command line, because none of them ships with the repository: a GADM
-GeoPackage, an IDOMAL OBO release, and (optionally) an NCBI taxonomy fetch.
-
 Usage:
     python -m utilities.vocabulary.build_all --gpkg /data/gadm41_KEN.gpkg \\
                                              --obo /data/idomal.obo
@@ -33,8 +20,6 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_ROOT = PROJECT_ROOT / "vocabularies" / "registry"
 
-#: pack_id -> the domain and vocabulary the pack declares. Kept here so a build
-#: says out loud which pack it is filling, rather than inferring it from a path.
 PACK_TARGETS: Dict[str, Dict[str, str]] = {
     "gadm":  {"domain": "location", "builder": "locations",
               "vocabulary_id": "gadm@4.1"},

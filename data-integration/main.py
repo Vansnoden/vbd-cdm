@@ -23,12 +23,6 @@ from sqlalchemy import text
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Loaded before any `database` import. `database.session` resolves its URL once,
-# at import time, from DATABASE_URL / the DB_* tuple / a SQLite fallback. Calling
-# load_dotenv() later — which this module used to do inside
-# setup_environment() — changes nothing for this process, so an operator with a
-# working `.env` silently got the fallback path, and SQLite created an empty file
-# with the full schema next to a populated database.
 try:
     from dotenv import load_dotenv
     for _candidate in (PROJECT_ROOT / ".env", Path.cwd() / ".env"):
@@ -36,25 +30,25 @@ try:
             load_dotenv(_candidate)
             break
     load_dotenv()
-except Exception:  # noqa: BLE001 - python-dotenv is optional
+except Exception:  
     pass
 
-from database import models                                    # noqa: E402
-from database.geoutils import get_iso_country_code              # noqa: E402
-from database.session import (                                  # noqa: E402
+from database import models                                    
+from database.geoutils import get_iso_country_code              
+from database.session import (                                  
     DATABASE_URL, SessionLocal, engine,
 )
-from etl.extractors.file_extractor import FileExtractor         # noqa: E402
-from etl.loaders.db_loader import DBLoader                      # noqa: E402
-from etl.transformers.mapping_transformer import MappingTransformer  # noqa: E402
-from utilities.consolidation import (                           # noqa: E402
+from etl.extractors.file_extractor import FileExtractor         
+from etl.loaders.db_loader import DBLoader                      
+from etl.transformers.mapping_transformer import MappingTransformer  
+from utilities.consolidation import (                           
     DataConsolidator, enrich_location_dataframe, run_consolidation,
 )
-from utilities.data_transform_library import load_yaml_config    # noqa: E402
-from utilities.database_summary import (                         # noqa: E402
+from utilities.data_transform_library import load_yaml_config    
+from utilities.database_summary import (                         
     export_all_table_samples, schema_summary_to_csv,
 )
-from utilities.vocabulary.registry import VocabularyRegistry     # noqa: E402
+from utilities.vocabulary.registry import VocabularyRegistry     
 
 (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
 (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
@@ -133,7 +127,7 @@ def setup_environment() -> None:
     try:
         from dotenv import load_dotenv
         load_dotenv()
-    except Exception:  # noqa: BLE001
+    except Exception:  
         pass
     (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
     (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
@@ -301,10 +295,6 @@ def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
         if table_name not in fact_dfs:
             continue
         frame = fact_dfs[table_name]
-        # Non-nullable columns the loader cannot rescue must be dropped here, with
-        # the count logged, rather than failing the whole insert. ERA5-Land is
-        # land-only, so an ocean or off-mask pixel arrives as NaN and
-        # `fact_environment.value` is NOT NULL by design.
         if table_name == "fact_environment":
             for column in ("value", "location_id"):
                 if column not in frame.columns:
@@ -375,9 +365,6 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                 if extract_mode == "chunked" and chunk_index % 10 == 0:
                     logger.info("  processed %d chunk(s) so far", chunk_index)
 
-                # Only synthesise a year when the source has none. An earlier
-                # revision overwrote a real `year` column with whatever 4-digit
-                # run appeared in the filename.
                 if year is not None and "year" not in chunk_df.columns:
                     chunk_df = chunk_df.copy()
                     chunk_df["year"] = year
@@ -399,7 +386,7 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
         logger.info("Source %r completed: %d dimension row(s), %d fact row(s)",
                     source_name, dim_rows, fact_rows)
         return True
-    except Exception as exc:  # noqa: BLE001 - one source must not stop a run
+    except Exception as exc:   - one source must not stop a run
         logger.error("Failed to process source %r: %s", source_name, exc,
                      exc_info=True)
         return False
@@ -621,7 +608,7 @@ def run_burden_expansion(force: bool = True) -> bool:
                     stats["already_present"], stats["skipped"],
                     stats["no_population"], stats["errors"])
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  
         logger.error("Burden expansion failed: %s", exc, exc_info=True)
         return False
     finally:
@@ -675,10 +662,6 @@ def main() -> None:
     logger.info("run id %s | registry %s | %d pack(s)",
                 context.run_id, context.registry_digest[:12] or "(none)",
                 len(context.registry.packs()) if context.registry else 0)
-    # Printed because the most expensive misdiagnosis available here is reading a
-    # database nothing has ever written to: `database.session` fixes the URL at
-    # import time, so a missing .env silently yields a fresh SQLite file with the
-    # full schema and no rows.
     logger.info("database %s (file: %s)", DATABASE_URL,
                 engine.url.database or "(in memory)")
 

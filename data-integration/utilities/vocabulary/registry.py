@@ -1,67 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 The vocabulary registry: which packs exist, at which release, ranked how.
-
-A *pack* is one vocabulary release — one directory under
-``vocabularies/registry/<pack_id>/`` containing a ``manifest.yaml``. Two kinds
-exist and both are discovered by the same recursive walk:
-
-``ConceptPack``
-    Declares concepts, a domain, a target field scope, a normaliser chain and
-    the thresholds the resolver applies. ``gadm``, ``idomal``, ``ncbi``.
-``ParameterPack``
-    Declares *values* a policy needs — no domain, no field scope, nothing to
-    match against. ``who-resistance`` (the WHO mortality cut-offs).
-
-Two shapes in one registry, one digest
--------------------------------------
-The digest is provenance: it is recorded next to a resolution so "which
-knowledge produced this decision" has an answer. The contract Amendment fixes
-its payload at ``(pack_id, version)`` pairs — **not** a three-component tuple
-including the pack kind, because a recorded digest must stay comparable across
-tool releases and the kind is derivable from the registry anyway.
-:meth:`VocabularyRegistry.digest_with_kind` still exists for the case where the
-kind genuinely matters (a pack that moved between kinds has changed meaning
-without changing its id or version), and it is a separate method so the
-recorded value never silently changes shape.
-
-Determinism
------------
-* manifests are read in sorted path order;
-* packs are iterated in sorted ``pack_id`` order;
-* the winner of a contest is ``max(candidates, key=ConceptPack.rank_key)``,
-  where ``rank_key`` is ``(precedence, -specificity, pack_id)`` — a total
-  order, so no tie is left to break;
-* ``layers`` are sorted by level and ``admin_level_map`` by integer key at load
-  time, so an authoring accident in YAML list order cannot reorder a hierarchy.
-
-Fail-fast rules, all at ``load_from`` time
-------------------------------------------
-* a manifest missing a required key, or naming an unknown normaliser id;
-* an unknown manifest key — including a typo inside a ``layers`` entry;
-* a ``field_scope`` entry that is not in ``FIELD_CATALOG``;
-* a pack whose declared ``domain`` disagrees with the catalog's domain for a
-  field it claims;
-* two packs with the same ``pack_id``, in either kind;
-* ``layers`` without ``admin_level_map``, a layer level with no mapping, or a
-  mapping with no layers;
-* two active concept packs in one domain with an identical ``rank_key``.
-
-The practically dangerous case — two packs separated *only* by the ``pack_id``
-string tiebreaker — is deterministic but rarely intended, so it is logged with
-the winner named.
-
-Module-level assumptions
-------------------------
-* ``yaml``, ``sqlalchemy`` 2.x, ``pandas`` (through ``normalizers``) importable.
-* ``utilities.vocabulary.field_catalog`` imports ``database.models`` to run its
-  import-time coverage assertion, so importing this module registers every CDM
-  table on ``Base.metadata``. That is intended: a manifest names a field, and a
-  field must exist.
-* ``utilities/vocabulary/__init__.py`` eagerly imports ``build``/``diseases``,
-  which pull ``pronto``/``Bio``/``geopandas``. That laziness problem is
-  pre-existing and outside this batch; it is why ``dimension_index.py`` and
-  ``concept_resolver.py`` deliberately avoid importing this package.
 """
 
 from __future__ import annotations
@@ -87,18 +26,12 @@ from utilities.vocabulary.field_catalog import (
 logger = logging.getLogger(__name__)
 
 
-#: Bumped whenever the pack set or its semantics change. Recorded by callers
-#: alongside every resolution so a decision can be attributed to a tool release.
 REGISTRY_VERSION = "2026.11.1"
 
-#: The file name every pack directory must contain.
 MANIFEST_FILENAME = "manifest.yaml"
 
-#: Keys understood inside ``applies_when``. Anything else is an error rather
-#: than a silently ignored predicate.
 APPLIES_WHEN_KEYS = frozenset({"countries", "admin_level", "sample_regex"})
 
-#: Keys every *concept* manifest must declare.
 REQUIRED_KEYS = (
     "pack_id",
     "version",
@@ -112,13 +45,6 @@ REQUIRED_KEYS = (
     "released_with",
 )
 
-#: Optional keys and the value used when they are absent.
-#:
-#: ``layers`` / ``admin_level_map`` / ``grid_level`` are the physical layout of
-#: a boundary product; ``resistance_thresholds`` is a classification policy. All
-#: four are batch-4 manifest keys and are therefore *known* — an unknown key is
-#: still a hard error, which is the point of listing them here rather than
-#: loosening the check.
 OPTIONAL_DEFAULTS: Mapping[str, Any] = {
     "case_sensitive": False,
     "applies_when": {},
@@ -129,13 +55,8 @@ OPTIONAL_DEFAULTS: Mapping[str, Any] = {
     "resistance_thresholds": None,
 }
 
-#: The keys of one entry in ``layers``, and nothing else. A typo inside a layer
-#: spec (``gid_colum``) must be an error, because the alternative is reading the
-#: wrong column and silently mis-parenting a district.
 LAYER_KEYS = frozenset({"level", "layer", "gid_column", "name_columns"})
 
-#: Keys of a parameter manifest that are identity rather than payload. Every
-#: other top-level key becomes an entry in ``ParameterPack.parameters``.
 PARAMETER_IDENTITY_KEYS = frozenset(
     {"pack_id", "version", "released_with", "description"}
 )
@@ -323,11 +244,6 @@ def _coerce_layers(value: Any, source: Path) -> tuple[Mapping[str, Any], ...]:
 
 def _coerce_admin_level_map(value: Any, source: Path) -> Mapping[int, str]:
     """Validate and normalise ``admin_level_map`` to ``{int: str}``, ascending.
-
-    YAML gives integer keys for an unquoted ``0:`` and string keys for a quoted
-    ``"0":``. Both are accepted and both normalise to ``int``, because the
-    difference is punctuation in a config file, not a distinction the code
-    should carry.
     """
     if value is None:
         return {}
@@ -361,16 +277,6 @@ def _coerce_admin_level_map(value: Any, source: Path) -> Mapping[int, str]:
 
 def _coerce_thresholds(value: Any, source: Path) -> Mapping[str, float] | None:
     """Validate a ``resistance_thresholds`` block: ``{str: number}``.
-
-    A concept pack may declare classification cut-offs alongside its concepts
-    (and the batch-4 ``who-resistance`` manifest declares them instead of
-    concepts). Either way the block is checked here so a mistyped key or a
-    non-numeric value fails at load rather than at first bioassay.
-
-    The ``suspected <= susceptible`` ordering is checked by
-    ``utilities.consolidation._resistance_thresholds`` at the point of use, with
-    a message about mortality percentages; here only *shape* is validated, plus
-    range, so the ordering rule lives in one place.
     """
     if value is None:
         return None
@@ -422,18 +328,6 @@ def _coerce_thresholds(value: Any, source: Path) -> Mapping[str, float] | None:
 @dataclass(frozen=True)
 class ConceptPack:
     """One vocabulary release, as declared by its manifest.
-
-    Field-for-field this is the interface contract's ``ConceptPack``, plus the
-    optional blocks a boundary or classification release carries. Notes:
-
-    * ``applies_when``, ``layers``, ``admin_level_map`` and
-      ``resistance_thresholds`` are excluded from equality and hashing
-      (``compare=False``) so a frozen dataclass holding mappings stays
-      hashable. Two packs can only differ in those fields if they share a
-      ``pack_id``, which the registry rejects, so identity is unaffected.
-    * ``normalizer_chain``, ``field_scope`` and the per-layer ``name_columns``
-      are tuples, not lists: a frozen dataclass with list fields would not be
-      hashable, and the contract's manifest examples are lists.
     """
 
     pack_id: str
@@ -450,17 +344,9 @@ class ConceptPack:
     canonical_rule: str | None = None
     released_with: str = ""
 
-    # -- physical layout of a boundary product ---------------------------
-    #: Layer specs, sorted by ``level``. Empty for every pack that does not
-    #: ship boundaries.
     layers: tuple[Mapping[str, Any], ...] = field(default=(), compare=False)
-    #: Integer boundary level -> the ``dim_location.admin_level`` written for it.
     admin_level_map: Mapping[int, str] = field(default_factory=dict, compare=False)
-    #: The ``dim_location.admin_level`` value that marks a synthetic grid cell.
     grid_level: str | None = None
-    #: Classification cut-offs, when this pack declares them. ``None`` means
-    #: "this pack carries no classification policy" — which is true of every
-    #: concept pack except, potentially, one that bundles a scheme.
     resistance_thresholds: Mapping[str, float] | None = field(
         default=None, compare=False
     )
@@ -677,9 +563,6 @@ class ConceptPack:
                 )
             grid_level = grid_level.strip()
 
-        # A layout with no level mapping cannot label anything; a mapping with
-        # no layout describes nothing. Both are authoring mistakes worth
-        # catching at load rather than at row 1.
         if layers and not admin_level_map:
             raise ManifestError(
                 f"{source}: `layers` is declared but `admin_level_map` is "
@@ -738,23 +621,6 @@ def _composed(chain: tuple[str, ...]):
 @dataclass(frozen=True)
 class ParameterPack:
     """A manifest that declares values rather than concepts.
-
-    A parameter pack answers questions of the form "what is the cut-off for
-    X?", where the answer belongs to a vocabulary release and not to a source,
-    and where there is nothing to match against.
-    ``vocabularies/registry/who-resistance/manifest.yaml`` is the first one: it
-    declares ``resistance_thresholds`` and is read by
-    ``utilities.consolidation._resistance_thresholds``.
-
-    It is deliberately not a ``ConceptPack``: a concept pack with no concepts
-    would still have to declare a domain, a field scope and matcher thresholds,
-    none of which it has or needs, and giving it plausible-looking ones would
-    put it into ``field_bindings()`` and make the resolver try to match against
-    an empty vocabulary.
-
-    ``parameters`` holds every top-level manifest key that is not identity. It is
-    excluded from equality (``compare=False``) so the dataclass stays hashable;
-    ``pack_id`` alone identifies the pack because duplicates are rejected.
     """
 
     pack_id: str
@@ -823,9 +689,6 @@ class ParameterPack:
                 f"{source}: description must be a string, got {description!r}"
             )
 
-        # A parameter pack that declares a classification policy gets the same
-        # shape check a concept pack would; a pack declaring some other
-        # parameter is opaque here and belongs to its reader.
         if "resistance_thresholds" in parameters:
             _coerce_thresholds(parameters["resistance_thresholds"], source)
 
@@ -881,17 +744,6 @@ class VocabularyRegistry:
         cls, path: str | Path | Iterable[str | Path]
     ) -> "VocabularyRegistry":
         """Load every manifest under ``path`` (or the given explicit paths).
-
-        ``path`` may be a pack directory, a registry directory searched
-        recursively for ``manifest.yaml``, a single manifest file, or any
-        iterable of those.
-
-        Raises
-        ------
-        ManifestError, DuplicatePack, PackRankCollision
-            On the first problem found. Loading is all-or-nothing: a registry
-            that half-loaded would make ``digest()`` describe a pack set that is
-            not what the operator has on disk.
         """
         registry = cls()
         manifests = list(_iter_manifests(path))
@@ -979,9 +831,6 @@ class VocabularyRegistry:
                 prefix, []
             ).append(pack.pack_id)
 
-        # Two packs with equal (precedence, -specificity) in one domain are
-        # ordered only by the pack_id string. Deterministic, but rarely what an
-        # author intended, so say so and name the winner.
         for domain in sorted(by_domain_prefix):
             for prefix in sorted(by_domain_prefix[domain], reverse=True):
                 members = sorted(by_domain_prefix[domain][prefix])
@@ -1167,16 +1016,6 @@ class VocabularyRegistry:
         context: Mapping[str, Any] | None = None,
     ) -> ConceptPack | None:
         """Return the pack that governs ``field``, or None if none does.
-
-        * ``field`` must be a ``FIELD_CATALOG`` field; an unknown field raises
-          :class:`FieldNotInCatalog` rather than silently returning None,
-          because a typo is a configuration bug whereas a catalog field with no
-          pack is a legitimate "no vocabulary governs this" answer.
-        * Packs whose ``applies_when`` predicates fail are excluded. If *every*
-          candidate is excluded, the unfiltered candidates are ranked instead: a
-          pack exists and is the only candidate, so refusing to answer would
-          leave the field permanently unresolved with no record of why.
-        * The winner is ``max(candidates, key=rank_key)``.
         """
         resolve_field(field)  # validates the name; raises FieldNotInCatalog
 
@@ -1229,38 +1068,7 @@ class VocabularyRegistry:
 
     def load_into(self, session) -> dict[str, str]:
         """Upsert one ``dim_vocabulary`` row per concept pack.
-
-        Idempotent: keyed on ``vocabulary_id``, so re-running against an
-        already-populated database updates the metadata in place and leaves the
-        concepts alone.
-
-        ``checksum`` is the SHA-256 of the pack's **manifest** bytes, and — per
-        the contract Amendment §5.4 — that fact is recorded in
-        ``dim_vocabulary.extra`` as ``{"checksum_artefact": "manifest"}``,
-        because ``VocabularyLoader.load_csv`` writes the CSV's digest into the
-        same column. A reader that does not consult the discriminator cannot
-        tell which artefact a 64-character hex string describes.
-
-        ``extra`` is written only where the column exists; see
-        :func:`utilities.vocabulary.loader.dim_vocabulary_supports_extra` for
-        why (the models module that adds it is outside this batch).
-
-        Parameter packs are not written: they have no concepts, so a
-        ``dim_vocabulary`` row for one would be a vocabulary that resolves
-        nothing. Their provenance is the registry digest and :meth:`describe`.
-
-        Commits the session on success, matching ``VocabularyLoader.load_csv``.
-
-        Returns
-        -------
-        dict
-            ``pack_id -> vocabulary_id`` for every row written.
         """
-        # Imported here rather than at module scope: this module is imported by
-        # `main.load_run_registry` before any pipeline work, and pulling the
-        # loader (and pandas) into that path for one helper is a cost with no
-        # benefit. The loader does not import this module at runtime, so there
-        # is no cycle either way.
         from utilities.vocabulary.loader import (
             CHECKSUM_ARTEFACT_MANIFEST,
             checksum_artefact_json,

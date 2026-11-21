@@ -43,8 +43,6 @@ _WARNED: set = set()
 
 _SAFE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: A grid cell's name is "<lon>/<lat>". Same test as consolidation._GRID_NAME_RE;
-#: duplicated rather than imported because consolidation imports this module.
 _GRID_CODE_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$")
 
 
@@ -426,18 +424,6 @@ def resolve_parent_locations(session, *,
                              dry_run: bool = False,
                              spatial: bool = True) -> Dict[str, Any]:
     """Label ``admin_level``, stamp ``standard_code`` and set ``parent_location_id``.
-
-    Order, strongest evidence first:
-
-    1. **GID equality** — a row whose ``location_code`` *is* a boundary GID.
-    2. **Point-in-polygon** — the deepest polygon containing the row's centroid.
-       This is the pass that does the work on an ingested database, because the
-       raster and site mappings write "<name>/<lat>/<lon>", not GIDs.
-    3. **Grid cells** — a cell's parent is the deepest polygon that contains it,
-       walked up the GID chain until a ``dim_location`` row exists.
-
-    Nothing here guesses by name. A row with no coordinates and no GID is left
-    alone and counted.
     """
     pack = _active_location_pack(pack_id, registry)
     specs = {spec["level"]: spec for spec in _layer_specs(pack, levels=levels)}

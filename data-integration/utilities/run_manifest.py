@@ -1,31 +1,5 @@
 # -*- coding: utf-8 -*-
 """Run provenance: one row per pipeline invocation, in the database it wrote.
-
-Why this module exists
----------------------
-Every number a modelling paper reports has to be attributable to a stated
-procedure. The ETL already records *which vocabulary release* produced each
-resolution (Registry.digest, dim_vocabulary.checksum), but nothing recorded
-*which expansion policy* produced the modelled case rows, nor which dependency
-versions produced the database at all. A reader could not regenerate the figure
-and a reviewer could not tell two runs apart.
-
-This module writes one ``run_manifest`` row per run, upserted so that a run can
-record identity at start and add parameters later, and a JSON ``parameters``
-blob that later phases extend without a schema change. It is deliberately
-append-by-run-id, not append-only: a run legitimately learns about itself as it
-proceeds, and the last writer for a given run id is that run.
-
-Design notes
-------------
-* Nothing here raises into the caller. Provenance recording is important, but a
-  run that already wrote 1.2 million fact rows must not be lost because a JSON
-  serialisation failed. Failures are logged at WARNING and returned as False.
-* ``git_sha`` and package versions are best-effort: a source tarball has no
-  ``.git``, and an unusual environment may not expose ``importlib.metadata``.
-  Both degrade to ``None`` rather than to a wrong value.
-* Times are UTC. The pipeline logs local time in some places; the manifest does
-  not, because a manifest is compared across machines.
 """
 
 from __future__ import annotations
@@ -45,14 +19,8 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-#: Bumped by hand when a change alters what a stored database *means* — a new
-#: expansion policy, a changed classification rule, a schema change. A reader
-#: comparing two manifests uses this to decide whether the difference matters.
 TOOL_VERSION = "1.1.0"
 
-#: Packages whose version can change a stored number. Listed explicitly rather
-#: than enumerating the environment, so the manifest stays small, diffable, and
-#: free of machine-specific noise.
 _TRACKED_PACKAGES: tuple[str, ...] = (
     "sqlalchemy", "pandas", "numpy", "geopandas", "shapely", "pyogrio",
     "rasterio", "rioxarray", "xarray", "cfgrib", "pyreadstat", "rapidfuzz",

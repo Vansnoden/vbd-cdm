@@ -1,8 +1,8 @@
-"""Initial CDM
+"""CDM initialization
 
-Revision ID: 7aa764c87018
+Revision ID: b7bcb0e49b69
 Revises: 
-Create Date: 2026-09-25 16:45:02.769786
+Create Date: 2026-11-21 23:53:57.398841
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '7aa764c87018'
+revision: str = 'b7bcb0e49b69'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -39,8 +39,54 @@ def upgrade() -> None:
     sa.Column('version', sa.String(length=100), nullable=True),
     sa.Column('description', sa.String(length=1000), nullable=True),
     sa.Column('loaded_at', sa.DateTime(), nullable=True),
+    sa.Column('pack_id', sa.String(length=100), nullable=True),
+    sa.Column('checksum', sa.String(length=64), nullable=True),
+    sa.Column('released_with', sa.String(length=20), nullable=True),
+    sa.Column('extra', sa.Text(), nullable=True),
     sa.PrimaryKeyConstraint('vocabulary_id')
     )
+    op.create_table('fact_resolution_log',
+    sa.Column('log_id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('source_table', sa.String(length=100), nullable=False),
+    sa.Column('source_column', sa.String(length=100), nullable=False),
+    sa.Column('source_value', sa.String(length=300), nullable=False),
+    sa.Column('vocabulary_id', sa.String(length=100), nullable=True),
+    sa.Column('vocabulary_version', sa.String(length=100), nullable=True),
+    sa.Column('concept_code', sa.String(length=100), nullable=True),
+    sa.Column('match_method', sa.String(length=30), nullable=True),
+    sa.Column('match_score', sa.Float(), nullable=True),
+    sa.Column('decision', sa.String(length=20), nullable=False),
+    sa.Column('candidates', sa.Text(), nullable=True),
+    sa.Column('resolver_version', sa.String(length=50), nullable=True),
+    sa.Column('run_id', sa.String(length=50), nullable=False),
+    sa.Column('resolved_at', sa.DateTime(), nullable=False),
+    sa.PrimaryKeyConstraint('log_id'),
+    sa.UniqueConstraint('source_table', 'source_column', 'source_value', 'run_id', name='uq_resolution_log_source')
+    )
+    with op.batch_alter_table('fact_resolution_log', schema=None) as batch_op:
+        batch_op.create_index('idx_resolution_log_decision', ['decision'], unique=False)
+        batch_op.create_index('idx_resolution_log_run', ['run_id'], unique=False)
+
+    op.create_table('run_manifest',
+    sa.Column('run_id', sa.String(length=50), nullable=False),
+    sa.Column('started_at', sa.DateTime(), nullable=False),
+    sa.Column('finished_at', sa.DateTime(), nullable=True),
+    sa.Column('tool_version', sa.String(length=20), nullable=True),
+    sa.Column('git_sha', sa.String(length=64), nullable=True),
+    sa.Column('registry_digest', sa.String(length=64), nullable=True),
+    sa.Column('registry_digest_with_kind', sa.String(length=64), nullable=True),
+    sa.Column('countries', sa.Text(), nullable=True),
+    sa.Column('config_path', sa.String(length=1000), nullable=True),
+    sa.Column('config_sha256', sa.String(length=64), nullable=True),
+    sa.Column('parameters', sa.Text(), nullable=True),
+    sa.Column('package_versions', sa.Text(), nullable=True),
+    sa.Column('row_counts', sa.Text(), nullable=True),
+    sa.Column('notes', sa.Text(), nullable=True),
+    sa.PrimaryKeyConstraint('run_id')
+    )
+    with op.batch_alter_table('run_manifest', schema=None) as batch_op:
+        batch_op.create_index('idx_run_manifest_started', ['started_at'], unique=False)
+
     op.create_table('dim_concept',
     sa.Column('concept_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('vocabulary_id', sa.String(length=100), nullable=False),
@@ -50,12 +96,16 @@ def upgrade() -> None:
     sa.Column('domain', sa.String(length=100), nullable=True),
     sa.Column('parent_code', sa.String(length=100), nullable=True),
     sa.Column('extra', sa.Text(), nullable=True),
+    sa.Column('concept_norm', sa.String(length=300), nullable=True),
     sa.ForeignKeyConstraint(['vocabulary_id'], ['dim_vocabulary.vocabulary_id'], ),
     sa.PrimaryKeyConstraint('concept_id'),
     sa.UniqueConstraint('vocabulary_id', 'concept_code', name='uq_concept_vocab_code')
     )
-    op.create_index('idx_concept_domain', 'dim_concept', ['domain'], unique=False)
-    op.create_index('idx_concept_vocab_class', 'dim_concept', ['vocabulary_id', 'concept_class'], unique=False)
+    with op.batch_alter_table('dim_concept', schema=None) as batch_op:
+        batch_op.create_index('idx_concept_domain', ['domain'], unique=False)
+        batch_op.create_index('idx_concept_norm', ['concept_norm'], unique=False)
+        batch_op.create_index('idx_concept_vocab_class', ['vocabulary_id', 'concept_class'], unique=False)
+
     op.create_table('fact_concept_map',
     sa.Column('map_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('source_table', sa.String(length=100), nullable=False),
@@ -65,14 +115,23 @@ def upgrade() -> None:
     sa.Column('concept_code', sa.String(length=100), nullable=True),
     sa.Column('match_method', sa.String(length=30), nullable=True),
     sa.Column('match_score', sa.Float(), nullable=True),
+    sa.Column('decision', sa.String(length=20), nullable=True),
+    sa.Column('vocabulary_version', sa.String(length=100), nullable=True),
+    sa.Column('resolver_version', sa.String(length=50), nullable=True),
+    sa.Column('last_run_id', sa.String(length=50), nullable=True),
     sa.Column('is_approved', sa.Boolean(), nullable=True),
+    sa.Column('reviewed_by', sa.String(length=100), nullable=True),
+    sa.Column('reviewed_at', sa.DateTime(), nullable=True),
     sa.Column('mapped_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['vocabulary_id'], ['dim_vocabulary.vocabulary_id'], ),
     sa.PrimaryKeyConstraint('map_id'),
     sa.UniqueConstraint('source_table', 'source_column', 'source_value', name='uq_concept_map_source')
     )
-    op.create_index('idx_concept_map_approved', 'fact_concept_map', ['is_approved'], unique=False)
-    op.create_index('idx_concept_map_source', 'fact_concept_map', ['source_table', 'source_column'], unique=False)
+    with op.batch_alter_table('fact_concept_map', schema=None) as batch_op:
+        batch_op.create_index('idx_concept_map_approved', ['is_approved'], unique=False)
+        batch_op.create_index('idx_concept_map_decision', ['decision'], unique=False)
+        batch_op.create_index('idx_concept_map_source', ['source_table', 'source_column'], unique=False)
+
     op.create_table('dim_disease',
     sa.Column('disease_code', sa.String(length=100), nullable=False),
     sa.Column('disease_name', sa.String(length=100), nullable=False),
@@ -126,9 +185,11 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('location_id'),
     sa.UniqueConstraint('location_code')
     )
-    op.create_index('idx_dim_location_admin', 'dim_location', ['admin_level'], unique=False)
-    op.create_index('idx_dim_location_origin', 'dim_location', ['origin'], unique=False)
-    op.create_index('idx_dim_location_parent', 'dim_location', ['parent_location_id'], unique=False)
+    with op.batch_alter_table('dim_location', schema=None) as batch_op:
+        batch_op.create_index('idx_dim_location_admin', ['admin_level'], unique=False)
+        batch_op.create_index('idx_dim_location_origin', ['origin'], unique=False)
+        batch_op.create_index('idx_dim_location_parent', ['parent_location_id'], unique=False)
+
     op.create_table('dim_resistance_test_type',
     sa.Column('test_type_code', sa.String(length=100), nullable=False),
     sa.Column('test_type_name', sa.String(length=100), nullable=False),
@@ -195,9 +256,11 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('bionomics_id'),
     sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'source_code', name='uq_fact_bionomics_natural')
     )
-    op.create_index('idx_fact_bionomics_date', 'fact_bionomics', ['date_id'], unique=False)
-    op.create_index('idx_fact_bionomics_source', 'fact_bionomics', ['source_code'], unique=False)
-    op.create_index('idx_fact_bionomics_vector', 'fact_bionomics', ['vector_code'], unique=False)
+    with op.batch_alter_table('fact_bionomics', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_bionomics_date', ['date_id'], unique=False)
+        batch_op.create_index('idx_fact_bionomics_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_bionomics_vector', ['vector_code'], unique=False)
+
     op.create_table('fact_disease_burden',
     sa.Column('burden_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -215,10 +278,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('burden_id'),
     sa.UniqueConstraint('location_id', 'year', 'disease_code', 'pathogen_species', name='uq_burden_loc_year_disease_pathogen')
     )
-    op.create_index('idx_fact_burden_disease', 'fact_disease_burden', ['disease_code'], unique=False)
-    op.create_index('idx_fact_burden_location', 'fact_disease_burden', ['location_id'], unique=False)
-    op.create_index('idx_fact_burden_source', 'fact_disease_burden', ['source_code'], unique=False)
-    op.create_index('idx_fact_burden_year', 'fact_disease_burden', ['year'], unique=False)
+    with op.batch_alter_table('fact_disease_burden', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_burden_disease', ['disease_code'], unique=False)
+        batch_op.create_index('idx_fact_burden_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_burden_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_burden_year', ['year'], unique=False)
+
     op.create_table('fact_disease_case',
     sa.Column('case_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -243,11 +308,13 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('case_id'),
     sa.UniqueConstraint('location_id', 'date_id_onset', 'disease_code', 'identification_method_code', 'source_code', 'case_status', 'age_group', 'sex', name='uq_fact_case_natural')
     )
-    op.create_index('idx_fact_case_disease', 'fact_disease_case', ['disease_code'], unique=False)
-    op.create_index('idx_fact_case_location', 'fact_disease_case', ['location_id'], unique=False)
-    op.create_index('idx_fact_case_onset', 'fact_disease_case', ['date_id_onset'], unique=False)
-    op.create_index('idx_fact_case_reported', 'fact_disease_case', ['date_id_reported'], unique=False)
-    op.create_index('idx_fact_case_source', 'fact_disease_case', ['source_code'], unique=False)
+    with op.batch_alter_table('fact_disease_case', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_case_disease', ['disease_code'], unique=False)
+        batch_op.create_index('idx_fact_case_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_case_onset', ['date_id_onset'], unique=False)
+        batch_op.create_index('idx_fact_case_reported', ['date_id_reported'], unique=False)
+        batch_op.create_index('idx_fact_case_source', ['source_code'], unique=False)
+
     op.create_table('fact_environment',
     sa.Column('fact_env_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -261,10 +328,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('fact_env_id'),
     sa.UniqueConstraint('location_id', 'date_id', 'variable', name='uq_env_loc_date_var')
     )
-    op.create_index('idx_fact_env_date', 'fact_environment', ['date_id'], unique=False)
-    op.create_index('idx_fact_env_location', 'fact_environment', ['location_id'], unique=False)
-    op.create_index('idx_fact_env_source', 'fact_environment', ['source_code'], unique=False)
-    op.create_index('idx_fact_env_variable', 'fact_environment', ['variable'], unique=False)
+    with op.batch_alter_table('fact_environment', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_env_date', ['date_id'], unique=False)
+        batch_op.create_index('idx_fact_env_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_env_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_env_variable', ['variable'], unique=False)
+
     op.create_table('fact_health_facility',
     sa.Column('facility_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('facility_code', sa.String(length=100), nullable=False),
@@ -280,8 +349,10 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('facility_id'),
     sa.UniqueConstraint('facility_code')
     )
-    op.create_index('idx_fact_facility_location', 'fact_health_facility', ['location_id'], unique=False)
-    op.create_index('idx_fact_facility_source', 'fact_health_facility', ['source_code'], unique=False)
+    with op.batch_alter_table('fact_health_facility', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_facility_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_facility_source', ['source_code'], unique=False)
+
     op.create_table('fact_insecticide_resistance',
     sa.Column('resistance_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -315,10 +386,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('resistance_id'),
     sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'insecticide_code', 'test_type_code', 'source_code', 'concentration', name='uq_fact_ir_natural')
     )
-    op.create_index('idx_fact_resistance_date', 'fact_insecticide_resistance', ['date_id'], unique=False)
-    op.create_index('idx_fact_resistance_insecticide', 'fact_insecticide_resistance', ['insecticide_code'], unique=False)
-    op.create_index('idx_fact_resistance_source', 'fact_insecticide_resistance', ['source_code'], unique=False)
-    op.create_index('idx_fact_resistance_vector', 'fact_insecticide_resistance', ['vector_code'], unique=False)
+    with op.batch_alter_table('fact_insecticide_resistance', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_resistance_date', ['date_id'], unique=False)
+        batch_op.create_index('idx_fact_resistance_insecticide', ['insecticide_code'], unique=False)
+        batch_op.create_index('idx_fact_resistance_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_resistance_vector', ['vector_code'], unique=False)
+
     op.create_table('fact_intervention',
     sa.Column('intervention_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -336,10 +409,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('intervention_id'),
     sa.UniqueConstraint('location_id', 'date_start', 'target_disease_code', 'source_code', 'intervention_type', name='uq_fact_intervention_natural')
     )
-    op.create_index('idx_fact_intervention_disease', 'fact_intervention', ['target_disease_code'], unique=False)
-    op.create_index('idx_fact_intervention_location', 'fact_intervention', ['location_id'], unique=False)
-    op.create_index('idx_fact_intervention_source', 'fact_intervention', ['source_code'], unique=False)
-    op.create_index('idx_fact_intervention_start', 'fact_intervention', ['date_start'], unique=False)
+    with op.batch_alter_table('fact_intervention', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_intervention_disease', ['target_disease_code'], unique=False)
+        batch_op.create_index('idx_fact_intervention_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_intervention_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_intervention_start', ['date_start'], unique=False)
+
     op.create_table('fact_socioeconomic_condition',
     sa.Column('socio_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -353,10 +428,12 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('socio_id'),
     sa.UniqueConstraint('location_id', 'year', 'indicator_code', name='uq_socio_loc_year_indicator')
     )
-    op.create_index('idx_fact_socio_indicator', 'fact_socioeconomic_condition', ['indicator_code'], unique=False)
-    op.create_index('idx_fact_socio_location', 'fact_socioeconomic_condition', ['location_id'], unique=False)
-    op.create_index('idx_fact_socio_source', 'fact_socioeconomic_condition', ['source_code'], unique=False)
-    op.create_index('idx_fact_socio_year', 'fact_socioeconomic_condition', ['year'], unique=False)
+    with op.batch_alter_table('fact_socioeconomic_condition', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_socio_indicator', ['indicator_code'], unique=False)
+        batch_op.create_index('idx_fact_socio_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_socio_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_socio_year', ['year'], unique=False)
+
     op.create_table('fact_vector_observation',
     sa.Column('observation_id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('location_id', sa.Integer(), nullable=False),
@@ -378,76 +455,113 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('observation_id'),
     sa.UniqueConstraint('location_id', 'date_id', 'vector_code', 'source_code', 'life_stage', 'sex', 'collection_method', name='uq_fact_vec_obs_natural')
     )
-    op.create_index('idx_fact_vector_date', 'fact_vector_observation', ['date_id'], unique=False)
-    op.create_index('idx_fact_vector_location', 'fact_vector_observation', ['location_id'], unique=False)
-    op.create_index('idx_fact_vector_source', 'fact_vector_observation', ['source_code'], unique=False)
-    op.create_index('idx_fact_vector_vector', 'fact_vector_observation', ['vector_code'], unique=False)
+    with op.batch_alter_table('fact_vector_observation', schema=None) as batch_op:
+        batch_op.create_index('idx_fact_vector_date', ['date_id'], unique=False)
+        batch_op.create_index('idx_fact_vector_location', ['location_id'], unique=False)
+        batch_op.create_index('idx_fact_vector_source', ['source_code'], unique=False)
+        batch_op.create_index('idx_fact_vector_vector', ['vector_code'], unique=False)
+
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index('idx_fact_vector_vector', table_name='fact_vector_observation')
-    op.drop_index('idx_fact_vector_source', table_name='fact_vector_observation')
-    op.drop_index('idx_fact_vector_location', table_name='fact_vector_observation')
-    op.drop_index('idx_fact_vector_date', table_name='fact_vector_observation')
+    with op.batch_alter_table('fact_vector_observation', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_vector_vector')
+        batch_op.drop_index('idx_fact_vector_source')
+        batch_op.drop_index('idx_fact_vector_location')
+        batch_op.drop_index('idx_fact_vector_date')
+
     op.drop_table('fact_vector_observation')
-    op.drop_index('idx_fact_socio_year', table_name='fact_socioeconomic_condition')
-    op.drop_index('idx_fact_socio_source', table_name='fact_socioeconomic_condition')
-    op.drop_index('idx_fact_socio_location', table_name='fact_socioeconomic_condition')
-    op.drop_index('idx_fact_socio_indicator', table_name='fact_socioeconomic_condition')
+    with op.batch_alter_table('fact_socioeconomic_condition', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_socio_year')
+        batch_op.drop_index('idx_fact_socio_source')
+        batch_op.drop_index('idx_fact_socio_location')
+        batch_op.drop_index('idx_fact_socio_indicator')
+
     op.drop_table('fact_socioeconomic_condition')
-    op.drop_index('idx_fact_intervention_start', table_name='fact_intervention')
-    op.drop_index('idx_fact_intervention_source', table_name='fact_intervention')
-    op.drop_index('idx_fact_intervention_location', table_name='fact_intervention')
-    op.drop_index('idx_fact_intervention_disease', table_name='fact_intervention')
+    with op.batch_alter_table('fact_intervention', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_intervention_start')
+        batch_op.drop_index('idx_fact_intervention_source')
+        batch_op.drop_index('idx_fact_intervention_location')
+        batch_op.drop_index('idx_fact_intervention_disease')
+
     op.drop_table('fact_intervention')
-    op.drop_index('idx_fact_resistance_vector', table_name='fact_insecticide_resistance')
-    op.drop_index('idx_fact_resistance_source', table_name='fact_insecticide_resistance')
-    op.drop_index('idx_fact_resistance_insecticide', table_name='fact_insecticide_resistance')
-    op.drop_index('idx_fact_resistance_date', table_name='fact_insecticide_resistance')
+    with op.batch_alter_table('fact_insecticide_resistance', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_resistance_vector')
+        batch_op.drop_index('idx_fact_resistance_source')
+        batch_op.drop_index('idx_fact_resistance_insecticide')
+        batch_op.drop_index('idx_fact_resistance_date')
+
     op.drop_table('fact_insecticide_resistance')
-    op.drop_index('idx_fact_facility_source', table_name='fact_health_facility')
-    op.drop_index('idx_fact_facility_location', table_name='fact_health_facility')
+    with op.batch_alter_table('fact_health_facility', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_facility_source')
+        batch_op.drop_index('idx_fact_facility_location')
+
     op.drop_table('fact_health_facility')
-    op.drop_index('idx_fact_env_variable', table_name='fact_environment')
-    op.drop_index('idx_fact_env_source', table_name='fact_environment')
-    op.drop_index('idx_fact_env_location', table_name='fact_environment')
-    op.drop_index('idx_fact_env_date', table_name='fact_environment')
+    with op.batch_alter_table('fact_environment', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_env_variable')
+        batch_op.drop_index('idx_fact_env_source')
+        batch_op.drop_index('idx_fact_env_location')
+        batch_op.drop_index('idx_fact_env_date')
+
     op.drop_table('fact_environment')
-    op.drop_index('idx_fact_case_source', table_name='fact_disease_case')
-    op.drop_index('idx_fact_case_reported', table_name='fact_disease_case')
-    op.drop_index('idx_fact_case_onset', table_name='fact_disease_case')
-    op.drop_index('idx_fact_case_location', table_name='fact_disease_case')
-    op.drop_index('idx_fact_case_disease', table_name='fact_disease_case')
+    with op.batch_alter_table('fact_disease_case', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_case_source')
+        batch_op.drop_index('idx_fact_case_reported')
+        batch_op.drop_index('idx_fact_case_onset')
+        batch_op.drop_index('idx_fact_case_location')
+        batch_op.drop_index('idx_fact_case_disease')
+
     op.drop_table('fact_disease_case')
-    op.drop_index('idx_fact_burden_year', table_name='fact_disease_burden')
-    op.drop_index('idx_fact_burden_source', table_name='fact_disease_burden')
-    op.drop_index('idx_fact_burden_location', table_name='fact_disease_burden')
-    op.drop_index('idx_fact_burden_disease', table_name='fact_disease_burden')
+    with op.batch_alter_table('fact_disease_burden', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_burden_year')
+        batch_op.drop_index('idx_fact_burden_source')
+        batch_op.drop_index('idx_fact_burden_location')
+        batch_op.drop_index('idx_fact_burden_disease')
+
     op.drop_table('fact_disease_burden')
-    op.drop_index('idx_fact_bionomics_vector', table_name='fact_bionomics')
-    op.drop_index('idx_fact_bionomics_source', table_name='fact_bionomics')
-    op.drop_index('idx_fact_bionomics_date', table_name='fact_bionomics')
+    with op.batch_alter_table('fact_bionomics', schema=None) as batch_op:
+        batch_op.drop_index('idx_fact_bionomics_vector')
+        batch_op.drop_index('idx_fact_bionomics_source')
+        batch_op.drop_index('idx_fact_bionomics_date')
+
     op.drop_table('fact_bionomics')
     op.drop_table('dim_vector')
     op.drop_table('dim_source')
     op.drop_table('dim_socioeconomic_indicator')
     op.drop_table('dim_resistance_test_type')
-    op.drop_index('idx_dim_location_parent', table_name='dim_location')
-    op.drop_index('idx_dim_location_origin', table_name='dim_location')
-    op.drop_index('idx_dim_location_admin', table_name='dim_location')
+    with op.batch_alter_table('dim_location', schema=None) as batch_op:
+        batch_op.drop_index('idx_dim_location_parent')
+        batch_op.drop_index('idx_dim_location_origin')
+        batch_op.drop_index('idx_dim_location_admin')
+
     op.drop_table('dim_location')
     op.drop_table('dim_insecticide')
     op.drop_table('dim_identification_method')
     op.drop_table('dim_disease')
-    op.drop_index('idx_concept_map_source', table_name='fact_concept_map')
-    op.drop_index('idx_concept_map_approved', table_name='fact_concept_map')
+    with op.batch_alter_table('fact_concept_map', schema=None) as batch_op:
+        batch_op.drop_index('idx_concept_map_source')
+        batch_op.drop_index('idx_concept_map_decision')
+        batch_op.drop_index('idx_concept_map_approved')
+
     op.drop_table('fact_concept_map')
-    op.drop_index('idx_concept_vocab_class', table_name='dim_concept')
-    op.drop_index('idx_concept_domain', table_name='dim_concept')
+    with op.batch_alter_table('dim_concept', schema=None) as batch_op:
+        batch_op.drop_index('idx_concept_vocab_class')
+        batch_op.drop_index('idx_concept_norm')
+        batch_op.drop_index('idx_concept_domain')
+
     op.drop_table('dim_concept')
+    with op.batch_alter_table('run_manifest', schema=None) as batch_op:
+        batch_op.drop_index('idx_run_manifest_started')
+
+    op.drop_table('run_manifest')
+    with op.batch_alter_table('fact_resolution_log', schema=None) as batch_op:
+        batch_op.drop_index('idx_resolution_log_run')
+        batch_op.drop_index('idx_resolution_log_decision')
+
+    op.drop_table('fact_resolution_log')
     op.drop_table('dim_vocabulary')
     op.drop_table('dim_time')
     # ### end Alembic commands ###

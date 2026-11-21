@@ -31,25 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class MappingTransformer:
-    """Transforms a source DataFrame into multiple CDM table DataFrames.
-
-    Parameters
-    ----------
-    mapping_csv_path : str, optional
-        Legacy path. Still first positionally, because ``transform_dimensions``
-        and ``transform_facts`` construct ``MappingTransformer(path)``.
-    large_df_threshold : int
-        Rows above which the row-wise loop logs a warning.
-    column_specs : list of ColumnSpec, optional
-        Inline form. Mutually exclusive with the CSV: they are two encodings of
-        one table, and preferring one silently would hide a config that says both.
-    registry : VocabularyRegistry, optional
-        Used by the ``resolve`` transform and to decide whether a literal
-        ``{raw: code}`` table in a ``map`` transform is authoritative. Absent
-        means the ``resolve`` transform refuses rather than guesses.
-    run_id : str, optional
-        Forwarded to every ``Resolution`` so the ledger can attribute evidence.
-    """
+    """Transforms a source DataFrame into multiple CDM table DataFrames."""
 
     def __init__(self, mapping_csv_path: Optional[str] = None,
                  large_df_threshold: int = 1_000_000, *,
@@ -86,10 +68,7 @@ class MappingTransformer:
         self._resolver: Optional[ConceptResolver] = None
         self._resolver_session: Any = None
         self._pending_resolutions: Dict[tuple, Any] = {}
-        #: ``(table, ref_field) -> DimensionKeyIndex``. The live dimension cache.
         self._index_cache: Dict[tuple, Optional[DimensionKeyIndex]] = {}
-        #: ``(table, column)`` pairs already warned about, so a chunked source
-        #: does not emit ten thousand identical lines.
         self._warned_unpartitioned: set = set()
 
         self._validate_mapping()
@@ -100,17 +79,8 @@ class MappingTransformer:
     # -------------------------------------------------------------------------
 
     def _normalise_mapping_frame(self) -> None:
-        """Coerce the mapping frame into the dtypes the transform loop expects.
+        """Coerce the mapping frame into the dtypes the transform loop expects."""
 
-        Two coercions, each fixing a failure a clean CSV happens to mask:
-
-        * ``required`` becomes a real ``bool``. ``_determine_raw_value`` tests
-          ``mapping.get('required', False)``, and ``bool("False")`` is True — a
-          string column would make every optional column required.
-        * Blank strings in the nullable columns become NaN. The loop tests
-          ``pd.notna(...)`` and ``pd.notna("")`` is True, so an empty cell would be
-          read as a literal static value (or as a real source column name).
-        """
         nullable_columns = (
             "source_column", "transform_params", "static_value",
             "default_value", "source_data_type",
@@ -136,25 +106,8 @@ class MappingTransformer:
 
 
     def _validate_mapping(self) -> None:
-        """Validate the mapping table for whichever input shape produced it.
-
-        A row needs a value source, and there are five kinds:
-
-        1. ``source_column`` — a cell from the source frame;
-        2. ``static_value`` — a literal for every row;
-        3. ``default_value`` — what ``_apply_default_transform`` writes when the
-           source column is absent or null;
-        4. a transform that builds its value from ``transform_params["columns"]``:
-           ``concat``, ``coalesce``, ``format_date``, ``derive_category``, and
-           ``map`` with a ``ref`` (``_build_lookup_value`` reads those columns
-           from the row context);
-        5. ``resolve``, whose value is the cell the resolver is asked about.
-
-        Anything else writes a literal NULL for every record, which is the defect
-        this check exists to catch. ``default_value`` is deliberately included:
-        a column with a fixed fallback and no source column is a legitimate
-        constant (GBIF's ``admin_level: occurrence``), not an empty mapping.
-        """
+        """Validate the mapping table for whichever input shape produced it."""
+        
         required_cols = {
             "source_column", "target_table", "target_column", "transform", "required",
         }
@@ -229,10 +182,7 @@ class MappingTransformer:
         for _, row in self.mapping.iterrows():
             self.table_mappings[row["target_table"]].append(row.to_dict())
 
-    # -------------------------------------------------------------------------
-    # `map` — dimension lookup, or a literal table
-    # -------------------------------------------------------------------------
-
+    
     def _apply_map_transform(
         self,
         value: Any,
@@ -240,25 +190,8 @@ class MappingTransformer:
         extra_context: Optional[dict] = None,
         target_field: Optional[str] = None,
     ) -> Any:
-        """Apply a ``map`` transform: a dimension lookup, or a literal table.
+        """Apply a ``map`` transform: a dimension lookup, or a literal table."""
 
-        ``ref`` branch
-        --------------
-        Routed through ``DimensionKeyIndex``, which replaces the per-value
-        ``SELECT ... WHERE field == value`` of the old lookup (review C12) with
-        one seed query per (table, field) and a dictionary thereafter. The index
-        also returns the concept alongside the surrogate key, so the caller no
-        longer reads the FK from one place and the concept from another (C7).
-
-        inline ``{raw: code}`` branch
-        -----------------------------
-        Retained **only** for fields no pack governs. The canonical example is
-        ``sex``: a closed, source-declared encoding with no vocabulary behind it.
-        Where a pack *does* govern the field, a literal table is a second,
-        unversioned source of truth for a decision the registry owns — that is
-        warned about and the literal is still applied, because silently resolving
-        instead would change a run's output based on config the user cannot see.
-        """
         ref = params.get("ref") if isinstance(params, dict) else None
 
         if ref:
@@ -317,58 +250,15 @@ class MappingTransformer:
 
         return lookup.get(str(value), default)
 
-    # -------------------------------------------------------------------------
-    # `resolve` — the concept ladder, one value at a time
-    # -------------------------------------------------------------------------
-
+    
     def _apply_resolve_transform(
         self,
         value: Any,
         field: str,
         params: Optional[dict] = None,
     ) -> Optional[str]:
-        """Resolve one raw value against the pack that governs ``field``.
+        """Resolve one raw value against the pack that governs ``field``."""
 
-        The ``resolve`` transform is the mapping-level entry point to the ladder:
-        it names a CDM field (``dim_vector.species_name``), asks the registry
-        which pack governs it, resolves the value with ``ConceptResolver`` and
-        returns the accepted standard code (or ``None``).
-
-        Values whose decision is not ``auto_accepted`` get ``None``. The decision
-        itself — not this column — is what a review queue reads, and
-        ``concept_code`` is ``None`` on every withheld decision by contract.
-
-        Parameters
-        ----------
-        value : Any
-            The raw cell. ``None``, ``NaN`` and blank resolve to ``None``
-            through the ladder rather than raising.
-        field : str
-            The CDM field the transform writes into, from the mapping row's
-            ``transform_params['ref']`` or its ``target_table.target_column``.
-        params : dict, optional
-            ``pack`` forces a specific pack id; anything else is ignored, so a
-            mapping CSV may carry extra transform parameters without error.
-
-        Returns
-        -------
-        str or None
-            The accepted standard code, or ``None``.
-
-        Raises
-        ------
-        ValueError
-            If no registry was supplied, if ``field`` is blank, or if ``pack``
-            names a pack the registry does not hold. All three are configuration
-            errors that would otherwise resolve every row to nothing, silently.
-
-        Notes
-        -----
-        Per-cell, not per-series. ``_build_table_df`` dispatches one cell at a
-        time, and ``ConceptResolver`` memoises on ``(field, value)``, so the
-        second occurrence of a repeated value is a dictionary hit. A chunked
-        source therefore pays the resolution cost once per distinct value.
-        """
         if self.registry is None:
             raise ValueError(
                 "the `resolve` transform needs a VocabularyRegistry "
@@ -421,15 +311,8 @@ class MappingTransformer:
         )
 
     def _partition_field(self, target_field: str) -> tuple[str, str]:
-        """Split ``'dim_vector.species_name'`` into its two halves.
+        """Split ``'dim_vector.species_name'`` into its two halves."""
 
-        A field that cannot be partitioned is a mapping error, and there are two
-        ways to report it badly. Synthesising ``'unknown'`` writes a
-        plausible-looking table name into an audit table, where it is
-        indistinguishable from a real one. Raising aborts an ingestion for a
-        single malformed mapping row. So the edge is recorded as the sentinel
-        ``UNPARTITIONED`` and logged at WARNING once per (table, column) pair.
-        """
         table, separator, column = str(target_field).partition(".")
         table = table.strip()
         column = column.strip()
@@ -448,10 +331,7 @@ class MappingTransformer:
             return marker
         return table, column
 
-    # -------------------------------------------------------------------------
-    # Scalar transforms
-    # -------------------------------------------------------------------------
-
+    
     def _apply_date_parse_transform(self, value: Any,
                                     params: Optional[Union[str, dict]]) -> Any:
         """Parse a date value and return it as a ``YYYY-MM-DD`` string."""
@@ -470,22 +350,10 @@ class MappingTransformer:
             )
             return None
 
+
     def _apply_derive_category_transform(self, value, params,
                                          extra_context=None) -> Any:
-        """Derive a categorical label from one or more source columns.
-
-        Rules are evaluated top-to-bottom; the first whose conditions all hold
-        wins. If none match, ``default`` is returned.
-
-        Supported conditions::
-
-            {"col": "indoor_host_percent", "op": ">=", "value": 80}
-            {"cols": ["indoor_total", "outdoor_total"], "op": "ratio_gte",
-             "value": 0.8}
-
-        ``ops``: ``>``, ``>=``, ``<``, ``<=``, ``==``, ``!=``, ``ratio_gt``,
-        ``ratio_gte``, ``ratio_lt``, ``ratio_lte``.
-        """
+        """Derive a categorical label from one or more source columns."""
         if not params:
             return None
         if not extra_context:
@@ -575,21 +443,11 @@ class MappingTransformer:
         logger.warning("Split index %s out of range for value %r", index, value)
         return None
 
+
     def _apply_unit_convert_transform(self, value: Any,
                                       params: Optional[Union[str, dict]]) -> Any:
-        """Affine unit conversion.
+        """Affine unit conversion."""
 
-        ``out = value / factor + offset`` when ``divide``, else
-        ``out = value * factor + offset``.
-
-        Params: ``factor`` (1.0), ``offset`` (0.0), ``divide`` (False),
-        ``default`` (None), ``clamp_min``, ``clamp_max``, ``round_to``,
-        ``treat_as_null``.
-
-        Also: closes the "divide by zero" hole (logs and returns ``default``
-        instead of raising ``ZeroDivisionError``) and treats a NaN result as
-        unparseable rather than propagating it.
-        """
         params = params or {}
         factor = float(params.get("factor", 1.0))
         offset = float(params.get("offset", 0.0))
@@ -627,8 +485,6 @@ class MappingTransformer:
         if pd.isna(number):
             return default
 
-        # A percentage value with a `%` sign is the commonest reason a source
-        # column is a string. Strip it here rather than at every mapping.
         if isinstance(value, str) and value.strip().endswith("%") and fraction:
             number = number / 100.0
 
@@ -652,17 +508,12 @@ class MappingTransformer:
             number = round(number, int(round_to))
         return number
 
+
     def _apply_coalesce_transform(self, value: Any,
                                   params: Optional[Union[str, dict]],
                                   extra_context: Optional[dict] = None) -> Any:
-        """Return the first non-null value among ``params['columns']``.
+        """Return the first non-null value among ``params['columns']``."""
 
-        Useful when a source stores one logical quantity in two
-        mutually-exclusive columns — IRMapper's ``Concentration (%)`` (WHO tube)
-        and ``Concentration (µg)`` (CDC bottle).
-
-        Zero IS a usable value; only ``None``, NaN and the null tokens are not.
-        """
         params = params or {}
         cols = params.get("columns", [])
         default = params.get("default")
@@ -697,17 +548,12 @@ class MappingTransformer:
 
         return default
 
+
     def _apply_format_date_transform(self, value: Any,
                                      params: Optional[Union[str, dict]],
                                      extra_context: Optional[dict] = None) -> Any:
-        """Build a ``YYYY-MM-DD`` date_id from one to three source columns.
+        """Build a ``YYYY-MM-DD`` date_id from one to three source columns."""
 
-        ``dim_time.date_id`` is a full-date primary key, so every fact row needs
-        a complete date. A source that knows only the year, or year + month, is
-        accommodated: the missing components come from ``month_default`` /
-        ``day_default``, and an impossible date is clamped to the last valid day
-        of its month (Feb 30 → Feb 28/29) unless ``clamp_invalid_day`` is False.
-        """
         params = params or {}
         cols = params.get("columns", [])
         if not isinstance(cols, list) or not (1 <= len(cols) <= 3):
@@ -767,16 +613,13 @@ class MappingTransformer:
             last_day = calendar.monthrange(year, month)[1]
             return datetime(year, month, last_day).strftime("%Y-%m-%d")
 
+
     def _apply_transform(self, value: Any, transform: str,
                          params: Optional[Union[str, dict]],
                          extra_context: Optional[dict] = None,
                          target_field: Optional[str] = None) -> Any:
-        """Apply one transformation to one value.
+        """Apply one transformation to one value."""
 
-        Dispatches on ``transform``. ``target_field`` is required by ``map`` (to
-        decide whether a literal table is authoritative) and ``resolve`` (to know
-        which field to resolve); every other transform ignores it.
-        """
         if isinstance(params, str):
             if not params.strip():
                 params = {}
@@ -828,26 +671,18 @@ class MappingTransformer:
     # -------------------------------------------------------------------------
 
     def _model_for_table(self, table_name: str):
-        """The model class for ``table_name``, derived rather than listed.
+        """The model class for ``table_name``, derived rather than listed."""
 
-        Review C13: ``_get_model_for_table`` was a literal dict duplicating
-        ``DBLoader._build_model_map``. This scans ``models`` instead, which is
-        what the loader already does, so a new model needs no edit here.
-        """
         for attribute in sorted(vars(models)):
             candidate = getattr(models, attribute)
             if getattr(candidate, "__tablename__", None) == table_name:
                 return candidate
         return None
 
-    def _natural_key(self, table_name: str) -> Optional[str]:
-        """The column a dimension row is identified by.
 
-        Read from ``DBLoader.NATURAL_KEY_CONFIG``, which is already the single
-        declaration of every table's natural key — it has to match a unique
-        constraint, or the upsert would not bite. Imported lazily so this module
-        does not depend on the loader at import time.
-        """
+    def _natural_key(self, table_name: str) -> Optional[str]:
+        """The column a dimension row is identified by."""
+
         try:
             from etl.loaders.db_loader import NATURAL_KEY_CONFIG
         except Exception as exc:  # noqa: BLE001
@@ -858,23 +693,11 @@ class MappingTransformer:
         columns = config.get("columns") or []
         return columns[0] if columns else None
 
+
     def _index_for(self, table_name: str,
                    field_name: str) -> Optional["DimensionKeyIndex"]:
-        """A ``DimensionKeyIndex`` for ``table_name`` matched on ``field_name``.
+        """A ``DimensionKeyIndex`` for ``table_name`` matched on ``field_name``."""
 
-        ``field_name`` is the ref's own column and becomes the index's *alias*,
-        which is what reproduces the old single ``WHERE field == value`` lookup
-        while adding one key function and one query instead of one query per
-        value.
-
-        ``pk_field`` is set only when the primary key is an integer surrogate.
-        Where the natural key *is* the primary key (``dim_vector.vector_code``),
-        ``DimensionEntry.pk`` stays None and the caller falls back to
-        ``entry.code`` — which is the value a fact FK holds there anyway.
-
-        A failure to seed is cached as ``None`` so a bad ref logs once rather than
-        once per row, and ``lookup_raw`` then returns None for every value.
-        """
         cache_key = (table_name, field_name)
         if cache_key in self._index_cache:
             return self._index_cache[cache_key]
@@ -928,14 +751,10 @@ class MappingTransformer:
         self._index_cache[cache_key] = index
         return index
 
-    def _governing_pack(self, target_field: Optional[str]):
-        """The pack that governs ``target_field``, or None.
 
-        Returns None on every uncertainty — no registry, a field outside the
-        catalog, a field no pack claims — because the only decision this feeds is
-        whether a config-declared literal table is authoritative, and the safe
-        default is "not governed".
-        """
+    def _governing_pack(self, target_field: Optional[str]):
+        """The pack that governs ``target_field``, or None."""
+
         if self.registry is None or not target_field:
             return None
         try:
@@ -944,14 +763,10 @@ class MappingTransformer:
             logger.debug("no governing pack for %r: %s", target_field, exc)
             return None
 
-    def _ensure_resolver(self) -> ConceptResolver:
-        """The per-transformer ``ConceptResolver``, created on first use.
 
-        One resolver per transformer means one in-memory vocabulary and one memo
-        table per transform pass, which is what makes a repeated raw value free
-        from the second row onwards. The session it holds is closed by
-        :meth:`close`.
-        """
+    def _ensure_resolver(self) -> ConceptResolver:
+        """The per-transformer ``ConceptResolver``, created on first use."""
+
         if self._resolver is None:
             if self._resolver_session is None:
                 self._resolver_session = SessionLocal()
@@ -976,22 +791,11 @@ class MappingTransformer:
                 return separator.join(parts)
         return original_value
 
+
     def _legacy_lookup_dimension_id(self, model_class, field_name: str,
                                     lookup_value: Any) -> Optional[int]:
-        """Deprecated. Per-value ``SELECT ... WHERE field == value`` lookup.
+        """Deprecated. Per-value ``SELECT ... WHERE field == value`` lookup."""
 
-        Renamed from ``_lookup_dimension_id``; warns on every call. It is the
-        fourth resolution mechanism the review counted (C12) — exact ``==``
-        only, no case folding, no vocabulary, one query per distinct value
-        against an unindexed column — and ``_apply_map_transform`` no longer
-        calls it. It survives only so an out-of-tree caller keeps working for
-        one release; nothing in this repository reaches it.
-
-        The cache is created lazily on the instance rather than assumed: a
-        previous revision removed ``self._dimension_cache`` from ``__init__``
-        while this method still read it, so the "deprecated but working" promise
-        was an ``AttributeError``.
-        """
         warnings.warn(
             "MappingTransformer._lookup_dimension_id is deprecated; use "
             "_index_for() + DimensionKeyIndex.lookup_raw(), which keys values "
@@ -1030,6 +834,7 @@ class MappingTransformer:
             logger.error("Error during dimension lookup: %s", exc)
             return None
 
+
     def _determine_raw_value(self, source_row, target_table, mapping) -> Any:
         value = None
 
@@ -1061,6 +866,7 @@ class MappingTransformer:
                 except (ValueError, TypeError):
                     value = None
         return value
+
 
     def _apply_transformation(self, idx, raw_value, source_row, mapping,
                               row_context) -> Any:
@@ -1102,6 +908,7 @@ class MappingTransformer:
             target_field=target_field,
         )
 
+
     def _apply_default_transform(self, value, mapping, target_table):
         if value is None or (isinstance(value, float) and pd.isna(value)):
             if mapping.get("required", False):
@@ -1111,6 +918,7 @@ class MappingTransformer:
                 )
             value = mapping.get("default_value")
         return value
+
 
     def _build_table_df(self, source_df: pd.DataFrame,
                         target_table: str) -> pd.DataFrame:
@@ -1132,19 +940,11 @@ class MappingTransformer:
             rows.append(record)
         return pd.DataFrame(rows)
 
+
     def transform(self, source_df: pd.DataFrame,
                   target_filter: Optional[set] = None) -> Dict[str, pd.DataFrame]:
-        """Transform a source DataFrame into ``{table: DataFrame}``.
+        """Transform a source DataFrame into ``{table: DataFrame}``."""
 
-        Parameters
-        ----------
-        source_df : pandas.DataFrame
-        target_filter : set of str, optional
-            If provided, only build DataFrames for these target tables. Used to
-            keep the dimension-only and fact-only passes separated, which matters
-            because the fact pass resolves FKs against dimensions this run has
-            just loaded.
-        """
         if len(source_df) > self.large_df_threshold:
             logger.warning(
                 "Source DataFrame has %s row(s) (> %s). Row-wise transformation "
@@ -1170,23 +970,16 @@ class MappingTransformer:
     # -------------------------------------------------------------------------
 
     def pending_resolutions(self) -> List[Any]:
-        """Resolutions produced by ``resolve`` transforms, sorted, de-duplicated.
-
-        Sorted by the source triple so two runs emit the same order. The concept
-        pass — ``DBLoader.load_resolutions`` — is what persists these.
-        """
+        """Resolutions produced by ``resolve`` transforms, sorted, de-duplicated."""
         return [
             self._pending_resolutions[key]
             for key in sorted(self._pending_resolutions)
         ]
 
-    def close(self) -> None:
-        """Release the resolver's session. Safe to call twice.
 
-        ``_pending_resolutions`` deliberately survives: ``close`` is a resource
-        release, and a caller that drains the buffer afterwards must still find
-        its evidence. Clearing it here would be the batch-5 §4.1 defect again.
-        """
+    def close(self) -> None:
+        """Release the resolver's session. Safe to call twice."""
+
         if self._resolver_session is not None:
             try:
                 self._resolver_session.close()
@@ -1194,8 +987,10 @@ class MappingTransformer:
                 self._resolver_session = None
                 self._resolver = None
 
+
     def __enter__(self) -> "MappingTransformer":
         return self
+
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()

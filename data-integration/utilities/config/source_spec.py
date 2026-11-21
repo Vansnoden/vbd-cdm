@@ -4,37 +4,8 @@ The user-facing source specification: `ColumnSpec`, `SourceSpec`,
 `load_source_specs`.
 
 This module is the only place that decides what a `data_sources` entry may
-contain, and the only place that refuses vocabulary configuration (review §4.1:
-every remaining key describes the source, none names a vocabulary).
+contain, and the only place that refuses vocabulary configuration.
 
-Three deliberate rules
-----------------------
-1. **`core:` is an accepted root.** The new YAML keeps `core:` (backward
-   compatibility with `base_config.yaml`), so `load_source_specs` must not
-   reject it. It is read for nothing here: `core` describes the *study*, not a
-   source, and `main.py` owns it.
-2. **Any key matching ``^(vocab|concept)`` is rejected at parse time**, anywhere
-   in the document, by dotted path. `core.vocabulary.gadm_gpkg` used to be read
-   for one value and silently ignored for four others (review C1);
-   `core.vocabulary.ncbi_csv` was read by nothing at all. A parse-time error is
-   the only signal a user cannot miss.
-3. **Exactly one of `matching:` / `columns:` per source**, never both. The
-   legacy CSV path (invariant 5) and the inline path are alternatives, not
-   layers, and "both" has no defined precedence worth inventing.
-
-`ColumnSpec.mapping_row()` emits the exact CSV row shape
-(`MAPPING_COLUMNS`) that `MappingTransformer` already consumes, so the inline
-path and the CSV path arrive at the same DataFrame. That is what makes the
-migration in review §5 step 12 additive.
-
-Pydantic strictness
--------------------
-`ColumnSpec` is `extra="forbid"`: it is a new format, and a silently ignored
-key is the defect this batch exists to remove. `SourceSpec` is
-`extra="allow"` and warns: existing `base_config.yaml` files may carry keys
-this batch does not model (`sheet_name`, a future `provenance` block), and
-rejecting them would break invariant 5 for no gain. Unknown keys are logged by
-`SourceSpec.model_validate` callers, not accepted silently by the parser.
 """
 
 from __future__ import annotations
@@ -52,8 +23,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 logger = logging.getLogger(__name__)
 
 
-#: The exact columns `MappingTransformer` reads from a mapping CSV. A
-#: `ColumnSpec` is a typed view of one row of this table.
 MAPPING_COLUMNS: tuple[str, ...] = (
     "source_column",
     "target_table",
@@ -66,10 +35,6 @@ MAPPING_COLUMNS: tuple[str, ...] = (
     "source_data_type",
 )
 
-#: Transform names `MappingTransformer._apply_transform` dispatches on. Kept in
-#: sync by hand because that method's chain is the authority; a name here that
-#: is absent there would fail at row 1 of the first transform, which is a worse
-#: place to learn about a typo than a parse error.
 KNOWN_TRANSFORMS: frozenset[str] = frozenset(
     {
         "none",
@@ -86,9 +51,6 @@ KNOWN_TRANSFORMS: frozenset[str] = frozenset(
     }
 )
 
-#: Keys that used to configure vocabulary behaviour and are now refused. The
-#: pattern is anchored and case-insensitive: `vocabulary`, `Vocabularies`,
-#: `concepts`, `concept_map` all match.
 FORBIDDEN_KEY_PATTERN = re.compile(r"^(vocab|concept)", re.IGNORECASE)
 
 
@@ -133,14 +95,7 @@ class TransformSpec(BaseModel):
 
 
 class ColumnSpec(BaseModel):
-    """One source column and what it becomes in the CDM.
-
-    ``admin_level`` and ``domain_hint`` describe the **source** and are never
-    written to the database by the transformer; they are read by the concept
-    pass. ``mapping_row()`` therefore does not emit them: the mapping row is
-    column projection only, which is exactly the boundary review §2.2 draws
-    around `MappingTransformer`.
-    """
+    """One source column and what it becomes in the CDM."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -148,9 +103,7 @@ class ColumnSpec(BaseModel):
     target_table: str
     target_column: str
 
-    # `transform` accepts a bare name (legacy CSV shape) or the structured form.
     transform: Optional[Union[str, TransformSpec]] = None
-    # `transform_params` accepts a dict (inline YAML) or JSON text (CSV shape).
     transform_params: Optional[Union[Dict[str, Any], str]] = None
 
     required: bool = False
@@ -198,8 +151,6 @@ class ColumnSpec(BaseModel):
             )
 
         if self.source_column is None and self.static_value is None:
-            # A row with no source column is legal only when the transform
-            # synthesises its value from other columns / from the row context.
             transform_name = self.transform_name
             if transform_name not in ("format_date", "coalesce", "concat", "derive_category"):
                 raise ValueError(
@@ -259,21 +210,8 @@ class ColumnSpec(BaseModel):
         return parsed
 
     def mapping_row(self) -> Dict[str, Any]:
-        """One mapping row, in the exact shape ``pd.read_csv`` would produce.
+        """One mapping row, in the exact shape ``pd.read_csv`` would produce."""
 
-        Three details are load-bearing, and each one is a bug that was found by
-        reading `MappingTransformer` rather than by running it:
-
-        * ``required`` is a real ``bool``. ``bool("False")`` is True, so a
-          string here would make every optional column required.
-        * absent ``static_value`` / ``default_value`` / ``source_column`` are
-          ``None``, not ``""``. ``_determine_raw_value`` tests
-          ``pd.notna(mapping["static_value"])``, and ``pd.notna("")`` is True —
-          so an empty string would be returned as a literal static value for
-          every row.
-        * ``transform_params`` is JSON text, because that is the column type
-          `_apply_transformation` parses.
-        """
         params = self.transform_parameters
         return {
             "source_column": self.source_column,
@@ -302,8 +240,6 @@ class SourceSpec(BaseModel):
     extension_options: Dict[str, Any] = Field(default_factory=dict)
     extract_mode: str = "single"
 
-    # Exactly one of these two. `matching` keeps the legacy CSV path alive
-    # (invariant 5); `columns` is the inline form (review §4.3).
     matching: Optional[str] = None
     columns: Optional[List[ColumnSpec]] = None
 
@@ -389,12 +325,8 @@ class SourceSpec(BaseModel):
 # =============================================================================
 
 def _reject_vocabulary_keys(node: Any, path: tuple[str, ...] = ()) -> None:
-    """Walk the whole document and refuse any vocabulary/concept key.
+    """Walk the whole document and refuse any vocabulary/concept key."""
 
-    Recursive on purpose: the keys that mattered were nested
-    (``core.vocabulary.ncbi_csv``), and a top-level-only check would have
-    passed exactly the document that caused review C1.
-    """
     if isinstance(node, Mapping):
         for key in node:
             text_key = str(key)
@@ -416,37 +348,8 @@ def _reject_vocabulary_keys(node: Any, path: tuple[str, ...] = ()) -> None:
 
 
 def load_source_specs(yaml_path: Union[str, Path]) -> Dict[str, SourceSpec]:
-    """Parse a YAML config into ``{source_key: SourceSpec}``.
+    """Parse a YAML config into ``{source_key: SourceSpec}``."""
 
-    Parameters
-    ----------
-    yaml_path : str or pathlib.Path
-        A document with ``data_sources:`` at the top level (and, optionally,
-        ``core:`` and ``process:``, which are accepted and otherwise ignored).
-
-    Returns
-    -------
-    dict
-        Keyed by the `data_sources` key (``vectoratlas``, ``irmapper_ir_1``),
-        sorted by that key so iteration is deterministic. The key is the
-        source's identity in logs and in `--source` filtering; `source_name` is
-        its human label.
-
-    Raises
-    ------
-    ValueError
-        If the file is not a mapping, has no `data_sources` mapping, declares a
-        key matching ``^(vocab|concept)`` anywhere, or contains a source that
-        violates `SourceSpec` (both `matching:` and `columns:`, neither, two
-        entries writing one target column, an unknown transform).
-
-    Notes
-    -----
-    Relative paths inside a source are **not** resolved here. `main.py` resolves
-    them against `PROJECT_ROOT` (that is what `get_file_paths` does today), and
-    moving the resolution would silently change what a relative path means for
-    every existing config.
-    """
     path = Path(yaml_path)
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -464,9 +367,6 @@ def load_source_specs(yaml_path: Union[str, Path]) -> Dict[str, SourceSpec]:
             f"{type(document).__name__}"
         )
 
-    # "core:" is accepted (backward compatibility) and nothing else is
-    # inspected before this check, so a vocabulary key is reported with its
-    # full dotted path rather than as a Pydantic "extra field" surprise.
     _reject_vocabulary_keys(document)
 
     sources = document.get("data_sources")

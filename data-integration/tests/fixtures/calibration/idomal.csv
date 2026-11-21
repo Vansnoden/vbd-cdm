@@ -1,6 +1,0 @@
-# path: tests/fixtures/calibration/idomal.csv
-# status: NEW FILE
-raw_value,expected_code,expected_method
-"Plasmodium falciparum malaria",IDOMAL:0000657,exact
-"malaria",IDOMAL:0000657,alias
-"Febrile illness of unknown origin",,unresolved
