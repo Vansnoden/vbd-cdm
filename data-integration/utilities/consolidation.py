@@ -13,7 +13,7 @@ Base.metadata, never a literal map. Geo helpers live in database.geoutils.
 """
 
 from __future__ import annotations
-
+import hashlib
 import calendar
 import difflib
 import logging
@@ -57,6 +57,7 @@ from utilities.vocabulary.alignment import (align_dimension_values,
 from utilities.vocabulary.field_catalog import (can_stamp, dimension_fields,
                                                 iter_bindings, resolve_field)
 from utilities.vocabulary.registry import VocabularyRegistry
+from utilities.run_manifest import record_parameters as _record_manifest_parameters
 
 logger = logging.getLogger(__name__)
 MAX_IN_VARS = 900
@@ -767,70 +768,363 @@ def _resistance_thresholds(registry=None) -> Tuple[float, float]:
 
 
 # -- burden expansion ------------------------------------------------------
+#
+# The daily series produced here is a *model*, not a measurement, so where the
+# weights that shape it come from is a provenance question rather than a style
+# question. When they were literals in this module, any seasonal pattern
+# recovered from fact_disease_case was a recovery of these constants, and could
+# not be reported as a finding about transmission.
+#
+# They now come from a parameter pack (`burden-expansion/manifest.yaml`) with a
+# version, a citation and a digest, and their use is recorded in run_manifest.
+# Their absence is a defined state: with no pack the generator allocates
+# uniformly, which is the defensible null model, and says so.
 
-_BURDEN_SEASONAL_FACTORS = {
-    1: 0.55, 2: 0.50, 3: 0.65, 4: 1.35, 5: 1.50, 6: 1.40,
-    7: 1.30, 8: 1.10, 9: 0.85, 10: 0.65, 11: 0.55, 12: 0.50}
-_BURDEN_WEEKLY_PATTERNS = {
-    1: 0.95, 2: 1.00, 3: 1.05, 4: 1.10, 5: 1.10, 6: 0.90, 7: 0.85}
+#: Parameter-pack key carrying the allocation policy.
+BURDEN_KERNEL_KEY = "burden_expansion"
+
+#: Defaults for keys a pack may omit. Zero for the dispersion parameters is
+#: deliberate: a pack declaring only `seasonality` gets a smooth, seeded but
+#: deterministic curve rather than an implicit sigma nobody chose.
+_BURDEN_KERNEL_DEFAULTS: Dict[str, Any] = {
+    "intra_month_amplitude": 0.0,
+    "base_variation": 0.0,
+    "spike_probability": 0.0,
+    "spike_mean_excess": 0.5,
+}
+
+#: ``MM-DD``. Validated structurally only: ``02-31`` is accepted here and never
+#: matches a real date, which is the right outcome for a declaration error that
+#: does not warrant failing a run.
+_HOLIDAY_KEY_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 
 
-def _burden_seasonal_factor(month: int) -> float:
-    return _BURDEN_SEASONAL_FACTORS.get(month, 1.0)
+@dataclass(frozen=True, eq=False)
+class _BurdenKernel:
+    """Weights that distribute an annual total across the days of a year.
+
+    ``origin`` names where the weights came from and is recorded with every run
+    that uses them: ``"pack:<pack_id>@<version>"`` or ``"flat"``. A flat kernel
+    has every weight equal to one, so allocation is uniform and the seed cannot
+    affect the result.
+
+    ``eq=False`` because two kernels are never compared; the field holds
+    mappings, and the inherited ``__hash__`` would fail on them if anything ever
+    hashed the object.
+    """
+
+    monthly: Mapping[int, float]
+    weekly: Mapping[int, float]
+    holidays: Mapping[str, float]
+    intra_amplitude: float
+    base_variation: float
+    spike_probability: float
+    spike_mean_excess: float
+    origin: str
+    pack_id: Optional[str] = None
+    version: Optional[str] = None
+    source: Optional[str] = None
+
+    @property
+    def is_flat(self) -> bool:
+        """True when allocation is uniform and the seed cannot matter."""
+        return (not self.monthly and not self.weekly and not self.holidays
+                and self.intra_amplitude <= 0 and self.base_variation <= 0
+                and self.spike_probability <= 0)
+
+    def describe(self) -> Dict[str, Any]:
+        """A JSON-serialisable summary for the run manifest."""
+        return {
+            "origin": self.origin,
+            "pack_id": self.pack_id,
+            "version": self.version,
+            "source": self.source,
+            "flat": self.is_flat,
+            "intra_month_amplitude": self.intra_amplitude,
+            "base_variation": self.base_variation,
+            "spike_probability": self.spike_probability,
+            "monthly": dict(sorted(self.monthly.items())),
+            "weekly": dict(sorted(self.weekly.items())),
+            "holidays": dict(sorted(self.holidays.items())),
+        }
 
 
-def _burden_weekly_factor(date: "datetime") -> float:
-    return _BURDEN_WEEKLY_PATTERNS.get(date.isocalendar()[2], 1.0)
+#: The null model: uniform allocation. Used when no policy pack is shipped, or
+#: when one is present but unreadable. Never silently substituted for a pack that
+#: is present and valid.
+FLAT_BURDEN_KERNEL = _BurdenKernel(
+    monthly={}, weekly={}, holidays={}, intra_amplitude=0.0,
+    base_variation=0.0, spike_probability=0.0, spike_mean_excess=0.5,
+    origin="flat")
+
+
+def _kernel_float(value: Any, default: float) -> float:
+    """A non-negative float, or ``default`` when unusable. Never raises."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number >= 0 else default
+
+
+def _kernel_month_map(value: Any) -> Dict[int, float]:
+    """``{1..12: weight}`` from a mapping or a 12-item list. Empty on failure.
+
+    Out-of-range months are dropped rather than clamped: a manifest declaring
+    month 13 is a typo, and clamping it would hide the typo while silently
+    reweighting the year.
+    """
+    if isinstance(value, Mapping):
+        items = value.items()
+    elif isinstance(value, (list, tuple)):
+        items = enumerate(value, start=1)
+    else:
+        return {}
+    out: Dict[int, float] = {}
+    for raw_key, raw_value in items:
+        try:
+            month = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= month <= 12:
+            continue
+        weight = _kernel_float(raw_value, -1.0)
+        if weight > 0:
+            out[month] = weight
+    return out
+
+
+def _kernel_weekday_map(value: Any) -> Dict[int, float]:
+    """``{1..7: weight}``, Monday = 1 (``datetime.isocalendar()[2]``)."""
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[int, float] = {}
+    for raw_key, raw_value in value.items():
+        try:
+            day = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= day <= 7:
+            continue
+        weight = _kernel_float(raw_value, -1.0)
+        if weight > 0:
+            out[day] = weight
+    return out
+
+
+def _kernel_holiday_map(value: Any) -> Dict[str, float]:
+    """``{"MM-DD": weight}``. A malformed key costs that entry, not the pack."""
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, float] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()
+        if not _HOLIDAY_KEY_RE.match(key):
+            continue
+        weight = _kernel_float(raw_value, -1.0)
+        if weight > 0:
+            out[key] = weight
+    return out
+
+
+def load_burden_kernel(registry: Any = None) -> _BurdenKernel:
+    """The allocation policy for this run.
+
+    Reads ``burden_expansion`` from a parameter pack. Three outcomes, each stated
+    in the log so that a stored database can be attributed:
+
+    * a usable pack -> its weights, ``origin="pack:<id>@<version>"``;
+    * a pack that exists but cannot be parsed -> **flat**, with a WARNING naming
+      what failed. Degrading to flat is deliberate: a run must not fail over a
+      cosmetic weight, and a uniform allocation is a defensible statement where a
+      half-parsed one is not;
+    * no pack at all -> **flat**, at INFO, because a registry may legitimately
+      describe vocabularies only.
+
+    Parameters
+    ----------
+    registry : VocabularyRegistry, optional
+        ``None`` yields the flat kernel, so a consolidator built without a
+        registry still runs.
+    """
+    loaded = _load_registry(registry)
+    if loaded is None:
+        logger.info("  burden kernel: no registry, allocating uniformly "
+                    "(origin=flat).")
+        return FLAT_BURDEN_KERNEL
+
+    try:
+        pack = loaded.find_parameter_pack(BURDEN_KERNEL_KEY)
+    except Exception as exc:  # noqa: BLE001 - RegistryError on an ambiguous key
+        logger.warning("  burden kernel: cannot resolve %r (%s: %s); allocating "
+                       "uniformly.", BURDEN_KERNEL_KEY, type(exc).__name__, exc)
+        return FLAT_BURDEN_KERNEL
+
+    if pack is None:
+        logger.info("  burden kernel: no %r parameter pack, allocating uniformly "
+                    "(origin=flat). Ship "
+                    "vocabularies/registry/burden-expansion/manifest.yaml to "
+                    "declare a seasonal policy.", BURDEN_KERNEL_KEY)
+        return FLAT_BURDEN_KERNEL
+
+    block = pack.parameters.get(BURDEN_KERNEL_KEY)
+    if block is None:
+        # The registry also accepts the policy spread across top-level keys, so a
+        # manifest declaring `seasonality:` directly still works.
+        block = {key: pack.parameters.get(key)
+                 for key in ("seasonality", "weekly_pattern", "holidays",
+                             "holiday_factors", "intra_month_amplitude",
+                             "base_variation", "spike_probability",
+                             "spike_mean_excess")}
+    if not isinstance(block, Mapping):
+        logger.warning("  burden kernel: pack %r declares %r as %s, not a "
+                       "mapping; allocating uniformly.", pack.pack_id,
+                       BURDEN_KERNEL_KEY, type(block).__name__)
+        return FLAT_BURDEN_KERNEL
+
+    monthly = _kernel_month_map(block.get("seasonality"))
+    if not monthly:
+        logger.warning("  burden kernel: pack %r declares no usable "
+                       "`seasonality` block; allocating uniformly.",
+                       pack.pack_id)
+        return FLAT_BURDEN_KERNEL
+
+    kernel = _BurdenKernel(
+        monthly=monthly,
+        weekly=_kernel_weekday_map(block.get("weekly_pattern")),
+        holidays=_kernel_holiday_map(
+            block.get("holidays") or block.get("holiday_factors")),
+        intra_amplitude=_kernel_float(
+            block.get("intra_month_amplitude"),
+            _BURDEN_KERNEL_DEFAULTS["intra_month_amplitude"]),
+        base_variation=_kernel_float(
+            block.get("base_variation"),
+            _BURDEN_KERNEL_DEFAULTS["base_variation"]),
+        spike_probability=_kernel_float(
+            block.get("spike_probability"),
+            _BURDEN_KERNEL_DEFAULTS["spike_probability"]),
+        spike_mean_excess=_kernel_float(
+            block.get("spike_mean_excess"),
+            _BURDEN_KERNEL_DEFAULTS["spike_mean_excess"]),
+        origin=f"pack:{pack.vocabulary_id}",
+        pack_id=pack.pack_id,
+        version=pack.version,
+        source=(str(pack.parameters.get("source") or "").strip() or None),
+    )
+    logger.info("  burden kernel: %s (%d month(s), %d weekday(s), %d holiday(s), "
+                "variation %.3f%s)", kernel.origin, len(kernel.monthly),
+                len(kernel.weekly), len(kernel.holidays), kernel.base_variation,
+                "" if kernel.source else "; NO SOURCE CITED - a seasonal claim "
+                "from this series would be unsupported")
+    return kernel
+
+
+def _stable_location_key(location_code: Any, name: Any = None) -> int:
+    """A 32-bit key derived from a location's own identifier, not its surrogate.
+
+    The generator seeds on this rather than on ``location_id`` because the
+    surrogate is assigned by insertion order. Rebuilding the CDM from the same
+    sources can give a cell a different ``location_id``, and a series seeded on
+    the surrogate would then differ cell-by-cell between two databases that are
+    conceptually identical - which makes a golden snapshot meaningless.
+
+    ``location_code`` first, because it is the row's own identity; ``name`` as a
+    fallback, because a survey site may carry a name and no code. Both absent
+    yields 0, which gives that row the same series in every database.
+    """
+    for candidate in (location_code, name):
+        text_value = str(candidate or "").strip()
+        if text_value:
+            digest = hashlib.sha256(text_value.encode("utf-8")).hexdigest()
+            return int(digest[:8], 16)
+    return 0
 
 
 def _burden_generate_daily_case_counts(
     annual_cases: float, year: int, location_id: int,
-    base_variation: float = 0.25, seed: Optional[int] = None,
+    base_variation: Optional[float] = None, seed: Optional[int] = None,
+    *,
+    kernel: Optional[_BurdenKernel] = None,
+    stable_key: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Daily series whose sum equals round(annual_cases), by largest remainder."""
+    """Daily series whose sum equals ``round(annual_cases)``, exactly.
+
+    Weights come from ``kernel``; the multiplicative deviation and any spike come
+    from a generator seeded on ``(seed, stable_key, year)``. The guarantee is
+    arithmetic rather than statistical: weights are normalised, truncated to
+    integers, and the residual distributed by largest remainder, so the daily
+    column sums to the rounded annual total whatever the weights are.
+
+    Parameters
+    ----------
+    base_variation : float, optional
+        Overrides ``kernel.base_variation``. ``None`` (the default) uses the
+        kernel's value, so a caller cannot re-introduce a hard-coded sigma by
+        omitting the argument.
+    kernel : _BurdenKernel, optional
+        Defaults to :data:`FLAT_BURDEN_KERNEL`, which allocates uniformly.
+    stable_key : int, optional
+        From :func:`_stable_location_key`. ``None`` falls back to the surrogate
+        ``location_id``, reproducing the pre-revision behaviour, which is *not*
+        stable across rebuilds; every caller in this module passes it.
+    """
+    active = kernel or FLAT_BURDEN_KERNEL
+    variation = (active.base_variation if base_variation is None
+                 else float(base_variation))
+
+    key = int(location_id if stable_key is None else stable_key)
     rng = np.random.default_rng(
-        None if seed is None else int(seed) + int(location_id) + int(year))
+        np.random.SeedSequence([0 if seed is None else int(seed), key, int(year)]))
+
     date_range = pd.date_range(datetime(year, 1, 1), datetime(year, 12, 31))
-    factors: List[float] = []
+    weights: List[float] = []
     for date in date_range:
         month = date.month
         days_in_month = calendar.monthrange(year, month)[1]
-        phase = (date.day / max(days_in_month, 1)) * 2 * np.pi
-        intra = 1.0 + 0.08 * np.sin(phase + month * 0.5)
-        noise = float(rng.lognormal(0.0, base_variation * 0.7))
-        holiday = 1.0
-        if month == 12 and date.day in (25, 26):
-            holiday = 0.80
-        elif month == 1 and date.day == 1:
-            holiday = 0.75
-        elif month == 4 and 1 <= date.day <= 10:
-            holiday = 0.85
-        elif month == 5 and date.day <= 5:
-            holiday = 0.85
-        spike = 1.0
-        if rng.random() < 0.005:
-            spike = 1.0 + float(rng.exponential(0.5))
-        factors.append(_burden_seasonal_factor(month) * _burden_weekly_factor(date)
-                       * intra * noise * holiday * spike)
-    total = sum(factors)
-    factors = ([f / total for f in factors] if total > 0
-               else [1.0 / len(date_range)] * len(date_range))
+
+        weight = float(active.monthly.get(month, 1.0))
+        weight *= float(active.weekly.get(date.isocalendar()[2], 1.0))
+
+        if active.intra_amplitude > 0:
+            phase = (date.day / max(days_in_month, 1)) * 2 * np.pi
+            weight *= 1.0 + active.intra_amplitude * np.sin(phase + month * 0.5)
+
+        weight *= float(active.holidays.get(date.strftime("%m-%d"), 1.0))
+
+        if variation > 0:
+            weight *= float(rng.lognormal(0.0, variation * 0.7))
+
+        if active.spike_probability > 0 and rng.random() < active.spike_probability:
+            weight *= 1.0 + float(rng.exponential(active.spike_mean_excess))
+
+        weights.append(weight)
+
+    total = sum(weights)
+    shares = ([weight / total for weight in weights] if total > 0
+              else [1.0 / len(date_range)] * len(date_range))
+
     target = int(round(max(0.0, float(annual_cases))))
-    raw = [annual_cases * f for f in factors]
-    counts = [int(v) for v in raw]
+    raw = [annual_cases * share for share in shares]
+    counts = [int(value) for value in raw]
+
     remainder = target - sum(counts)
     if remainder > 0:
-        for i in sorted(range(len(raw)), key=lambda i: (-(raw[i] - counts[i]), i))[:remainder]:
+        order = sorted(range(len(raw)), key=lambda i: (-(raw[i] - counts[i]), i))
+        for i in order[:remainder]:
             counts[i] += 1
     elif remainder < 0:
-        for i in sorted(range(len(raw)), key=lambda i: (raw[i] - counts[i], i))[:abs(remainder)]:
+        order = sorted(range(len(raw)), key=lambda i: (raw[i] - counts[i], i))
+        for i in order[:abs(remainder)]:
             if counts[i] > 0:
                 counts[i] -= 1
-    return pd.DataFrame({
-        "date_id": [d.strftime("%Y-%m-%d") for d in date_range],
-        "year": year, "month": [d.month for d in date_range],
-        "case_count": counts, "location_id": location_id})
 
+    return pd.DataFrame({
+        "date_id": [date.strftime("%Y-%m-%d") for date in date_range],
+        "year": year,
+        "month": [date.month for date in date_range],
+        "case_count": counts,
+        "location_id": location_id,
+    })
 
 # -- fact aggregation spec -------------------------------------------------
 
@@ -1064,17 +1358,58 @@ class _PopulationIndex:
         self.single_country: Optional[str] = None
         self.location_rows = 0
         self.series_locations = 0
+        #: ``country_code -> {"admin_level", "locations"}``: which level the
+        #: country series was summed from, and how many units contributed.
+        self.country_series_level: Dict[str, Dict[str, Any]] = {}
 
     # -- loading ---------------------------------------------------------
 
+    #: The shallowest administrative label present in ``dim_location``. Used to
+    #: decide which rows may contribute to a *country* series; anything deeper is
+    #: a subdivision whose value is a fraction of the country, not the country.
+    _LEVEL_RANK: Mapping[str, int] = {
+        "country": 0, "nation": 0,
+        "admin1": 1, "region": 1, "province": 1, "county": 1, "state": 1,
+        "admin2": 2, "district": 2,
+        "admin3": 3, "ward": 3, "division": 3,
+        "admin4": 4, "admin5": 5, "admin6": 6,
+        "site": 7, "occurrence": 8, "grid": 9, "cell": 9, "pixel": 9,
+    }
+
+    @classmethod
+    def _rank(cls, label: Any) -> int:
+        return cls._LEVEL_RANK.get(str(label or "").strip().lower(), 5)
+
     def load(self) -> "_PopulationIndex":
-        """Read the population rows and the location->country map. Idempotent."""
-        for location_id, country_code, _admin_level in self.session.execute(text(
+        """Read the population rows and the location->country map. Idempotent.
+
+        Builds two indexes from one location read:
+
+        ``_series``
+            ``location_id -> {year: value}``, for the exact and nearest-year
+            tiers.
+
+        ``_country_series``
+            ``country_code -> {year: value}``, for the opt-in country tiers.
+            This is the delicate one. A country series is built by **summing**
+            every location at the shallowest administrative level that carries
+            data in that country, not by taking whichever location the driver
+            returned first. The previous version took the first, so a CDM whose
+            population was loaded at admin-1 produced a "country" series equal to
+            a single region's population, then divided it across every burden
+            cell - a plausible, uniformly wrong denominator, with no warning.
+            Summing is correct whether the shallowest level is the country row
+            itself (one location) or the units that tile it (many).
+        """
+        levels: Dict[int, str] = {}
+        for location_id, country_code, admin_level in self.session.execute(text(
             "SELECT location_id, country_code, admin_level FROM dim_location "
             "ORDER BY location_id")).fetchall():
             if location_id is None:
                 continue
-            self.country_of[int(location_id)] = str(country_code or "").strip().upper()
+            key = int(location_id)
+            self.country_of[key] = str(country_code or "").strip().upper()
+            levels[key] = str(admin_level or "").strip()
 
         rows = self.session.execute(text(
             "SELECT location_id, year, indicator_value "
@@ -1098,15 +1433,40 @@ class _PopulationIndex:
 
         self.series_locations = len(self._series)
 
-        # A location's series is also its country's series: in a CDM whose only
-        # population row is the country row itself, these are the same values.
+        # Group the locations carrying a series by country and by level, so the
+        # shallowest *populated* level per country is chosen explicitly.
+        by_country: Dict[str, Dict[int, List[int]]] = {}
         for location_id in sorted(self._series):
             country = self.country_of.get(location_id) or ""
             if not country:
                 continue
-            bucket = self._country_series.setdefault(country, {})
-            for year, value in self._series[location_id].items():
-                bucket.setdefault(year, value)
+            rank = self._rank(levels.get(location_id))
+            by_country.setdefault(country, {}).setdefault(rank, []).append(
+                location_id)
+
+        for country in sorted(by_country):
+            per_rank = by_country[country]
+            chosen_rank = min(per_rank)
+            members = per_rank[chosen_rank]
+            bucket: Dict[int, float] = {}
+            for location_id in members:
+                for year, value in self._series[location_id].items():
+                    bucket[year] = bucket.get(year, 0.0) + value
+            if not bucket:
+                continue
+            self._country_series[country] = bucket
+            label = levels.get(members[0]) or "(unlabelled)"
+            self.country_series_level[country] = {
+                "admin_level": label,
+                "locations": len(members),
+            }
+            if chosen_rank > 0:
+                logger.warning(
+                    "  population index: no country-level series for %s; the "
+                    "country series is the SUM of %d location(s) at %r. Rate "
+                    "records will use that total as their denominator, which is "
+                    "correct only if those units tile the country.",
+                    country, len(members), label)
 
         countries = [code for code in self._country_series if code]
         self.single_country = countries[0] if len(countries) == 1 else None
@@ -1115,7 +1475,9 @@ class _PopulationIndex:
             "  population index: %d row(s) under %r across %d location(s); "
             "country series for %s%s",
             self.location_rows, self.indicator, self.series_locations,
-            ", ".join(sorted(self._country_series)) or "(none)",
+            ", ".join(f"{code}({info['admin_level']}x{info['locations']})"
+                      for code, info in sorted(self.country_series_level.items()))
+            or "(none)",
             " (single country, used for locations with no country_code)"
             if self.single_country else "")
         return self
@@ -2816,7 +3178,7 @@ class DataConsolidator:
 
     # -- A8 ----------------------------------------------------------------
 
-    def _match_column(self, table: str, column: str, pack: Any,
+        def _match_column(self, table: str, column: str, pack: Any,
                       resolver: ConceptResolver, *, dry_run: bool = False,
                       run_id: Optional[str] = None,
                       settled_values: Optional[Set[str]] = None,
@@ -2824,8 +3186,16 @@ class DataConsolidator:
                       stampable: bool = True) -> Dict[str, int]:
         """Reconcile one column against one pack.
 
-        stampable=False records the decision in fact_concept_map only: a fact table
-        has no concept_id, and A8c rewrites the value from the map.
+        Two writes, two jobs, and both happen here:
+
+        * ``fact_resolution_log`` - append-only, one row per value per run,
+          including the alternative candidates. Insert-or-ignore, because a re-run
+          of one run id must not rewrite what that run concluded.
+        * ``fact_concept_map`` - the current decision, upserted, with a WHERE
+          clause that refuses to re-decide a row a human already approved.
+
+        ``stampable=False`` records the decision in ``fact_concept_map`` only: a
+        fact table has no ``concept_id``, and A8c rewrites the value from the map.
         """
         from etl.transformers.dimension_index import DimensionKeyIndex, seed_from_rows
 
@@ -2833,7 +3203,7 @@ class DataConsolidator:
             "total": 0, "matched": 0, "exact": 0, "normalized": 0, "alias": 0,
             "fuzzy": 0, "ambiguous": 0, "unresolved": 0, "unmatched": 0,
             "needs_review": 0, "applied": 0, "concept_ids_set": 0, "recorded": 0,
-            "skipped_settled": 0, "errors": 0}
+            "ledger": 0, "skipped_settled": 0, "errors": 0}
         try:
             ident_table = require_identifier(table, what="table name")
             ident_column = require_identifier(column, what="column name")
@@ -2937,48 +3307,93 @@ class DataConsolidator:
                 "score": float(resolution.match_score), "decision": decision,
                 "vocab_version": (resolution.vocabulary_version
                                   or getattr(pack, "version", None)),
-                "resolver_version": resolution.resolver_version, "run_id": run_id})
+                "resolver_version": resolution.resolver_version, "run_id": run_id,
+                "resolved_at": datetime.utcnow()})
             if decision == AUTO_ACCEPTED and concept_code:
                 accepted.setdefault(str(concept_code), []).append(value)
 
         write_failed = False
         if decision_rows and not dry_run:
             batch_size = max(1, min(MAX_IN_VARS, 500))
-            statement = text("""
-                INSERT INTO fact_concept_map
-                    (source_table, source_column, source_value, vocabulary_id,
-                     concept_code, match_method, match_score, decision,
-                     vocabulary_version, resolver_version, last_run_id)
-                VALUES (:t, :c, :v, :vocab, :code, :method, :score, :decision,
-                        :vocab_version, :resolver_version, :run_id)
-                ON CONFLICT (source_table, source_column, source_value)
-                DO UPDATE SET
-                    vocabulary_id      = EXCLUDED.vocabulary_id,
-                    concept_code       = EXCLUDED.concept_code,
-                    match_method       = EXCLUDED.match_method,
-                    match_score        = EXCLUDED.match_score,
-                    decision           = EXCLUDED.decision,
-                    vocabulary_version = EXCLUDED.vocabulary_version,
-                    resolver_version   = EXCLUDED.resolver_version,
-                    last_run_id        = EXCLUDED.last_run_id
-                WHERE NOT (
-                    fact_concept_map.is_approved = 1
-                    AND fact_concept_map.concept_code IS NOT NULL
-                    AND EXCLUDED.concept_code IS NOT NULL
-                    AND fact_concept_map.concept_code <> EXCLUDED.concept_code)
-            """)
-            for start in range(0, len(decision_rows), batch_size):
-                chunk = decision_rows[start:start + batch_size]
-                try:
-                    self.session.execute(statement, chunk)
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("  could not record %d decision(s) for %s.%s: %s",
-                                 len(chunk), table, column, exc)
-                    stats["errors"] += 1
-                    self.session.rollback()
-                    write_failed = True
-                    break
-                stats["recorded"] += len(chunk)
+
+            # ---- append-only ledger: every decision, every run ------------
+            # Written first, with DO NOTHING, because it is the history: a re-run
+            # of one run id must not rewrite what that run concluded. This is the
+            # write that was missing - the ledger existed, was documented, and
+            # nothing in the pipeline populated it, so the database could state
+            # the current decision but not the evidence behind it.
+            if run_id:
+                ledger_statement = text("""
+                    INSERT INTO fact_resolution_log
+                        (source_table, source_column, source_value, vocabulary_id,
+                         vocabulary_version, concept_code, match_method,
+                         match_score, decision, resolver_version, run_id,
+                         resolved_at)
+                    VALUES
+                        (:t, :c, :v, :vocab, :vocab_version, :code, :method,
+                         :score, :decision, :resolver_version, :run_id,
+                         :resolved_at)
+                    ON CONFLICT (source_table, source_column, source_value, run_id)
+                    DO NOTHING
+                """)
+                for start in range(0, len(decision_rows), batch_size):
+                    chunk = decision_rows[start:start + batch_size]
+                    try:
+                        self.session.execute(ledger_statement, chunk)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("  could not append %d ledger row(s) for "
+                                     "%s.%s: %s", len(chunk), table, column, exc)
+                        stats["errors"] += 1
+                        self.session.rollback()
+                        write_failed = True
+                        break
+                    stats["ledger"] += len(chunk)
+            else:
+                _warn_once(
+                    f"ledger:no-run-id:{ident_table}.{ident_column}",
+                    "  %s.%s: no run id, so %d decision(s) cannot be appended to "
+                    "fact_resolution_log (run_id is NOT NULL and part of its "
+                    "unique key). The current state is written to "
+                    "fact_concept_map; the evidence behind it is lost.",
+                    ident_table, ident_column, len(decision_rows))
+
+            # ---- current-state projection: the decision in force ----------
+            if not write_failed:
+                statement = text("""
+                    INSERT INTO fact_concept_map
+                        (source_table, source_column, source_value, vocabulary_id,
+                         concept_code, match_method, match_score, decision,
+                         vocabulary_version, resolver_version, last_run_id)
+                    VALUES (:t, :c, :v, :vocab, :code, :method, :score, :decision,
+                            :vocab_version, :resolver_version, :run_id)
+                    ON CONFLICT (source_table, source_column, source_value)
+                    DO UPDATE SET
+                        vocabulary_id      = EXCLUDED.vocabulary_id,
+                        concept_code       = EXCLUDED.concept_code,
+                        match_method       = EXCLUDED.match_method,
+                        match_score        = EXCLUDED.match_score,
+                        decision           = EXCLUDED.decision,
+                        vocabulary_version = EXCLUDED.vocabulary_version,
+                        resolver_version   = EXCLUDED.resolver_version,
+                        last_run_id        = EXCLUDED.last_run_id
+                    WHERE NOT (
+                        fact_concept_map.is_approved = 1
+                        AND fact_concept_map.concept_code IS NOT NULL
+                        AND EXCLUDED.concept_code IS NOT NULL
+                        AND fact_concept_map.concept_code <> EXCLUDED.concept_code)
+                """)
+                for start in range(0, len(decision_rows), batch_size):
+                    chunk = decision_rows[start:start + batch_size]
+                    try:
+                        self.session.execute(statement, chunk)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("  could not record %d decision(s) for "
+                                     "%s.%s: %s", len(chunk), table, column, exc)
+                        stats["errors"] += 1
+                        self.session.rollback()
+                        write_failed = True
+                        break
+                    stats["recorded"] += len(chunk)
 
         if accepted and not stampable:
             logger.info("    %s.%s: %d accepted concept(s) recorded in "
@@ -3024,13 +3439,16 @@ class DataConsolidator:
                 self.session.rollback()
                 stats["errors"] += 1
 
-        logger.info("    %s.%s: %d value(s) vs %s -> %d recorded, %d applied (%d "
-                    "concept_id), %d needs review, %d unresolved, %d error(s)%s",
+        logger.info("    %s.%s: %d value(s) vs %s -> %d logged, %d recorded, "
+                    "%d applied (%d concept_id), %d needs review, %d unresolved, "
+                    "%d error(s)%s",
                     table, column, stats["total"], vocabulary_id or "(no pack)",
-                    stats["recorded"], stats["applied"], stats["concept_ids_set"],
-                    stats["needs_review"], stats["unresolved"], stats["errors"],
+                    stats["ledger"], stats["recorded"], stats["applied"],
+                    stats["concept_ids_set"], stats["needs_review"],
+                    stats["unresolved"], stats["errors"],
                     " (dry run)" if dry_run else "")
         return stats
+
 
     def standardize_vocabularies(self, vocab_dir: Optional[str] = None,
                                  fuzzy_threshold: Optional[float] = None,
@@ -3412,8 +3830,13 @@ class DataConsolidator:
                 logger.info("  %d unreferenced record(s) in %s (kept)",
                             len(orphaned), dim_table)
 
-    def _align_dimension_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """NULL fact FKs pointing at a dimension key that does not exist."""
+        def _align_dimension_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
+        """NULL fact FKs pointing at a dimension key that does not exist.
+
+        A NOT NULL FK cannot be NULLed, so those columns are reported and left
+        alone rather than silently skipped: the row needs a human, and a counter
+        that no caller prints is not a report.
+        """
         dimension_models = {
             "dim_location": (DimLocation, "location_id"),
             "dim_disease": (DimDisease, "disease_code"),
@@ -3447,6 +3870,14 @@ class DataConsolidator:
                                 for c in inspector.get_columns(fact_table)}
                     if not col_info.get(fk_col, {}).get("nullable", True):
                         results[dim_name]["skipped_notnull"] += 1
+                        # Logged, because the previous version only incremented a
+                        # counter that no caller prints. A NOT NULL FK whose
+                        # target is missing cannot be cleared, so the row needs
+                        # attention and the run said nothing about it.
+                        logger.warning(
+                            "    %s.%s: NOT NULL foreign key, so an unresolvable "
+                            "value cannot be cleared; left as-is for manual "
+                            "review.", fact_table, fk_col)
                         continue
                     try:
                         invalid = 0
@@ -3478,6 +3909,7 @@ class DataConsolidator:
             if not dry_run:
                 self.session.commit()
         return results
+
 
     def _align_fact_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
         """LEGACY: repair orphans by LIKE, then NULL or quarantine the rest.
@@ -3909,7 +4341,7 @@ class DataConsolidator:
         self,
         force: bool = False,
         seed: int = 42,
-        base_variation: float = 0.25,
+        base_variation: Optional[float] = None,
         *,
         default_population: Optional[float] = None,
         population_indicator: str = "SP.POP.TOTL",
@@ -3921,6 +4353,8 @@ class DataConsolidator:
         locations: Optional[Iterable[int]] = None,
         years: Optional[Iterable[int]] = None,
         limit: Optional[int] = None,
+        allow_mixed_grain: bool = False,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Expand yearly burden into daily cases summing to each annual total.
 
@@ -3930,54 +4364,42 @@ class DataConsolidator:
             An absolute case count for the cell-year. Self-contained: no
             population, no allocation, no unit assumption.
         ``incidence_rate``
-            A rate whose scale is not documented in the schema. Converted with
+            A rate whose scale the schema does not document. Converted with
             ``rate / _RATE_SCALES[rate_scale] * population``.
 
         **``prefer`` decides which is used when both are present**, and it
-        defaults to ``cases_mean``. Preferring the rate instead means discarding a
-        measured absolute count in favour of an assumed population denominator,
-        which is what the previous ordering did: every record carrying both was
-        routed to the rate branch, found no denominator, and was counted in
+        defaults to ``cases_mean``. Preferring the rate discards a measured
+        absolute count in favour of an assumed population denominator, which is
+        what the previous ordering did: every record carrying both was routed to
+        the rate branch, found no denominator, and was counted in
         ``no_population``.
+
+        Every choice that changes a stored number is recorded - measure
+        preference, rate scale, allocation and divisor, write grain, seed, kernel
+        origin and the kernel's own weights - in
+        ``run_manifest.parameters.expansion`` (see :mod:`utilities.run_manifest`).
+        A deposited database can therefore be attributed to a stated policy, and
+        two runs compared without reading code.
+
+        Expanded rows are marked twice: ``identification_method_code =
+        'ESTIMATE'`` and ``case_status = 'estimated'``. The second is new.
+        Writing ``'confirmed'`` asserted that a modelled figure was an observed
+        case, and any analysis filtering on confirmed cases would have counted
+        synthetic rows as observations.
 
         Parameters
         ----------
-        force : bool
-            Delete and re-insert the ESTIMATE rows already present for a record's
-            own ``(location, year, disease, source)`` window.
-        seed, base_variation : int, float
-            Passed to :func:`_burden_generate_daily_case_counts`, which combines
-            the seed with ``(location_id, year)``. Same inputs, same series.
-        default_population : float, optional
-            Used only when a rate record has no denominator from any tier. **Not**
-            divided by the allocation divisor: it is a number the caller chose,
-            and silently scaling it would make the flag mean something it does not
-            say.
-        population_indicator : str
-            The indicator code to read. Literal - a series stored under another
-            code is not found, and the summary says so.
-        national_allocation : bool
-            Allow a location with no series of its own to use its **country's**
-            series, divided by the number of burden locations in that country.
-            Off by default: attributing a country total to a grid cell is a
-            decision, not a fallback.
-        population_divisor : float, optional
-            Override the computed per-country divisor.
-        rate_scale : str
-            ``'per_100k'`` or ``'per_person'``. Affects only records whose only
-            usable measure is ``incidence_rate``.
-        prefer : str
-            ``'cases_mean'`` or ``'incidence_rate'``.
-        group_by_level : str, optional
-            Write the daily series at this administrative grain: ``'admin3'``,
-            ``'admin2'``, ``'parent'`` (the cell's immediate parent), or ``None``
-            / ``'grid'`` for per-cell. The measure is still summed per record and
-            then grouped into the target, so grouping changes the write
-            granularity and nothing else.
-        locations, years, limit : optional
-            Restrict the run. ``years``/``locations`` filter records; ``limit``
-            caps them after ordering by ``burden_id``, so a smoke test is the same
-            code path as the real run.
+        base_variation : float, optional
+            ``None`` uses the allocation kernel's value, so a caller cannot
+            re-introduce a hard-coded sigma by omitting the argument.
+        allow_mixed_grain : bool
+            Refuse to add a second write grain to the same years unless this is
+            set. Two grains coexist harmlessly at the storage level - the case
+            keys differ by ``location_id``, so the unique constraint never fires -
+            and then every downstream sum double-counts by the grouping factor,
+            silently and unrecoverably.
+        run_id : str, optional
+            For the manifest. Falls back to ``self.run_id``.
 
         Returns
         -------
@@ -3985,7 +4407,8 @@ class DataConsolidator:
             ``inserted``, ``already_present``, ``skipped``, ``no_population``,
             ``errors`` - the five keys the CLI has always read - plus ``records``,
             ``groups``, ``merged``, ``zero``, ``years_prepared``, ``tiers``,
-            ``basis``, ``grain``, ``grain_targets`` and ``unparented_cells``.
+            ``basis``, ``grain``, ``grain_targets``, ``unparented_cells``,
+            ``kernel`` and ``purged``.
 
         Notes
         -----
@@ -4009,6 +4432,7 @@ class DataConsolidator:
                 f"prefer must be one of {list(_BURDEN_MEASURE_PREFERENCES)}, got "
                 f"{prefer!r}")
         scale = float(_RATE_SCALES[rate_scale])
+        effective_run_id = run_id or getattr(self, "run_id", None)
 
         logger.info("=" * 60)
         logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
@@ -4035,11 +4459,25 @@ class DataConsolidator:
             "no_population": 0, "errors": 0, "records": 0, "groups": 0,
             "merged": 0, "zero": 0, "years_prepared": 0, "tiers": {},
             "basis": {}, "grain": "grid cell", "grain_targets": 0,
-            "unparented_cells": 0}
+            "unparented_cells": 0, "kernel": FLAT_BURDEN_KERNEL.origin,
+            "purged": 0}
 
         if not self._scalar_or_zero("SELECT COUNT(*) FROM fact_disease_burden"):
             logger.info("No burden records found; nothing to expand.")
             return empty
+
+        # ---- allocation policy -------------------------------------------
+        kernel = load_burden_kernel(getattr(self, "registry", None))
+        if kernel.is_flat:
+            logger.warning(
+                "  the daily series is allocated UNIFORMLY: no seasonal policy "
+                "pack is in force. A seasonal pattern later recovered from "
+                "fact_disease_case under this run does not exist in the data.")
+        elif not kernel.source:
+            logger.warning(
+                "  the allocation kernel %s cites no source. A seasonal pattern "
+                "relies on these weights, so a seasonal claim needs the pack to "
+                "name where they came from.", kernel.origin)
 
         # ---- denominators ------------------------------------------------
         index = _PopulationIndex(self.session, population_indicator).load()
@@ -4122,6 +4560,19 @@ class DataConsolidator:
             logger.warning("No burden records matched the selected filters.")
             return empty
 
+        selected_years = sorted({int(row[2]) for row in burden_records
+                                 if row[2] is not None})
+        first_year = selected_years[0] if selected_years else None
+        last_year = selected_years[-1] if selected_years else None
+
+        # ---- refuse to mix grains in the same years ----------------------
+        purged = 0
+        if first_year is not None:
+            purged = self._guard_write_grain(
+                first_year, last_year,
+                self._expected_admin_levels(case_location_of), grain_label,
+                force=force, allow_mixed_grain=allow_mixed_grain)
+
         # ---- annual totals, grouped by case key -------------------------
         annual_by_key: Dict[Tuple[int, int, str, str], float] = {}
         tier_counts: Dict[str, int] = {}
@@ -4132,6 +4583,7 @@ class DataConsolidator:
         failures = 0
         logged_skips = 0
         logged_allocations = 0
+        location_keys = self._location_stable_keys()
 
         def _prepare_year(year_value: int) -> bool:
             if year_value in prepared_years:
@@ -4247,15 +4699,25 @@ class DataConsolidator:
             "years_prepared": len(prepared_years), "tiers": tier_counts,
             "basis": basis_counts, "grain": grain_label,
             "grain_targets": len(set(case_location_of.values())),
-            "unparented_cells": len(unparented_cells)}
+            "unparented_cells": len(unparented_cells),
+            "kernel": kernel.origin, "purged": purged}
 
         if not annual_by_key:
             logger.warning(
                 "Nothing to expand: %d record(s) examined, %d had no denominator, "
                 "%d were skipped for a missing location/year/disease.",
                 len(burden_records), no_population, skipped)
+            self._record_expansion_parameters(
+                effective_run_id, stats, kernel, prefer, rate_scale,
+                national_allocation, population_divisor, population_indicator,
+                default_population, seed, group_by_level)
             return stats
 
+        # `case_status = 'estimated'`, not `'confirmed'`: a modelled figure is not
+        # an observed case, and the previous value asserted that it was.
+        # `age_group` and `sex` take the documented '' sentinel, because both sit
+        # inside uq_fact_case_natural and a reader filtering on the sentinel must
+        # find these rows.
         statement = text(
             "INSERT INTO fact_disease_case ("
             "  location_id, date_id_onset, date_id_reported, disease_code, "
@@ -4263,7 +4725,7 @@ class DataConsolidator:
             "  age_group, sex, outcome, case_count"
             ") VALUES ("
             "  :loc_id, :date_id, :date_id, :disease, 'ESTIMATE', :src_code, "
-            "  'confirmed', 'human', 'all', 'unknown', 'unknown', :case_count)")
+            "  'estimated', 'human', '', '', 'unknown', :case_count)")
 
         window_where = (
             "WHERE location_id = :loc_id "
@@ -4299,8 +4761,10 @@ class DataConsolidator:
 
             daily = _burden_generate_daily_case_counts(
                 annual_cases=annual_cases, year=year_key,
-                location_id=location_key, base_variation=base_variation,
-                seed=seed)
+                location_id=location_key,
+                base_variation=base_variation, seed=seed,
+                kernel=kernel,
+                stable_key=location_keys.get(location_key))
             try:
                 if existing:
                     deleted = self.session.execute(window_sql, window).rowcount or 0
@@ -4334,6 +4798,7 @@ class DataConsolidator:
         logger.info("  denominators: %s", ", ".join(
             f"{name}={count}" for name, count in sorted(tier_counts.items()))
             or "(none)")
+        logger.info("  allocation kernel: %s", kernel.origin)
         if case_location_of:
             logger.info(
                 "  written at %s: %d target(s)%s. A large `summed` count here is "
@@ -4342,6 +4807,12 @@ class DataConsolidator:
                 grain_label, stats["grain_targets"],
                 f"; {len(unparented_cells)} cell(s) had no such ancestor and kept "
                 f"their own location_id" if unparented_cells else "")
+
+        self._record_expansion_parameters(
+            effective_run_id, stats, kernel, prefer, rate_scale,
+            national_allocation, population_divisor, population_indicator,
+            default_population, seed, group_by_level)
+
         if stats["no_population"]:
             logger.warning(
                 "  %d rate record(s) had no denominator for %r. They are the only "
@@ -4428,8 +4899,183 @@ class DataConsolidator:
         return found
 
 
+    def _location_stable_keys(self) -> Dict[int, int]:
+        """``location_id -> stable seed key`` for the whole location dimension.
+
+        One read, because the generator needs it per series and the alternative is
+        a query per burden record.
+        """
+        keys: Dict[int, int] = {}
+        try:
+            rows = self.session.execute(text(
+                "SELECT location_id, location_code, name FROM dim_location "
+                "ORDER BY location_id")).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("  could not read location codes (%s); the daily series "
+                           "will be seeded on the surrogate key, which is not "
+                           "stable across a rebuild.", exc)
+            return keys
+        for location_id, location_code, name in rows:
+            if location_id is None:
+                continue
+            keys[int(location_id)] = _stable_location_key(location_code, name)
+        return keys
+
+    def _expected_admin_levels(self, case_location_of: Mapping[int, int]) -> Set[str]:
+        """The ``admin_level`` values the requested write grain produces."""
+        if not case_location_of:
+            return {"grid"}
+        target_ids = sorted(set(case_location_of.values()))
+        levels: Set[str] = set()
+        try:
+            for _location_id, admin_level in _chunked_in(
+                    self.session,
+                    "SELECT location_id, admin_level FROM dim_location "
+                    "WHERE location_id IN :vals ORDER BY location_id",
+                    {}, target_ids):
+                levels.add(str(admin_level or "").strip().lower() or "(null)")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not read the target admin levels: %s", exc)
+        return levels or {"(unknown)"}
+
+    def _guard_write_grain(self, first_year: int, last_year: int,
+                           expected_levels: Set[str], grain_label: str,
+                           *, force: bool, allow_mixed_grain: bool) -> int:
+        """Refuse, or purge, when ESTIMATE rows at another grain exist.
+
+        Two grains in one year do not collide - the case keys differ by
+        ``location_id`` - so the database accepts them and every downstream sum
+        then double-counts by the grouping factor. The check is cheap and the
+        consequence is unrecoverable once the rows are mixed, so it is a guard
+        rather than a warning.
+
+        Returns the number of rows purged (0 unless ``force`` replaced them).
+        """
+        window = {"start": f"{first_year}-01-01", "end": f"{last_year}-12-31"}
+        try:
+            present = self.session.execute(text(
+                "SELECT COALESCE(l.admin_level, '(null)') AS lvl, COUNT(*) "
+                "FROM fact_disease_case c "
+                "JOIN dim_location l ON l.location_id = c.location_id "
+                "WHERE c.identification_method_code = 'ESTIMATE' "
+                "  AND c.date_id_onset >= :start AND c.date_id_onset <= :end "
+                "GROUP BY 1 ORDER BY 1"), window).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("grain check could not run: %s", exc)
+            return 0
+
+        if not present:
+            return 0
+
+        existing = {str(row[0]).strip().lower(): int(row[1]) for row in present}
+        mixture = len(existing) > 1
+        foreign = set(existing) - {level.lower() for level in expected_levels}
+        if not mixture and not foreign:
+            return 0
+
+        detail = ", ".join(f"{level}={count}"
+                           for level, count in sorted(existing.items()))
+        if allow_mixed_grain:
+            logger.warning(
+                "  estimate rows already exist at %s over %s-%s, and this run "
+                "writes at %s (%s). MIXED GRAINS WILL COEXIST and any sum over "
+                "fact_disease_case will double-count by the grouping factor. "
+                "Proceeding because allow_mixed_grain is set.", detail,
+                first_year, last_year, grain_label,
+                ", ".join(sorted(expected_levels)))
+            return 0
+
+        if not force:
+            raise RuntimeError(
+                f"fact_disease_case already holds ESTIMATE rows at {detail} over "
+                f"{first_year}-{last_year}, while this run writes at {grain_label} "
+                f"({', '.join(sorted(expected_levels))}). Mixed grains co-exist "
+                f"without violating a constraint and silently double-count "
+                f"downstream. Re-run with force=True to replace them, or with "
+                f"allow_mixed_grain=True if the mixture is intended.")
+
+        purged = int(self.session.execute(text(
+            "DELETE FROM fact_disease_case "
+            "WHERE identification_method_code = 'ESTIMATE' "
+            "  AND date_id_onset >= :start AND date_id_onset <= :end"),
+            window).rowcount or 0)
+        self.session.commit()
+        logger.warning(
+            "  purged %d existing ESTIMATE row(s) at %s over %s-%s before writing "
+            "at %s. The previous series is gone; its parameters remain in "
+            "run_manifest for the run that wrote it.",
+            purged, detail, first_year, last_year, grain_label)
+        return purged
+
+    def _record_expansion_parameters(
+        self, run_id: Optional[str], stats: Mapping[str, Any],
+        kernel: _BurdenKernel, prefer: str, rate_scale: str,
+        national_allocation: bool, population_divisor: Optional[float],
+        population_indicator: str, default_population: Optional[float],
+        seed: int, group_by_level: Optional[str],
+    ) -> None:
+        """Write the expansion policy to ``run_manifest``. Never raises.
+
+        Everything here changes a stored number, so a database without this row
+        cannot be attributed to a procedure. A failure to record is a WARNING on a
+        run that continues: losing the rows just inserted because a JSON write
+        failed would be the worse outcome.
+        """
+        if not run_id:
+            logger.warning(
+                "  no run id available, so this expansion's parameters are NOT "
+                "recorded and the modelled rows it just wrote cannot be attributed "
+                "to a stated policy. Run through main.py, which sets one, or pass "
+                "run_id=.")
+            return
+        try:
+            _record_manifest_parameters(
+                self.session, run_id=run_id, namespace="expansion",
+                parameters={
+                    "phase": "expand_burden_to_daily",
+                    "measure_preference": prefer,
+                    "rate_scale": rate_scale,
+                    "rate_divisor": _RATE_SCALES[rate_scale],
+                    "national_allocation": bool(national_allocation),
+                    "population_divisor": population_divisor,
+                    "population_indicator": population_indicator,
+                    "default_population": default_population,
+                    "seed": int(seed),
+                    "group_by_level": group_by_level,
+                    "write_grain": stats.get("grain"),
+                    "grain_targets": stats.get("grain_targets"),
+                    "kernel": kernel.describe(),
+                    "case_status_written": "estimated",
+                    "identification_method_code": "ESTIMATE",
+                    "records": stats.get("records"),
+                    "groups": stats.get("groups"),
+                    "inserted": stats.get("inserted"),
+                    "purged": stats.get("purged"),
+                    "basis": dict(stats.get("basis") or {}),
+                    "tiers": dict(stats.get("tiers") or {}),
+                })
+            self.session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("  could not record the expansion parameters: %s: %s",
+                           type(exc).__name__, exc)
+            try:
+                self.session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
+
     def _ensure_dim_time(self, year: int) -> int:
-        """Insert missing dim_time rows for year (date_id is a foreign key)."""
+        """Insert missing ``dim_time`` rows for ``year`` (``date_id`` is an FK).
+
+        ``season`` is written as NULL, deliberately. The previous version wrote
+        ``'dry'`` from November to March and ``'wet'`` otherwise - a northern- and
+        southern-hemisphere heuristic that is wrong for both in East Africa's
+        bimodal rainfall regime, and that cannot be right for a table keyed on a
+        date alone, since season is a property of a place and a calendar
+        together. A column that looks authoritative and is not is worse than an
+        empty column, so the field waits for a per-country climatology drawn from
+        a cited source.
+        """
         from datetime import timedelta
 
         existing = {row[0] for row in self.session.execute(text(
@@ -4444,18 +5090,23 @@ class DataConsolidator:
                     "date_id": date_id, "date": current.date(),
                     "year": current.year, "month": current.month,
                     "week": current.isocalendar()[1],
-                    "day_of_year": current.timetuple().tm_yday,
-                    "season": ("dry" if current.month in (11, 12, 1, 2, 3)
-                               else "wet")})
+                    "day_of_year": current.timetuple().tm_yday})
             current += timedelta(days=1)
         if payload:
             self.session.execute(text(
                 "INSERT INTO dim_time (date_id, date, year, month, week, "
-                "day_of_year, season, is_holiday) VALUES (:date_id, :date, :year, "
-                ":month, :week, :day_of_year, :season, 0)"), payload)
+                "day_of_year, season, is_holiday) VALUES (:date_id, :date, "
+                ":year, :month, :week, :day_of_year, NULL, 0)"), payload)
             self.session.commit()
             logger.debug("  dim_time: added %d row(s) for %s", len(payload), year)
+            _warn_once(
+                "dim_time:season",
+                "  dim_time.season is not populated: a season label needs a "
+                "per-country climatology, and a single global dry/wet split is "
+                "wrong for bimodal regimes and for either hemisphere. The column "
+                "is left NULL rather than filled with an unsupported value.")
         return len(payload)
+
 
     def _compute_resistance_status(self) -> Dict[str, Any]:
         """Four passes, strongest signal first; only rows still unclassified."""
@@ -4806,13 +5457,25 @@ class DataConsolidator:
                         name_locations: bool = True,
                         include_grid_names: bool = False,
                         overwrite_human_names: bool = False,
-                        audit_country_geometry: bool = False
+                        audit_country_geometry: bool = False,
+                        burden_grain: Optional[str] = None,
+                        burden_prefer: str = _BURDEN_MEASURE_CASES_MEAN,
+                        burden_rate_scale: str = "per_100k",
+                        burden_national_allocation: bool = False,
+                        burden_force: bool = False
                         ) -> Dict[str, Any]:
         """Run every phase in the one safe order.
 
         Country codes are canonicalised at A6a, before any phase that groups or
         filters by country. audit_country_geometry=True also cross-checks rows that
         were already canonical, at one coordinate lookup per row.
+
+        The ``burden_*`` arguments are the expansion policy. They are parameters
+        rather than constants because each of them changes a stored number, and
+        because the pipeline and the CLI must be able to reach the same code path
+        - they previously disagreed silently, one writing per cell and the other
+        at admin grain. ``burden_force=False`` by default: overwriting a series
+        someone else generated is a decision, not a default.
         """
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
@@ -4979,16 +5642,25 @@ class DataConsolidator:
 
         logger.info("-" * 60)
         logger.info("BURDEN: EXPAND TO DAILY")
-        burden_stats = {"inserted": 0, "errors": 0}
+        burden_stats: Dict[str, Any] = {"inserted": 0, "errors": 0}
         if dry_run:
             logger.info("  (dry run) burden expansion skipped")
         else:
             try:
-                burden_stats = self.expand_burden_to_daily()
+                # The run id and the policy are both passed through: without the
+                # first, the modelled rows cannot be attributed; without the
+                # second, the pipeline silently writes at a different grain from
+                # the CLI and downstream sums double-count.
+                burden_stats = self.expand_burden_to_daily(
+                    force=burden_force, prefer=burden_prefer,
+                    rate_scale=burden_rate_scale,
+                    national_allocation=burden_national_allocation,
+                    group_by_level=burden_grain, run_id=resolved_run_id)
             except Exception as exc:  # noqa: BLE001
                 logger.error("  burden expansion failed: %s: %s",
                              type(exc).__name__, exc)
-                burden_stats = {"inserted": 0, "errors": 1}
+                burden_stats = {"inserted": 0, "errors": 1,
+                                "reason": f"{type(exc).__name__}: {exc}"}
             try:
                 self.fix_orphaned_burden_records()
             except Exception as exc:  # noqa: BLE001
@@ -5028,6 +5700,7 @@ class DataConsolidator:
                     sum(results["remaining_orphans"].values()))
         logger.info("=" * 60)
         return results
+
 
     def summarize_locations(self, *, registry: Any = None,
                             sample_limit: int = 5) -> Dict[str, Any]:
@@ -5164,8 +5837,15 @@ class DataConsolidator:
                     generated_names, len(duplicate_names))
         return summary
 
+    
     def close(self) -> Dict[str, Any]:
-        """Drain the pending resolution buffer, then close the session."""
+        """Drain the pending resolution buffer, record the ledger size, close.
+
+        The buffer is kept when its flush fails, so a retry is possible. The
+        ledger count is read before the session closes, because after that the
+        number is unavailable and a summary that cannot distinguish "the ledger is
+        empty" from "the ledger was never consulted" is not a summary.
+        """
         if getattr(self, "_closed", False):
             return dict(getattr(self, "_close_report", {}) or {})
         buffer: List[Any] = []
@@ -5201,7 +5881,8 @@ class DataConsolidator:
                 logger.warning("close: could not read pending resolutions: %s", exc)
 
         report: Dict[str, Any] = {"flushed": 0, "pending": len(buffer),
-                                  "closed": False, "errors": []}
+                                  "closed": False, "errors": [],
+                                  "ledger_rows": 0}
         if buffer:
             try:
                 from etl.loaders.db_loader import DBLoader
@@ -5223,6 +5904,12 @@ class DataConsolidator:
 
         session = getattr(self, "session", None)
         if session is not None:
+            try:
+                report["ledger_rows"] = int(session.execute(
+                    text("SELECT COUNT(*) FROM fact_resolution_log")).scalar()
+                    or 0)
+            except Exception as exc:  # noqa: BLE001 - pre-migration database
+                logger.debug("close: could not count the resolution ledger: %s", exc)
             try:
                 session.close()
                 report["closed"] = True
@@ -5247,10 +5934,18 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
                       name_locations: bool = True,
                       include_grid_names: bool = False,
                       overwrite_human_names: bool = False,
-                      audit_country_geometry: bool = False) -> Dict[str, Any]:
+                      audit_country_geometry: bool = False,
+                      burden_grain: Optional[str] = None,
+                      burden_prefer: str = _BURDEN_MEASURE_CASES_MEAN,
+                      burden_rate_scale: str = "per_100k",
+                      burden_national_allocation: bool = False,
+                      burden_force: bool = False) -> Dict[str, Any]:
     """Run consolidation and always close() (the only drain of the buffer).
 
     core.vocabulary.* keys other than gadm_gpkg are warned about and ignored.
+
+    The ``burden_*`` arguments reach ``expand_burden_to_daily`` unchanged, so an
+    orchestrator can select the expansion policy without a second code path.
     """
     config = dict(core_cfg or {})
     admin_boundaries = config.get("admin_boundaries") or {}
@@ -5296,7 +5991,11 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
             dry_run=dry_run, registry=registry, run_id=run_id,
             name_locations=name_locations, include_grid_names=include_grid_names,
             overwrite_human_names=overwrite_human_names,
-            audit_country_geometry=audit_country_geometry)
+            audit_country_geometry=audit_country_geometry,
+            burden_grain=burden_grain, burden_prefer=burden_prefer,
+            burden_rate_scale=burden_rate_scale,
+            burden_national_allocation=burden_national_allocation,
+            burden_force=burden_force)
     except Exception as exc:  # noqa: BLE001
         logger.error("consolidation failed: %s: %s", type(exc).__name__, exc,
                      exc_info=True)
@@ -5314,7 +6013,7 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
         results = dict(results)
         results["close"] = close_report
     return results
-
+    
 
 __all__ = [
     "DataConsolidator",

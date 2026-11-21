@@ -112,6 +112,50 @@ class ResolutionLog(Base):
     )
 
 
+class RunManifest(Base):
+    """One row per pipeline invocation: what produced this database.
+
+    The CDM records vocabulary provenance per resolution. This table records
+    *run* provenance: the tool version, the git commit, the registry digests, the
+    hashes of the configuration and the mapping files, the installed versions of
+    every package that can change a stored number, and a JSON ``parameters``
+    object that each phase extends (most importantly
+    ``{"expansion": {...}}``, which names the policy behind every modelled case
+    row).
+
+    It is upserted rather than append-only: a run learns about itself as it
+    proceeds, so ``record_run`` writes identity at start-up and later phases
+    merge their parameters in. ``finished_at`` is NULL for a run that did not
+    complete, which distinguishes an interrupted run from a finished one.
+
+    No foreign keys, deliberately: a manifest must survive the database being
+    partially rebuilt. A researcher who drops and re-ingests a fact table has not
+    invalidated the record of the run that first populated it.
+    """
+
+    __tablename__ = "run_manifest"
+
+    run_id                    = Column(String(50), primary_key=True)
+    started_at                = Column(DateTime, nullable=False,
+                                       default=datetime.datetime.utcnow)
+    finished_at               = Column(DateTime)
+    tool_version              = Column(String(20))
+    git_sha                   = Column(String(64))
+    registry_digest           = Column(String(64))
+    registry_digest_with_kind = Column(String(64))
+    countries                 = Column(Text)      # JSON list
+    config_path               = Column(String(1000))
+    config_sha256             = Column(String(64))
+    parameters                = Column(Text)      # JSON object, merged per phase
+    package_versions          = Column(Text)      # JSON object
+    row_counts                = Column(Text)      # JSON object
+    notes                     = Column(Text)
+
+    __table_args__ = (
+        Index("idx_run_manifest_started", "started_at"),
+    )
+
+
 class DimTime(Base):
     """Time dimension table"""
     __tablename__ = "dim_time"
@@ -255,16 +299,19 @@ class DimSource(Base):
 # ========================= FACT TABLES =========================
 
 class FactConceptMap(Base):
-    """The **current** decision for one raw value.
+    """The **current** decision for one raw value, keyed on the source triple.
 
-    Only rows that applied a concept appear here. ``decision = 'auto_accepted'``
-    authorises applying a concept; ``needs_review``, ``rejected`` and
-    ``unresolved`` are recorded in ``fact_resolution_log`` and, per the contract
-    Amendment §5.6, are not projected here with a ``concept_code``.
+    One row per ``(source_table, source_column, source_value)``, holding whatever
+    decision is in force now — ``auto_accepted``, ``needs_review``, ``rejected``
+    or ``unresolved``. ``concept_code`` is non-NULL only for ``auto_accepted``
+    (contract Amendment §5.6), so a reader must key the decision, never the mere
+    presence of a code. ``fact_resolution_log`` holds the same values plus one
+    row per run, which is the history; this table is the state.
 
     ``is_approved`` is the **human** verdict and is three-state: ``None`` means
     nobody has reviewed it, ``True`` a human approved, ``False`` a human
-    rejected. It is never written by an automated writer.
+    rejected. No automated writer touches it, and the projection's upsert refuses
+    to change ``concept_code`` on a row whose ``is_approved`` is ``True``.
     """
     __tablename__ = "fact_concept_map"
 
