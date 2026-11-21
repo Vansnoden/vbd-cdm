@@ -386,7 +386,7 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
         logger.info("Source %r completed: %d dimension row(s), %d fact row(s)",
                     source_name, dim_rows, fact_rows)
         return True
-    except Exception as exc:   - one source must not stop a run
+    except Exception as exc:
         logger.error("Failed to process source %r: %s", source_name, exc,
                      exc_info=True)
         return False
