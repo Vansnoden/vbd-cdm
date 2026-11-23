@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Post-ingestion consolidation.
+"""Post-ingestion consolidation: locations, vocabularies, FK repair, resistance.
+
+The burden-expansion subsystem is re-exported here from utilities.burden_expansion.
 """
 
 from __future__ import annotations
-import hashlib
-import calendar
+
 import difflib
 import logging
 import re
@@ -12,15 +13,18 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set,
-                    Tuple)
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
+                    Set, Tuple)
 
 import numpy as np
 import pandas as pd
 from sqlalchemy import Integer, bindparam, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
+from utilities.constants import (
+    GID_COLUMN_RE, GID_LIKE_RE, GRID_NAME_RE, MAX_IN_VARS, NAME_COLUMN_RE,
+    NUMERIC_TOKEN_RE,
+)
 from database.constants import COUNTRY_LOOKUP
 from database.geoutils import (ISO_COUNTRY_CODES, ISO_TO_COUNTRY_NAME,
                                get_country_from_coords, get_country_name,
@@ -39,6 +43,36 @@ from etl.transformers.concept_resolver import (AUTO_ACCEPTED, METHOD_ALIAS,
                                                NEEDS_REVIEW, RESISTANCE_BANDS,
                                                UNRESOLVED, ConceptResolver,
                                                Resolution)
+from utilities.burden_expansion import (  # noqa: F401
+    BURDEN_KERNEL_KEY,
+    BURDEN_MEASURE_CASES_MEAN,
+    BURDEN_MEASURE_INCIDENCE_RATE,
+    BURDEN_MEASURE_PREFERENCES,
+    DEFAULT_MAX_PROJECTED_ROWS,
+    FLAT_BURDEN_KERNEL,
+    BurdenExpander,
+    _BURDEN_KERNEL_DEFAULTS,
+    _BURDEN_LOG_SAMPLE,
+    _BURDEN_MEASURE_CASES_MEAN,
+    _BURDEN_MEASURE_INCIDENCE_RATE,
+    _BURDEN_MEASURE_PREFERENCES,
+    _BurdenKernel,
+    _ExpansionPolicy,
+    _PopulationHit,
+    _PopulationIndex,
+    _RATE_SCALES,
+    _burden_generate_daily_case_counts,
+    _days_in_year,
+    _ensure_dim_time,
+    _positive,
+    _stable_location_key,
+    ensure_dim_time as ensure_dim_time_rows,
+    generate_daily_case_counts,
+    guard_projected_volume,
+    load_burden_kernel,
+    load_expansion_policy,
+    project_case_rows,
+)
 from utilities.vocabulary import normalizers as _normalizers
 from utilities.vocabulary.alignment import (align_dimension_values,
                                             align_fact_values,
@@ -47,43 +81,29 @@ from utilities.vocabulary.alignment import (align_dimension_values,
 from utilities.vocabulary.field_catalog import (can_stamp, dimension_fields,
                                                 iter_bindings, resolve_field)
 from utilities.vocabulary.registry import VocabularyRegistry
-from utilities.run_manifest import record_parameters as _record_manifest_parameters
 
 logger = logging.getLogger(__name__)
-MAX_IN_VARS = 900
 
-_GRID_NAME_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$")
-_NUMERIC_TOKEN_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$")
-_NAME_SEPARATOR_RE = re.compile(r"[/\\|]")
-_GID_LIKE_RE = re.compile(r"^(?:GID_\d+_[A-Z]{3}|[A-Z]{3}\.\d+(?:\.\d+)*_\d+)$")
-_GID_COLUMN_RE = re.compile(r"^GID_(\d+)$", re.IGNORECASE)
-_NAME_COLUMN_RE = re.compile(r"^NAME_(\d+)$", re.IGNORECASE)
 
-DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
+DEFAULT_REGISTRY_PATH = (
+    Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
+)
 
 _REGISTRY_CACHE: dict = {}
 _WARNED: set = set()
-_LEGACY_ALIGNMENT_WARNED: set = set()
 _FACT_REFERENCE_CACHE: Dict[str, Tuple[Tuple[str, str], ...]] = {}
 
 
 def _warn_once(marker: str, message: str, *args: Any) -> None:
+    """Emit a warning the first time ``marker`` is seen."""
     if marker in _WARNED:
         return
     _WARNED.add(marker)
     logger.warning(message, *args)
 
 
-def _warn_legacy_alignment() -> None:
-    """LEGACY: no score, no concept-map row, no reviewable trace."""
-    if _LEGACY_ALIGNMENT_WARNED:
-        return
-    _LEGACY_ALIGNMENT_WARNED.add("align_fact_foreign_keys")
-    logger.warning("_align_fact_foreign_keys is LEGACY (review C12): substring "
-                   "match, no score, no fact_concept_map row.")
-
-
 def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
+    """The registry handed in, or the shipped one, cached per path."""
     if registry is not None:
         return registry
     key = str(DEFAULT_REGISTRY_PATH)
@@ -101,6 +121,7 @@ def _load_registry(registry: Any = None) -> Optional[VocabularyRegistry]:
 
 
 def _model_for_table(table_name: str):
+    """The model class for ``table_name``, derived rather than listed."""
     from database import models as _models
     for attribute in sorted(vars(_models)):
         candidate = getattr(_models, attribute)
@@ -126,7 +147,7 @@ def _dimension_models() -> Tuple[Any, ...]:
 
 
 def _dimension_fact_map(model_class) -> Tuple[Tuple[str, str], ...]:
-    """((fact_table, fk_column), ...) read from Base.metadata.
+    """``((fact_table, fk_column), ...)`` read from ``Base.metadata``.
 
     A hand-written map omitted dim_resistance_test_type, so B5 deleted merged rows
     that fact_insecticide_resistance still referenced.
@@ -175,6 +196,7 @@ def _default_vocab_key(value: Any) -> str:
 
 
 def _pack_key_fn(pack: Any):
+    """A guarded normaliser for ``pack``, falling back to the generic key."""
     chain = tuple(getattr(pack, "normalizer_chain", ()) or ())
     label = getattr(pack, "pack_id", "?")
     try:
@@ -197,14 +219,14 @@ def _pack_key_fn(pack: Any):
     return _guarded
 
 
-# -- names and similarity --------------------------------------------------
-
 def _looks_like_coordinate(value: Any) -> bool:
+    """Whether the value is a bare number, which no place name is."""
     text_value = str(value or "").strip()
     return bool(text_value) and bool(_NUMERIC_TOKEN_RE.match(text_value))
 
 
 def _name_tokens(value: Any) -> List[str]:
+    """The ``/``- and ``|``-separated tokens of a location name."""
     text_value = str(value or "").strip()
     if not text_value:
         return []
@@ -222,7 +244,7 @@ def _is_human_label(value: Any) -> bool:
 
 
 def _title_name(token: Any) -> str:
-    """Recase only uniformly-cased tokens (str.title() breaks "Côte d'Ivoire")."""
+    """Recase only uniformly-cased tokens; ``str.title()`` breaks Côte d'Ivoire."""
     text_value = re.sub(r"\s+", " ", str(token or "").strip())
     if not text_value:
         return ""
@@ -231,6 +253,7 @@ def _title_name(token: Any) -> str:
 
 
 def _looks_generated_name(name: Any, location_code: Any = None) -> bool:
+    """Whether a name is a grid code or a coordinate pair rather than a place."""
     text_name = str(name or "").strip()
     if not text_name or _GRID_NAME_RE.match(text_name):
         return True
@@ -242,6 +265,7 @@ def _looks_generated_name(name: Any, location_code: Any = None) -> bool:
 
 
 def _similarity_key(value: Any) -> str:
+    """A lower-case alphanumeric comparison key for a name."""
     text_value = str(value or "").strip()
     if not text_value:
         return ""
@@ -272,6 +296,7 @@ def _name_similarity(left: Any, right: Any) -> float:
 
 
 def _identity_tokens(value: Any, country_tokens: Sequence[Any] = ()) -> List[str]:
+    """The human tokens of a name, with the country's own tokens dropped."""
     tokens = _name_tokens(value)
     if not tokens:
         return []
@@ -283,6 +308,7 @@ def _identity_tokens(value: Any, country_tokens: Sequence[Any] = ()) -> List[str
 
 def _best_identity_token(location_code: Any, name: Any,
                          country_tokens: Sequence[Any] = ()) -> Optional[str]:
+    """The most specific human token a row carries, code first then name."""
     for candidate in (location_code, name):
         tokens = _identity_tokens(candidate, country_tokens)
         if tokens:
@@ -291,6 +317,7 @@ def _best_identity_token(location_code: Any, name: Any,
 
 
 def _approx_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Equirectangular distance in km. For a threshold, not for a measurement."""
     try:
         mean_lat = np.radians((float(lat1) + float(lat2)) / 2.0)
         dlat = (float(lat1) - float(lat2)) * 111.32
@@ -300,8 +327,6 @@ def _approx_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         return float("inf")
 
 
-# -- country standardisation (ISO 3166-1 alpha-2 + canonical label) --------
-
 _COUNTRY_BY_ISO2: Dict[str, str] = {}
 _COUNTRY_ALIAS_TO_ISO2: Dict[str, str] = {}
 _COUNTRY_TABLES_READY = False
@@ -309,6 +334,7 @@ _COUNTRY_NAME_PREFIXES = ("the ", "republic of ", "state of ", "kingdom of ")
 
 
 def _country_label(value: Any) -> str:
+    """A canonical-looking country label, or '' for a code or a number."""
     text_value = re.sub(r"\s+", " ", str(value or "").strip())
     if not text_value or not any(ch.isalpha() for ch in text_value):
         return ""
@@ -332,11 +358,7 @@ def _confirmed_iso2(value: Any) -> Optional[str]:
 
 
 def _build_country_tables() -> None:
-    """Populate iso2->name and alias->iso2 from the geoutils tables, once.
-
-    Read by inspection: the shipped tables have held iso2->name, iso3->iso2 and
-    name->iso2 at different times, so each pair is taken whichever way it fits.
-    """
+    """Populate iso2->name and alias->iso2 from the geoutils tables, once."""
     global _COUNTRY_TABLES_READY
     if _COUNTRY_TABLES_READY:
         return
@@ -385,11 +407,7 @@ def _build_country_tables() -> None:
 
 
 def _iso3_prefix_iso2(code: str) -> Optional[str]:
-    """ISO2 for a 3-letter code that prefixes its country name (KEN -> KE).
-
-    Not a loose match: "NER" is not a prefix of "NIGER", so an unrelated code
-    stays unresolved rather than landing on a neighbour.
-    """
+    """ISO2 for a 3-letter code that prefixes its country name (KEN -> KE)."""
     target = str(code or "").strip().upper()
     if not (len(target) == 3 and target.isalpha()):
         return None
@@ -436,6 +454,7 @@ def _country_iso2(raw: Any) -> Optional[str]:
 
 
 def _country_name_for(iso2: Any) -> Optional[str]:
+    """The canonical label for an ISO2 code, or None."""
     if iso2 is None:
         return None
     _build_country_tables()
@@ -443,16 +462,17 @@ def _country_name_for(iso2: Any) -> Optional[str]:
 
 
 def _canonical_country(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(iso2, canonical_label)`` for a code or name, or ``(None, None)``."""
     iso2 = _country_iso2(raw)
     if iso2 is None:
         return None, None
     return iso2, _country_name_for(iso2) or iso2
 
 
-# -- boundary geometry -----------------------------------------------------
-
 @dataclass(frozen=True)
 class _BoundaryUnit:
+    """One polygon from the boundary file, with the GID that names it."""
+
     level: int
     gid: str
     name: str
@@ -472,6 +492,7 @@ class _BoundaryIndex:
         self._build_index()
 
     def _build_index(self) -> None:
+        """Build the STRtree, falling back to a bounding-box scan."""
         if not self.units:
             return
         try:
@@ -491,6 +512,7 @@ class _BoundaryIndex:
                 continue
 
     def _candidate_positions(self, point) -> List[int]:
+        """Positions whose polygon might contain ``point``."""
         if self._tree is not None:
             try:
                 matching = self._tree.query(point)
@@ -510,7 +532,7 @@ class _BoundaryIndex:
                 if bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]]
 
     def containing(self, lat: Any, lon: Any) -> List[_BoundaryUnit]:
-        """Units holding the point, deepest first. touches() counts."""
+        """Units holding the point, deepest first. ``touches()`` counts."""
         if not self.units:
             return []
         try:
@@ -534,6 +556,7 @@ class _BoundaryIndex:
         return found
 
     def nearest(self, lat: Any, lon: Any) -> Tuple[Optional[_BoundaryUnit], float]:
+        """The closest unit and its distance in km, or ``(None, inf)``."""
         if not self.units:
             return None, float("inf")
         try:
@@ -556,6 +579,7 @@ class _BoundaryIndex:
 
 
 def _list_boundary_layers(path: Path) -> List[Optional[str]]:
+    """The layers of a boundary file, shallowest level first."""
     names: List[str] = []
     try:
         import fiona
@@ -665,9 +689,8 @@ def _choose_boundary_unit(units: Sequence[_BoundaryUnit], identity: Optional[str
     return deepest, deepest_score, "deepest_unit"
 
 
-# -- canonical rules -------------------------------------------------------
-
 def _rule_tokens(pack: Any) -> tuple:
+    """The pack's ``canonical_rule`` tokens, split on commas and whitespace."""
     raw = getattr(pack, "canonical_rule", None)
     if not raw:
         return ()
@@ -675,10 +698,12 @@ def _rule_tokens(pack: Any) -> tuple:
 
 
 def _rule_require_spatial_or_human(pack: Any, resolution: "Resolution") -> bool:
+    """No gate at this layer; the spatial pass is the evidence."""
     return False
 
 
 def _rule_never_collapse_hybrids(pack: Any, resolution: "Resolution") -> bool:
+    """Refuse to apply a fuzzy match, which is what collapses hybrid names."""
     return resolution.match_method != METHOD_FUZZY
 
 
@@ -688,6 +713,7 @@ _CANONICAL_MATCH_RULES = {
 
 
 def _bonus_genus_prefix(name: str) -> int:
+    """Rank bonus for a name that starts with the genus under study."""
     return 10_000 if str(name or "").strip().lower().startswith("anopheles") else 0
 
 
@@ -695,6 +721,7 @@ _CANONICAL_FORM_BONUSES = {"prefer_genus_prefix": _bonus_genus_prefix}
 
 
 def _may_apply_concept(pack: Any, resolution: "Resolution") -> bool:
+    """Whether every rule the pack declares permits this match to be applied."""
     for token in _rule_tokens(pack):
         predicate = _CANONICAL_MATCH_RULES.get(token)
         if predicate is not None:
@@ -712,13 +739,12 @@ def _may_apply_concept(pack: Any, resolution: "Resolution") -> bool:
 
 
 def _effective_decision(pack: Any, resolution: "Resolution") -> str:
+    """The decision after the pack's match rules have had their say."""
     decision = resolution.decision
     if decision == AUTO_ACCEPTED and not _may_apply_concept(pack, resolution):
         return NEEDS_REVIEW
     return decision
 
-
-# -- resistance thresholds -------------------------------------------------
 
 RESISTANCE_THRESHOLDS_KEY = "resistance_thresholds"
 _SUSCEPTIBLE_KEY = "susceptible"
@@ -726,7 +752,10 @@ _SUSPECTED_KEY = "suspected"
 
 
 def _resistance_thresholds(registry=None) -> Tuple[float, float]:
-    """(susceptible, suspected) percentages from the parameter pack; never defaulted."""
+    """``(susceptible, suspected)`` percentages from the parameter pack.
+
+    Never defaulted: a classification whose cut-offs are invented looks like a finding.
+    """
     from utilities.vocabulary.registry import RegistryError
     loaded = _load_registry(registry)
     if loaded is None:
@@ -757,294 +786,6 @@ def _resistance_thresholds(registry=None) -> Tuple[float, float]:
     return susceptible, suspected
 
 
-BURDEN_KERNEL_KEY = "burden_expansion"
-_BURDEN_KERNEL_DEFAULTS: Dict[str, Any] = {
-    "intra_month_amplitude": 0.0,
-    "base_variation": 0.0,
-    "spike_probability": 0.0,
-    "spike_mean_excess": 0.5,
-}
-
-_HOLIDAY_KEY_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
-
-
-@dataclass(frozen=True, eq=False)
-class _BurdenKernel:
-    """Weights that distribute an annual total across the days of a year.
-    """
-
-    monthly: Mapping[int, float]
-    weekly: Mapping[int, float]
-    holidays: Mapping[str, float]
-    intra_amplitude: float
-    base_variation: float
-    spike_probability: float
-    spike_mean_excess: float
-    origin: str
-    pack_id: Optional[str] = None
-    version: Optional[str] = None
-    source: Optional[str] = None
-
-    @property
-    def is_flat(self) -> bool:
-        """True when allocation is uniform and the seed cannot matter."""
-        return (not self.monthly and not self.weekly and not self.holidays
-                and self.intra_amplitude <= 0 and self.base_variation <= 0
-                and self.spike_probability <= 0)
-
-    def describe(self) -> Dict[str, Any]:
-        """A JSON-serialisable summary for the run manifest."""
-        return {
-            "origin": self.origin,
-            "pack_id": self.pack_id,
-            "version": self.version,
-            "source": self.source,
-            "flat": self.is_flat,
-            "intra_month_amplitude": self.intra_amplitude,
-            "base_variation": self.base_variation,
-            "spike_probability": self.spike_probability,
-            "monthly": dict(sorted(self.monthly.items())),
-            "weekly": dict(sorted(self.weekly.items())),
-            "holidays": dict(sorted(self.holidays.items())),
-        }
-
-
-FLAT_BURDEN_KERNEL = _BurdenKernel(
-    monthly={}, weekly={}, holidays={}, intra_amplitude=0.0,
-    base_variation=0.0, spike_probability=0.0, spike_mean_excess=0.5,
-    origin="flat")
-
-
-def _kernel_float(value: Any, default: float) -> float:
-    """A non-negative float, or ``default`` when unusable. Never raises."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number >= 0 else default
-
-
-def _kernel_month_map(value: Any) -> Dict[int, float]:
-    if isinstance(value, Mapping):
-        items = value.items()
-    elif isinstance(value, (list, tuple)):
-        items = enumerate(value, start=1)
-    else:
-        return {}
-    out: Dict[int, float] = {}
-    for raw_key, raw_value in items:
-        try:
-            month = int(raw_key)
-        except (TypeError, ValueError):
-            continue
-        if not 1 <= month <= 12:
-            continue
-        weight = _kernel_float(raw_value, -1.0)
-        if weight > 0:
-            out[month] = weight
-    return out
-
-
-def _kernel_weekday_map(value: Any) -> Dict[int, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    out: Dict[int, float] = {}
-    for raw_key, raw_value in value.items():
-        try:
-            day = int(raw_key)
-        except (TypeError, ValueError):
-            continue
-        if not 1 <= day <= 7:
-            continue
-        weight = _kernel_float(raw_value, -1.0)
-        if weight > 0:
-            out[day] = weight
-    return out
-
-
-def _kernel_holiday_map(value: Any) -> Dict[str, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    out: Dict[str, float] = {}
-    for raw_key, raw_value in value.items():
-        key = str(raw_key).strip()
-        if not _HOLIDAY_KEY_RE.match(key):
-            continue
-        weight = _kernel_float(raw_value, -1.0)
-        if weight > 0:
-            out[key] = weight
-    return out
-
-
-def load_burden_kernel(registry: Any = None) -> _BurdenKernel:
-    """The allocation policy for this run.
-    """
-    loaded = _load_registry(registry)
-    if loaded is None:
-        logger.info("  burden kernel: no registry, allocating uniformly "
-                    "(origin=flat).")
-        return FLAT_BURDEN_KERNEL
-
-    try:
-        pack = loaded.find_parameter_pack(BURDEN_KERNEL_KEY)
-    except Exception as exc:  # noqa: BLE001 - RegistryError on an ambiguous key
-        logger.warning("  burden kernel: cannot resolve %r (%s: %s); allocating "
-                       "uniformly.", BURDEN_KERNEL_KEY, type(exc).__name__, exc)
-        return FLAT_BURDEN_KERNEL
-
-    if pack is None:
-        logger.info("  burden kernel: no %r parameter pack, allocating uniformly "
-                    "(origin=flat). Ship "
-                    "vocabularies/registry/burden-expansion/manifest.yaml to "
-                    "declare a seasonal policy.", BURDEN_KERNEL_KEY)
-        return FLAT_BURDEN_KERNEL
-
-    block = pack.parameters.get(BURDEN_KERNEL_KEY)
-    if block is None:
-        block = {key: pack.parameters.get(key)
-                 for key in ("seasonality", "weekly_pattern", "holidays",
-                             "holiday_factors", "intra_month_amplitude",
-                             "base_variation", "spike_probability",
-                             "spike_mean_excess")}
-    if not isinstance(block, Mapping):
-        logger.warning("  burden kernel: pack %r declares %r as %s, not a "
-                       "mapping; allocating uniformly.", pack.pack_id,
-                       BURDEN_KERNEL_KEY, type(block).__name__)
-        return FLAT_BURDEN_KERNEL
-
-    monthly = _kernel_month_map(block.get("seasonality"))
-    if not monthly:
-        logger.warning("  burden kernel: pack %r declares no usable "
-                       "`seasonality` block; allocating uniformly.",
-                       pack.pack_id)
-        return FLAT_BURDEN_KERNEL
-
-    kernel = _BurdenKernel(
-        monthly=monthly,
-        weekly=_kernel_weekday_map(block.get("weekly_pattern")),
-        holidays=_kernel_holiday_map(
-            block.get("holidays") or block.get("holiday_factors")),
-        intra_amplitude=_kernel_float(
-            block.get("intra_month_amplitude"),
-            _BURDEN_KERNEL_DEFAULTS["intra_month_amplitude"]),
-        base_variation=_kernel_float(
-            block.get("base_variation"),
-            _BURDEN_KERNEL_DEFAULTS["base_variation"]),
-        spike_probability=_kernel_float(
-            block.get("spike_probability"),
-            _BURDEN_KERNEL_DEFAULTS["spike_probability"]),
-        spike_mean_excess=_kernel_float(
-            block.get("spike_mean_excess"),
-            _BURDEN_KERNEL_DEFAULTS["spike_mean_excess"]),
-        origin=f"pack:{pack.vocabulary_id}",
-        pack_id=pack.pack_id,
-        version=pack.version,
-        source=(str(pack.parameters.get("source") or "").strip() or None),
-    )
-    logger.info("  burden kernel: %s (%d month(s), %d weekday(s), %d holiday(s), "
-                "variation %.3f%s)", kernel.origin, len(kernel.monthly),
-                len(kernel.weekly), len(kernel.holidays), kernel.base_variation,
-                "" if kernel.source else "; NO SOURCE CITED - a seasonal claim "
-                "from this series would be unsupported")
-    return kernel
-
-
-def _stable_location_key(location_code: Any, name: Any = None) -> int:
-    """A 32-bit key derived from a location's own identifier, not its surrogate.
-
-    The generator seeds on this rather than on ``location_id`` because the
-    surrogate is assigned by insertion order. Rebuilding the CDM from the same
-    sources can give a cell a different ``location_id``, and a series seeded on
-    the surrogate would then differ cell-by-cell between two databases that are
-    conceptually identical - which makes a golden snapshot meaningless.
-
-    ``location_code`` first, because it is the row's own identity; ``name`` as a
-    fallback, because a survey site may carry a name and no code. Both absent
-    yields 0, which gives that row the same series in every database.
-    """
-    for candidate in (location_code, name):
-        text_value = str(candidate or "").strip()
-        if text_value:
-            digest = hashlib.sha256(text_value.encode("utf-8")).hexdigest()
-            return int(digest[:8], 16)
-    return 0
-
-
-def _burden_generate_daily_case_counts(
-    annual_cases: float, year: int, location_id: int,
-    base_variation: Optional[float] = None, seed: Optional[int] = None,
-    *,
-    kernel: Optional[_BurdenKernel] = None,
-    stable_key: Optional[int] = None,
-) -> pd.DataFrame:
-    """Daily series whose sum equals ``round(annual_cases)``, exactly.
-
-    Weights come from ``kernel``; the multiplicative deviation and any spike come
-    from a generator seeded on ``(seed, stable_key, year)``. The guarantee is
-    arithmetic rather than statistical: weights are normalised, truncated to
-    integers, and the residual distributed by largest remainder, so the daily
-    column sums to the rounded annual total whatever the weights are.
-    """
-    active = kernel or FLAT_BURDEN_KERNEL
-    variation = (active.base_variation if base_variation is None
-                 else float(base_variation))
-
-    key = int(location_id if stable_key is None else stable_key)
-    rng = np.random.default_rng(
-        np.random.SeedSequence([0 if seed is None else int(seed), key, int(year)]))
-
-    date_range = pd.date_range(datetime(year, 1, 1), datetime(year, 12, 31))
-    weights: List[float] = []
-    for date in date_range:
-        month = date.month
-        days_in_month = calendar.monthrange(year, month)[1]
-
-        weight = float(active.monthly.get(month, 1.0))
-        weight *= float(active.weekly.get(date.isocalendar()[2], 1.0))
-
-        if active.intra_amplitude > 0:
-            phase = (date.day / max(days_in_month, 1)) * 2 * np.pi
-            weight *= 1.0 + active.intra_amplitude * np.sin(phase + month * 0.5)
-
-        weight *= float(active.holidays.get(date.strftime("%m-%d"), 1.0))
-
-        if variation > 0:
-            weight *= float(rng.lognormal(0.0, variation * 0.7))
-
-        if active.spike_probability > 0 and rng.random() < active.spike_probability:
-            weight *= 1.0 + float(rng.exponential(active.spike_mean_excess))
-
-        weights.append(weight)
-
-    total = sum(weights)
-    shares = ([weight / total for weight in weights] if total > 0
-              else [1.0 / len(date_range)] * len(date_range))
-
-    target = int(round(max(0.0, float(annual_cases))))
-    raw = [annual_cases * share for share in shares]
-    counts = [int(value) for value in raw]
-
-    remainder = target - sum(counts)
-    if remainder > 0:
-        order = sorted(range(len(raw)), key=lambda i: (-(raw[i] - counts[i]), i))
-        for i in order[:remainder]:
-            counts[i] += 1
-    elif remainder < 0:
-        order = sorted(range(len(raw)), key=lambda i: (raw[i] - counts[i], i))
-        for i in order[:abs(remainder)]:
-            if counts[i] > 0:
-                counts[i] -= 1
-
-    return pd.DataFrame({
-        "date_id": [date.strftime("%Y-%m-%d") for date in date_range],
-        "year": year,
-        "month": [date.month for date in date_range],
-        "case_count": counts,
-        "location_id": location_id,
-    })
-
-# -- fact aggregation spec -------------------------------------------------
-
 _FACT_AGGREGATION_SPEC: Dict[str, Dict[str, Any]] = {
     "fact_vector_observation": {
         "natural_key": ["location_id", "date_id", "vector_code", "source_code",
@@ -1068,8 +809,8 @@ _FACT_AGGREGATION_SPEC: Dict[str, Dict[str, Any]] = {
         "first": ["feeding_preference", "biting_location", "resting_behavior",
                   "larval_site_type"]},
     "fact_environment": {
-        "natural_key": ["location_id", "date_id", "variable"],
-        "sums": [], "means": ["value"], "first": ["source_code"]},
+        "natural_key": ["location_id", "date_id", "variable", "source_code"],
+        "sums": [], "means": ["value"], "first": []},
     "fact_disease_case": {
         "natural_key": ["location_id", "date_id_onset", "disease_code",
                         "identification_method_code", "source_code",
@@ -1086,11 +827,28 @@ _FACT_AGGREGATION_SPEC: Dict[str, Dict[str, Any]] = {
                         "source_code", "intervention_type"],
         "sums": [], "means": ["coverage"], "first": ["date_end"]},
     "fact_socioeconomic_condition": {
-        "natural_key": ["location_id", "year", "indicator_code"],
-        "sums": [], "means": ["indicator_value"], "first": ["source_code"]}}
+        "natural_key": ["location_id", "year", "indicator_code", "source_code"],
+        "sums": [], "means": ["indicator_value"], "first": []},}
 
 
-# -- module helpers --------------------------------------------------------
+_ALIGNED_DIMENSIONS: Dict[str, Tuple[Any, str]] = {
+    "dim_location": (DimLocation, "location_id"),
+    "dim_disease": (DimDisease, "disease_code"),
+    "dim_vector": (DimVector, "vector_code"),
+    "dim_insecticide": (DimInsecticide, "insecticide_code"),
+    "dim_source": (DimSource, "source_code"),
+    "dim_identification_method": (DimIdentificationMethod, "method_code"),
+    "dim_resistance_test_type": (DimResistanceTestType, "test_type_code"),
+    "dim_socioeconomic_indicator": (DimSocioeconomicIndicator,
+                                    "indicator_code"),
+}
+
+
+def _orphan_predicate(fact: str, fk: str, dim: str, pk: str) -> str:
+    """Anti-join for one FK column: no ``dim`` row carries this value."""
+    return (f"f.{fk} IS NOT NULL AND NOT EXISTS "
+            f"(SELECT 1 FROM {dim} d WHERE d.{pk} = f.{fk})")
+
 
 def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
     """Fill missing country_code/country_name from centroids, in canonical form."""
@@ -1113,7 +871,7 @@ def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
             continue
         try:
             name, code = get_country_from_coords(float(lat), float(lon))
-        except Exception as exc:  
+        except Exception as exc:  # noqa: BLE001
             logger.debug("country lookup failed for (%s, %s): %s", lat, lon, exc)
             continue
         iso2, canonical = _canonical_country(code) if code else (None, None)
@@ -1131,6 +889,7 @@ def enrich_location_dataframe(dim_df: pd.DataFrame) -> pd.DataFrame:
 
 def _chunked_in(session, base_sql: str, static_params: dict, values,
                 expanding_name: str = "vals", chunk_size: int = MAX_IN_VARS):
+    """Run an ``IN :vals`` query in chunks. Empty input returns ``[]``."""
     values = list(values)
     if not values:
         return []
@@ -1144,6 +903,7 @@ def _chunked_in(session, base_sql: str, static_params: dict, values,
 
 
 def _or_where(pairs: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """An AND-joined predicate for ``pairs``, with NULL handled as ``IS NULL``."""
     clauses, params = [], {}
     for name, value in pairs.items():
         if value is None:
@@ -1155,6 +915,7 @@ def _or_where(pairs: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
 
 def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
+    """For each goal point, the index of the nearest anchor. Chunked, vectorised."""
     n = len(glat)
     out = np.zeros(n, dtype=int)
     if n == 0 or len(alat) == 0:
@@ -1173,225 +934,13 @@ def _nearest_index(glat, glon, alat, alon, chunk: int = 2000):
     return out
 
 
-_BURDEN_LOG_SAMPLE = 10
-
-_BURDEN_MEASURE_CASES_MEAN = "cases_mean"
-_BURDEN_MEASURE_INCIDENCE_RATE = "incidence_rate"
-_BURDEN_MEASURE_PREFERENCES = (_BURDEN_MEASURE_CASES_MEAN,
-                               _BURDEN_MEASURE_INCIDENCE_RATE)
-
-_RATE_SCALES: Dict[str, float] = {"per_100k": 100_000.0, "per_person": 1.0}
-
-
-def _positive(value: Any) -> Optional[float]:
-    """``float(value)`` when it is a usable positive number, else None."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
-
-
-@dataclass(frozen=True)
-class _PopulationHit:
-    """Where a record's denominator came from, so the log can name it."""
-
-    value: float
-    tier: str
-    year: Optional[int]
-
-    @property
-    def is_country_level(self) -> bool:
-        """True when the value describes a whole country, not this location."""
-        return self.tier.startswith("country")
-
-
-class _PopulationIndex:
-
-    def __init__(self, session, indicator: str = "SP.POP.TOTL") -> None:
-        self.session = session
-        self.indicator = str(indicator).strip() or "SP.POP.TOTL"
-        self._series: Dict[int, Dict[int, float]] = {}
-        self._country_series: Dict[str, Dict[int, float]] = {}
-        self.country_of: Dict[int, str] = {}
-        self.single_country: Optional[str] = None
-        self.location_rows = 0
-        self.series_locations = 0
-        self.country_series_level: Dict[str, Dict[str, Any]] = {}
-
-    _LEVEL_RANK: Mapping[str, int] = {
-        "country": 0, "nation": 0,
-        "admin1": 1, "region": 1, "province": 1, "county": 1, "state": 1,
-        "admin2": 2, "district": 2,
-        "admin3": 3, "ward": 3, "division": 3,
-        "admin4": 4, "admin5": 5, "admin6": 6,
-        "site": 7, "occurrence": 8, "grid": 9, "cell": 9, "pixel": 9,
-    }
-
-    @classmethod
-    def _rank(cls, label: Any) -> int:
-        return cls._LEVEL_RANK.get(str(label or "").strip().lower(), 5)
-
-    def load(self) -> "_PopulationIndex":
-        """Read the population rows and the location->country map. Idempotent.
-
-        Builds two indexes from one location read:
-        """
-        levels: Dict[int, str] = {}
-        for location_id, country_code, admin_level in self.session.execute(text(
-            "SELECT location_id, country_code, admin_level FROM dim_location "
-            "ORDER BY location_id")).fetchall():
-            if location_id is None:
-                continue
-            key = int(location_id)
-            self.country_of[key] = str(country_code or "").strip().upper()
-            levels[key] = str(admin_level or "").strip()
-
-        rows = self.session.execute(text(
-            "SELECT location_id, year, indicator_value "
-            "FROM fact_socioeconomic_condition "
-            "WHERE indicator_code = :i "
-            "  AND indicator_value IS NOT NULL AND indicator_value > 0 "
-            "ORDER BY location_id, year"), {"i": self.indicator}).fetchall()
-
-        for location_id, year, value in rows:
-            if location_id is None or year is None:
-                continue
-            try:
-                number = float(value)
-                when = int(year)
-            except (TypeError, ValueError):
-                continue
-            if number <= 0:
-                continue
-            self._series.setdefault(int(location_id), {})[when] = number
-            self.location_rows += 1
-
-        self.series_locations = len(self._series)
-
-        by_country: Dict[str, Dict[int, List[int]]] = {}
-        for location_id in sorted(self._series):
-            country = self.country_of.get(location_id) or ""
-            if not country:
-                continue
-            rank = self._rank(levels.get(location_id))
-            by_country.setdefault(country, {}).setdefault(rank, []).append(
-                location_id)
-
-        for country in sorted(by_country):
-            per_rank = by_country[country]
-            chosen_rank = min(per_rank)
-            members = per_rank[chosen_rank]
-            bucket: Dict[int, float] = {}
-            for location_id in members:
-                for year, value in self._series[location_id].items():
-                    bucket[year] = bucket.get(year, 0.0) + value
-            if not bucket:
-                continue
-            self._country_series[country] = bucket
-            label = levels.get(members[0]) or "(unlabelled)"
-            self.country_series_level[country] = {
-                "admin_level": label,
-                "locations": len(members),
-            }
-            if chosen_rank > 0:
-                logger.warning(
-                    "  population index: no country-level series for %s; the "
-                    "country series is the SUM of %d location(s) at %r. Rate "
-                    "records will use that total as their denominator, which is "
-                    "correct only if those units tile the country.",
-                    country, len(members), label)
-
-        countries = [code for code in self._country_series if code]
-        self.single_country = countries[0] if len(countries) == 1 else None
-
-        logger.info(
-            "  population index: %d row(s) under %r across %d location(s); "
-            "country series for %s%s",
-            self.location_rows, self.indicator, self.series_locations,
-            ", ".join(f"{code}({info['admin_level']}x{info['locations']})"
-                      for code, info in sorted(self.country_series_level.items()))
-            or "(none)",
-            " (single country, used for locations with no country_code)"
-            if self.single_country else "")
-        return self
-
-    # -- inspection ------------------------------------------------------
-
-    def countries(self) -> Tuple[str, ...]:
-        """The country codes that have a series, sorted. Deterministic."""
-        return tuple(sorted(code for code in self._country_series if code))
-
-    def country_for(self, location_id: Any) -> Optional[str]:
-        """The country a location belongs to, for allocation bookkeeping."""
-        try:
-            key = int(location_id)
-        except (TypeError, ValueError):
-            return None
-        return self.country_of.get(key) or self.single_country
-
-    # -- lookup ----------------------------------------------------------
-
-    @staticmethod
-    def _nearest_year(series: Mapping[int, float],
-                      year: Optional[int]) -> Optional[int]:
-        """The year closest to ``year``; ties go to the earlier year.
-
-        Earlier on a tie, not later: an epidemiology figure should not be
-        silently rounded up to a projection when the actual year is equidistant.
-        """
-        if not series:
-            return None
-        if year is None:
-            return max(series)
-        return min(series, key=lambda candidate: (abs(candidate - year), candidate))
-
-    def resolve(self, location_id: Any, year: Any, *,
-                allow_country: bool = False) -> Optional[_PopulationHit]:
-        """The denominator for one (location, year), or None.
-
-        """
-        try:
-            key = int(location_id)
-        except (TypeError, ValueError):
-            return None
-        try:
-            when = None if year is None else int(year)
-        except (TypeError, ValueError):
-            when = None
-
-        series = self._series.get(key)
-        if series:
-            if when is not None and when in series:
-                return _PopulationHit(series[when], "location_year", when)
-            nearest = self._nearest_year(series, when)
-            if nearest is not None:
-                return _PopulationHit(series[nearest],
-                                      "location_nearest_year", nearest)
-
-        if not allow_country:
-            return None
-
-        country = self.country_for(key)
-        country_series = self._country_series.get(country or "")
-        if not country_series:
-            return None
-        if when is not None and when in country_series:
-            return _PopulationHit(country_series[when], "country_year", when)
-        nearest = self._nearest_year(country_series, when)
-        if nearest is None:
-            return None
-        return _PopulationHit(country_series[nearest],
-                              "country_nearest_year", nearest)
-
-
-# -- DataConsolidator ------------------------------------------------------
-
 class DataConsolidator:
     """Consolidation phases over one CDM session."""
 
     def __init__(self, session: Optional[Session] = None):
         self.session = session or SessionLocal()
+        self.registry: Any = None
+        self.run_id: Optional[str] = None
         self._country_lookup = COUNTRY_LOOKUP
         self._closed = False
         self._close_report: Dict[str, Any] = {}
@@ -1401,6 +950,7 @@ class DataConsolidator:
         self._boundary_precision: Optional[float] = None
 
     def _scalar_or_zero(self, sql: str) -> int:
+        """A ``COUNT(*)`` scalar, or 0 when the query cannot run."""
         try:
             return int(self.session.execute(text(sql)).scalar() or 0)
         except Exception as exc:  # noqa: BLE001
@@ -1408,6 +958,7 @@ class DataConsolidator:
             return 0
 
     def _scalar_or_zero_raw(self, sql: str, params: Dict[str, Any]) -> int:
+        """A parameterised ``COUNT(*)`` scalar, or 0 when it cannot run."""
         try:
             return int(self.session.execute(text(sql), params).scalar() or 0)
         except Exception as exc:  # noqa: BLE001
@@ -1415,6 +966,7 @@ class DataConsolidator:
             return 0
 
     def _distinct_value_count(self, field: str) -> int:
+        """How many non-blank distinct values a catalogue field carries."""
         try:
             binding = resolve_field(field)
         except Exception:  # noqa: BLE001
@@ -1424,9 +976,8 @@ class DataConsolidator:
             f"SELECT COUNT(DISTINCT {column}) FROM {binding.dimension_table} "
             f"WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS TEXT)) <> ''")
 
-    # -- A6a ---------------------------------------------------------------
-
     def _country_from_point(self, lat: Any, lon: Any) -> Optional[str]:
+        """ISO2 of the country a coordinate falls in, or None."""
         try:
             flat, flon = float(lat), float(lon)
         except (TypeError, ValueError):
@@ -1449,9 +1000,7 @@ class DataConsolidator:
                                   sample_limit: int = 10) -> Dict[str, Any]:
         """Canonicalise country_code to ISO2 and country_name to its label.
 
-        Ladder: country_code -> country_name -> centroid. Geometry is fill and
-        audit only, never correction: a row that states a country keeps it and the
-        disagreement is counted. Idempotent; a canonical row is not written.
+        Ladder: code -> name -> centroid; geometry fills a blank and never overwrites.
         """
         logger.info("=" * 60)
         logger.info("A6a: STANDARDISE COUNTRY CODES%s",
@@ -1484,6 +1033,7 @@ class DataConsolidator:
             "iso_names": len(_COUNTRY_BY_ISO2), "dry_run": bool(dry_run)}
 
         def _bump(bucket: Dict[str, int], key: str, limit: int = 40) -> None:
+            """Count ``key`` in ``bucket``, collapsing past ``limit`` distinct keys."""
             if key in bucket:
                 bucket[key] += 1
             elif len(bucket) < limit:
@@ -1516,11 +1066,14 @@ class DataConsolidator:
                 geometry_iso2 = self._country_from_point(lat, lon)
                 report["geometry_checked"] += 1
 
-            if iso2 is None and geometry_iso2:
-                iso2, canonical = geometry_iso2, _country_name_for(geometry_iso2)
-                source = "geometry"
-            elif iso2 and geometry_iso2 and geometry_iso2 != iso2:
+            if iso2 is None:
+                if geometry_iso2 is not None:
+                    iso2, canonical = geometry_iso2, _country_name_for(geometry_iso2)
+                    source = "geometry"
+            elif geometry_iso2 is not None and geometry_iso2 != iso2:
+                # Report-only: a declared country is never replaced by geometry.
                 report["geometry_conflicts"] += 1
+                report.setdefault("conflict_samples", [])
                 if len(report["conflict_samples"]) < sample_limit:
                     report["conflict_samples"].append({
                         "location_id": int(location_id),
@@ -1619,12 +1172,10 @@ class DataConsolidator:
         return report
 
     def fix_location_country_codes(self) -> int:
-        """Deprecated: standardize_country_codes also fixes the spelling."""
+        """Deprecated: ``standardize_country_codes`` also fixes the spelling."""
         warnings.warn("fix_location_country_codes is deprecated; use "
                       "standardize_country_codes.", DeprecationWarning, stacklevel=2)
         return int(self.standardize_country_codes().get("rewritten", 0) or 0)
-
-    # -- A6 ----------------------------------------------------------------
 
     def consolidate_locations(self, *, gadm_gpkg: Optional[str] = None,
                               country_codes: Iterable[str] = (),
@@ -1708,11 +1259,9 @@ class DataConsolidator:
                     len(name_duplicates), " (dry run)" if dry_run else "")
         return summary
 
-    # -- A9b ---------------------------------------------------------------
-
     def _boundary_index_for(self, path: Any, precision: Optional[float] = 1e-5,
                             ) -> Optional[_BoundaryIndex]:
-        """Precision is part of the cache key, so a coarser index is never reused."""
+        """The cached boundary index; ``precision`` is part of the cache key."""
         candidate = None if path is None else str(path)
         if (self._boundary_index is not None and candidate is not None
                 and candidate == self._boundary_path
@@ -1727,6 +1276,7 @@ class DataConsolidator:
         return index
 
     def _concept_labels_by_code(self, vocabulary_id: Optional[str]) -> Dict[str, str]:
+        """``{concept_code: canonical name}`` for one vocabulary release."""
         if not vocabulary_id:
             return {}
         try:
@@ -1750,17 +1300,9 @@ class DataConsolidator:
                                token_fallback: bool = False,
                                precision: Optional[float] = 1e-5,
                                sample_limit: int = 10) -> Dict[str, Any]:
-        """Name every location from its coordinates.
+        """Name every location from its coordinates, deepest human polygon first.
 
-        Point-in-polygon at every level; the deepest human-named containing unit
-        supplies the label (dim_concept first, else the layer's NAME_n). The source
-        token is evidence only: it can confirm or outvote depth, and its similarity
-        is recorded. Ladder: boundary -> nearest_boundary -> ancestor ->
-        nearest_anchor -> token (opt-in). Grid cells are skipped by default; a
-        pixel has no name and 28k identical labels would break the "<lon>/<lat>"
-        fallback in _assign_grid_parents. location_code is never touched.
-        standard_code is NOT stamped: _merge_locations_by_identity would collapse
-        distinct sites inside one ward.
+        ``location_code`` is never touched and ``standard_code`` is not stamped here.
         """
         registry = _load_registry(getattr(self, "registry", None))
         pack = None
@@ -1802,7 +1344,7 @@ class DataConsolidator:
             return report
 
         def _count(decision: str) -> None:
-            """from_<prefix> plus a raw histogram. The bare prefix is not a key."""
+            """``from_<prefix>`` plus a raw histogram. The bare prefix is no key."""
             prefix = decision.split(":", 1)[0]
             bucket = f"from_{prefix}"
             report[bucket] = int(report.get(bucket, 0)) + 1
@@ -1825,8 +1367,9 @@ class DataConsolidator:
                         len(index.units),
                         ", ".join(str(level) for level in index.levels), index.label)
         else:
-            logger.warning("  location naming: no boundary file. Configure "
-                           "core.admin_boundaries.path to name from coordinates.")
+            logger.warning("  location naming: no boundary file. Set "
+                           "VBD_ADMIN_BOUNDARIES (or pass gadm_gpkg) to name from "
+                           "coordinates.")
 
         concept_labels = self._concept_labels_by_code(vocabulary_id)
         token_concepts: Dict[str, str] = {}
@@ -1842,6 +1385,7 @@ class DataConsolidator:
                      for r in rows}
 
         def _depth(location_id: int, seen: Optional[Set[int]] = None) -> int:
+            """How many parent hops separate this row from a root."""
             seen = seen or set()
             if location_id in seen:
                 return 0
@@ -2099,13 +1643,13 @@ class DataConsolidator:
         return report
 
     def _assign_location_names(self, **kwargs: Any) -> Dict[str, Any]:
-        """Deprecated alias for resolve_location_names."""
+        """Deprecated alias for ``resolve_location_names``."""
         warnings.warn("_assign_location_names is deprecated; use "
                       "resolve_location_names.", DeprecationWarning, stacklevel=2)
         return self.resolve_location_names(**kwargs)
 
     def _merge_locations_by_identity(self, dry_run: bool = False) -> Dict[str, Any]:
-        """Merge rows sharing a non-empty standard_code. Never merges by name."""
+        """Merge rows sharing a non-empty ``standard_code``. Never merges by name."""
         keys = self.session.execute(text(
             "SELECT standard_code FROM dim_location "
             "WHERE standard_code IS NOT NULL AND TRIM(standard_code) <> '' "
@@ -2303,6 +1847,7 @@ class DataConsolidator:
         parent_of = {int(r["location_id"]): r["parent_location_id"] for r in rows}
 
         def _depth(location_id: int, seen: Optional[Set[int]] = None) -> int:
+            """How many parent hops separate this row from a root."""
             seen = seen or set()
             if location_id in seen:
                 return 0
@@ -2435,15 +1980,13 @@ class DataConsolidator:
                 "no_coordinates": no_coords, "matched_by_pattern": by_pattern,
                 "by_country": by_country_counts, "dry_run": bool(dry_run)}
 
-    # -- dimension merge ---------------------------------------------------
-
     def _consolidate_dimension(self, model_class, name_col: str, code_col: str,
                                fallback_key_fn=None, pack=None,
                                dry_run: bool = False,
                                group_extra: Tuple[str, ...] = ()) -> Dict[str, Any]:
-        """Merge one dimension: concept:<id> -> standard:<code> -> name:<key>.
+        """Merge one dimension: ``concept:<id>`` -> ``standard:<code>`` -> name.
 
-        A duplicate is deleted only after its facts are re-pointed AND a live count
+        A duplicate is deleted only after its facts are re-pointed and a live count
         confirms nothing still references it; otherwise it is kept.
         """
         table_name = getattr(model_class, "__tablename__", "?")
@@ -2471,6 +2014,7 @@ class DataConsolidator:
                         else _default_vocab_key)
 
         def _suffix(record) -> str:
+            """Extra group-key fields, so one name can stay several rows."""
             if not group_extra:
                 return ""
             parts = [("" if getattr(record, c, None) is None
@@ -2479,6 +2023,7 @@ class DataConsolidator:
             return "|" + "|".join(parts)
 
         def key_of(record) -> Optional[str]:
+            """The strongest identity a row carries, as a grouping key."""
             concept_id = getattr(record, "concept_id", None)
             if concept_id is not None:
                 return f"concept:{concept_id}"
@@ -2614,9 +2159,8 @@ class DataConsolidator:
                 "duplicates_found": len(duplicate_groups), "merged": merged,
                 "deleted": deleted_total, "skipped_referenced": skipped_total}
 
-    # -- FK cascade --------------------------------------------------------
-
     def _count_references(self, model_class, key: Any) -> int:
+        """How many fact rows still reference ``key`` across every FK column."""
         if key is None:
             return 0
         total = 0
@@ -2673,6 +2217,7 @@ class DataConsolidator:
 
     def _would_collide(self, table_name: str, fk_column: str,
                        old_key: Any, new_key: Any) -> bool:
+        """Whether re-pointing ``old`` onto ``new`` would duplicate a natural key."""
         key_columns = list((_FACT_AGGREGATION_SPEC.get(table_name) or {})
                            .get("natural_key") or [])
         if not key_columns:
@@ -2693,11 +2238,9 @@ class DataConsolidator:
             return False
         return int(groups) > 0
 
-    # -- aggregation -------------------------------------------------------
-
     def _validate_aggregation_spec(self, spec: Optional[Mapping[str, Any]] = None
                                    ) -> Dict[str, Dict[str, Any]]:
-        """Validate a spec into {table: {key, ops, numeric, derived}}."""
+        """Validate a spec into ``{table: {key, ops, numeric, derived}}``."""
         from etl.loaders.db_loader import NATURAL_KEY_CONFIG
         source = dict(_FACT_AGGREGATION_SPEC if spec is None else spec)
         if not source:
@@ -2710,6 +2253,7 @@ class DataConsolidator:
             "last": "last", "latest": "last"}
 
         def _columns(value: Any, table: str, purpose: str) -> Tuple[str, ...]:
+            """Normalise a spec value into a tuple of column names."""
             if value is None:
                 return ()
             if isinstance(value, str):
@@ -2828,6 +2372,7 @@ class DataConsolidator:
                                 spec: Optional[Mapping[str, Any]] = None,
                                 dry_run: bool = False,
                                 stop_on_error: bool = False) -> Dict[str, Any]:
+        """Reassign a fact FK one record at a time, tallying per table."""
         normalized = self._validate_aggregation_spec(spec)
         totals: Dict[str, Dict[str, Any]] = {}
         seen = errors = 0
@@ -2836,7 +2381,7 @@ class DataConsolidator:
             try:
                 result = self._aggregate_and_reassign_bulk(
                     [record], spec=normalized, dry_run=dry_run)
-            except Exception as exc:  
+            except Exception as exc:  # noqa: BLE001
                 errors += 1
                 logger.error("aggregate: record %d failed (%s: %s)",
                              seen, type(exc).__name__, exc)
@@ -2997,26 +2542,16 @@ class DataConsolidator:
                 "rows_written": sum(r["rows_written"] for r in results.values()),
                 "errors": errors, "dry_run": bool(dry_run)}
 
-    # -- A8 ----------------------------------------------------------------
-
     def _match_column(self, table: str, column: str, pack: Any,
                       resolver: ConceptResolver, *, dry_run: bool = False,
                       run_id: Optional[str] = None,
                       settled_values: Optional[Set[str]] = None,
                       context_columns: Tuple[str, ...] = (),
                       stampable: bool = True) -> Dict[str, int]:
-        """Reconcile one column against one pack.
+        """Reconcile one column against one pack, writing ledger and current state.
 
-        Two writes, two jobs, and both happen here:
-
-        * ``fact_resolution_log`` - append-only, one row per value per run,
-          including the alternative candidates. Insert-or-ignore, because a re-run
-          of one run id must not rewrite what that run concluded.
-        * ``fact_concept_map`` - the current decision, upserted, with a WHERE
-          clause that refuses to re-decide a row a human already approved.
-
-        ``stampable=False`` records the decision in ``fact_concept_map`` only: a
-        fact table has no ``concept_id``, and A8c rewrites the value from the map.
+        ``fact_resolution_log`` is append-only per run; ``fact_concept_map`` is
+        upserted and refuses to re-decide a row a human approved.
         """
         from etl.transformers.dimension_index import DimensionKeyIndex, seed_from_rows
 
@@ -3137,12 +2672,8 @@ class DataConsolidator:
         if decision_rows and not dry_run:
             batch_size = max(1, min(MAX_IN_VARS, 500))
 
-            # ---- append-only ledger: every decision, every run ------------
-            # Written first, with DO NOTHING, because it is the history: a re-run
-            # of one run id must not rewrite what that run concluded. This is the
-            # write that was missing - the ledger existed, was documented, and
-            # nothing in the pipeline populated it, so the database could state
-            # the current decision but not the evidence behind it.
+            # Written first with DO NOTHING because it is the history: a re-run of
+            # one run id must not rewrite what that run concluded.
             if run_id:
                 ledger_statement = text("""
                     INSERT INTO fact_resolution_log
@@ -3178,7 +2709,6 @@ class DataConsolidator:
                     "fact_concept_map; the evidence behind it is lost.",
                     ident_table, ident_column, len(decision_rows))
 
-            # ---- current-state projection: the decision in force ----------
             if not write_failed:
                 statement = text("""
                     INSERT INTO fact_concept_map
@@ -3270,7 +2800,6 @@ class DataConsolidator:
                     " (dry run)" if dry_run else "")
         return stats
 
-
     def standardize_vocabularies(self, vocab_dir: Optional[str] = None,
                                  fuzzy_threshold: Optional[float] = None,
                                  dry_run: bool = False, *,
@@ -3333,6 +2862,7 @@ class DataConsolidator:
                                self._distinct_value_count(field))
 
         def _settled(dimension_table: str, name_column: str) -> Set[str]:
+            """Values this run already accepted, so a re-run does not redo them."""
             if not resolved_run_id:
                 return set()
             try:
@@ -3416,6 +2946,7 @@ class DataConsolidator:
         return results
 
     def _vocabulary_size(self, vocabulary_id: Optional[str]) -> int:
+        """How many concepts a vocabulary release holds in ``dim_concept``."""
         if not vocabulary_id:
             return 0
         try:
@@ -3426,17 +2957,13 @@ class DataConsolidator:
             logger.debug("could not count dim_concept for %s: %s", vocabulary_id, exc)
             return 0
 
-    # -- B5 ----------------------------------------------------------------
-
     def consolidate_vocabulary(self, merge_policies: Optional[Dict[str, Any]] = None,
                                *, registry: Optional[VocabularyRegistry] = None,
                                run_id: Optional[str] = None,
                                dry_run: bool = False) -> Dict[str, Any]:
         """Merge every dimension in the catalog, not only packed ones.
 
-        A merge is a property of the schema; driving the work list from
-        registry.merge_policies() left every dimension with no manifest
-        unconsolidated. One table failing rolls back that table and continues.
+        A merge is a property of the schema; one table failing rolls back and continues.
         """
         logger.info("=" * 60)
         logger.info("B5: MERGE DIMENSION ROWS BY CONCEPT%s",
@@ -3558,6 +3085,7 @@ class DataConsolidator:
                    if t in _CANONICAL_FORM_BONUSES]
 
         def score(record) -> int:
+            """Higher is a better canonical row for its group."""
             total = 0
             if getattr(record, "concept_id", None) is not None:
                 total += 1_000_000
@@ -3573,41 +3101,33 @@ class DataConsolidator:
         return max(candidates, key=score)
 
     def _normalize_species_name(self, name):
-        """Deprecated: delegates to normalizers['species_canon']."""
+        """Deprecated: delegates to ``normalizers['species_canon']``."""
         warnings.warn("_normalize_species_name is deprecated; use "
                       "utilities.vocabulary.normalizers.NORMALIZERS['species_canon'].",
                       DeprecationWarning, stacklevel=2)
         return _normalizers.NORMALIZERS["species_canon"](name)
 
-    # -- FK alignment ------------------------------------------------------
-
     def align_all_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """Repair orphans by name before NULLing what is left (not the reverse)."""
+        """NULL fact FKs that name no dimension row, before anything groups by them."""
         logger.info("=" * 60)
         logger.info("ALIGNING ALL FOREIGN KEYS")
         logger.info("=" * 60)
-        results: Dict[str, Any] = {"dimensions": {}, "facts": {}, "summary": {
-            "total_fixed": 0, "tables_processed": 0,
-            "orphans_found": 0, "quarantined": 0}}
         self._clean_dimension_tables(dry_run)
-        fact_alignments = self._align_fact_foreign_keys(dry_run)
-        results["facts"] = fact_alignments
-        results["dimensions"] = self._align_dimension_foreign_keys(dry_run)
-        for _key, stats in fact_alignments.items():
-            if isinstance(stats, dict):
-                results["summary"]["total_fixed"] += stats.get("fixed", 0)
-                results["summary"]["orphans_found"] += stats.get("orphaned", 0)
-                results["summary"]["quarantined"] += stats.get("quarantined", 0)
-                results["summary"]["tables_processed"] += 1
+        dimensions = self._align_dimension_foreign_keys(dry_run)
+
+        summary = {"total_fixed": 0, "tables_processed": 0,
+                   "orphans_found": 0, "quarantined": 0}
+        for stats in dimensions.values():
+            summary["total_fixed"] += int(stats.get("fixed", 0))
+            summary["orphans_found"] += int(stats.get("fixed", 0))
+            summary["tables_processed"] += 1
         logger.info("  Repaired: %d | Orphans: %d | Quarantined: %d | Tables: %d",
-                    results["summary"]["total_fixed"],
-                    results["summary"]["orphans_found"],
-                    results["summary"]["quarantined"],
-                    results["summary"]["tables_processed"])
-        return results
+                    summary["total_fixed"], summary["orphans_found"],
+                    summary["quarantined"], summary["tables_processed"])
+        return {"dimensions": dimensions, "summary": summary}
 
     def _clean_dimension_tables(self, dry_run: bool = False) -> None:
-        """Report (never delete) dimension rows no fact table references."""
+        """Report, never delete, dimension rows no fact table references."""
         inspector = inspect(self.session.bind)
         all_tables = inspector.get_table_names()
         fact_tables = [t for t in all_tables if t.startswith("fact_")]
@@ -3651,324 +3171,85 @@ class DataConsolidator:
                 logger.info("  %d unreferenced record(s) in %s (kept)",
                             len(orphaned), dim_table)
 
-    
     def _align_dimension_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """NULL fact FKs pointing at a dimension key that does not exist.
+        """Clear fact FKs whose dimension key is absent, one anti-join per column.
 
-        A NOT NULL FK cannot be NULLed, so those columns are reported and left
-        alone rather than silently skipped: the row needs a human, and a counter
-        that no caller prints is not a report.
+        A NOT NULL FK cannot be cleared, so those columns are counted and reported.
         """
-        dimension_models = {
-            "dim_location": (DimLocation, "location_id"),
-            "dim_disease": (DimDisease, "disease_code"),
-            "dim_vector": (DimVector, "vector_code"),
-            "dim_insecticide": (DimInsecticide, "insecticide_code"),
-            "dim_source": (DimSource, "source_code"),
-            "dim_identification_method": (DimIdentificationMethod, "method_code"),
-            "dim_resistance_test_type": (DimResistanceTestType, "test_type_code"),
-            "dim_socioeconomic_indicator": (DimSocioeconomicIndicator,
-                                            "indicator_code")}
-        inspector = inspect(self.session.bind)
-        fact_tables = [t for t in inspector.get_table_names()
-                       if t.startswith("fact_")]
         results: Dict[str, Any] = {}
-        for dim_name, (model, pk_col) in dimension_models.items():
-            results[dim_name] = {"fixed": 0, "errors": 0, "skipped_notnull": 0}
-            valid_ids = {getattr(r, pk_col) for r in self.session.query(model).all()
-                         if getattr(r, pk_col) is not None}
-            if not valid_ids:
-                continue
-            valid_list = sorted(valid_ids, key=str)
-            for fact_table in fact_tables:
-                for fk in inspector.get_foreign_keys(fact_table):
-                    if fk.get("referred_table") != dim_name:
-                        continue
-                    constrained = fk.get("constrained_columns") or []
-                    if not constrained:
-                        continue
-                    fk_col = constrained[0]
-                    col_info = {c["name"]: c
-                                for c in inspector.get_columns(fact_table)}
-                    if not col_info.get(fk_col, {}).get("nullable", True):
-                        results[dim_name]["skipped_notnull"] += 1
-                        # Logged, because the previous version only incremented a
-                        # counter that no caller prints. A NOT NULL FK whose
-                        # target is missing cannot be cleared, so the row needs
-                        # attention and the run said nothing about it.
-                        logger.warning(
-                            "    %s.%s: NOT NULL foreign key, so an unresolvable "
-                            "value cannot be cleared; left as-is for manual "
-                            "review.", fact_table, fk_col)
-                        continue
-                    try:
-                        invalid = 0
-                        for start in range(0, len(valid_list), MAX_IN_VARS):
-                            chunk = valid_list[start:start + MAX_IN_VARS]
-                            stmt = text(
-                                f"SELECT COUNT(*) FROM {fact_table} WHERE {fk_col} "
-                                f"IS NOT NULL AND {fk_col} NOT IN :vals"
-                            ).bindparams(bindparam("vals", expanding=True))
-                            invalid += int(self.session.execute(
-                                stmt, {"vals": chunk}).scalar() or 0)
-                        if not invalid:
-                            continue
-                        if dry_run:
-                            results[dim_name]["fixed"] += invalid
-                            continue
-                        for start in range(0, len(valid_list), MAX_IN_VARS):
-                            chunk = valid_list[start:start + MAX_IN_VARS]
-                            stmt = text(
-                                f"UPDATE {fact_table} SET {fk_col} = NULL "
-                                f"WHERE {fk_col} IS NOT NULL AND {fk_col} NOT IN :vals"
-                            ).bindparams(bindparam("vals", expanding=True))
-                            self.session.execute(stmt, {"vals": chunk})
-                        results[dim_name]["fixed"] += invalid
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("    Could not align %s.%s: %s",
-                                       fact_table, fk_col, exc)
-                        results[dim_name]["errors"] += 1
-            if not dry_run:
-                self.session.commit()
-        return results
-
-
-    def _align_fact_foreign_keys(self, dry_run: bool = False) -> Dict[str, Any]:
-        """LEGACY: repair orphans by LIKE, then NULL or quarantine the rest.
-
-        Keyed per (table, column); a non-nullable FK moves unresolvable rows to
-        _quarantine_<table>, which is a real DELETE, logged loudly.
-        """
-        from collections import Counter
-
-        _warn_legacy_alignment()
-        configs = [
-            ("fact_vector_observation", "location_id", "dim_location", "location_id", "name"),
-            ("fact_vector_observation", "vector_code", "dim_vector", "vector_code", "species_name"),
-            ("fact_vector_observation", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_disease_case", "location_id", "dim_location", "location_id", "name"),
-            ("fact_disease_case", "disease_code", "dim_disease", "disease_code", "disease_name"),
-            ("fact_disease_case", "identification_method_code", "dim_identification_method", "method_code", "method_name"),
-            ("fact_disease_case", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_insecticide_resistance", "location_id", "dim_location", "location_id", "name"),
-            ("fact_insecticide_resistance", "vector_code", "dim_vector", "vector_code", "species_name"),
-            ("fact_insecticide_resistance", "insecticide_code", "dim_insecticide", "insecticide_code", "insecticide_name"),
-            ("fact_insecticide_resistance", "test_type_code", "dim_resistance_test_type", "test_type_code", "test_type_name"),
-            ("fact_insecticide_resistance", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_bionomics", "location_id", "dim_location", "location_id", "name"),
-            ("fact_bionomics", "vector_code", "dim_vector", "vector_code", "species_name"),
-            ("fact_bionomics", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_intervention", "location_id", "dim_location", "location_id", "name"),
-            ("fact_intervention", "target_disease_code", "dim_disease", "disease_code", "disease_name"),
-            ("fact_intervention", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_socioeconomic_condition", "location_id", "dim_location", "location_id", "name"),
-            ("fact_socioeconomic_condition", "indicator_code", "dim_socioeconomic_indicator", "indicator_code", "indicator_name"),
-            ("fact_socioeconomic_condition", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_health_facility", "location_id", "dim_location", "location_id", "name"),
-            ("fact_health_facility", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_disease_burden", "location_id", "dim_location", "location_id", "name"),
-            ("fact_disease_burden", "disease_code", "dim_disease", "disease_code", "disease_name"),
-            ("fact_disease_burden", "source_code", "dim_source", "source_code", "source_name"),
-            ("fact_environment", "location_id", "dim_location", "location_id", "name"),
-            ("fact_environment", "source_code", "dim_source", "source_code", "source_name"),
-        ]
-
-        results: Dict[str, Dict[str, Any]] = {}
-        seen: Set[Tuple[str, str]] = set()
-        inspector = inspect(self.session.bind)
-
-        for table_name, fk_col, dim_table, pk_col, name_col in configs:
-            if (table_name, fk_col) in seen:
-                continue
-            seen.add((table_name, fk_col))
-            key = f"{table_name}.{fk_col}"
-            results[key] = {"table": table_name, "column": fk_col,
-                            "orphaned": 0, "fixed": 0, "still_orphaned": 0,
-                            "quarantined": 0, "details": []}
+        for dim_table in sorted(_ALIGNED_DIMENSIONS):
+            model, pk_name = _ALIGNED_DIMENSIONS[dim_table]
+            stats: Dict[str, int] = {"fixed": 0, "errors": 0,
+                                     "skipped_notnull": 0}
+            results[dim_table] = stats
             try:
-                valid_values = {row[0] for row in self.session.execute(
-                    text(f"SELECT {pk_col} FROM {dim_table}")).fetchall()
-                    if row[0] is not None}
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("    Could not get valid values from %s: %s",
-                               dim_table, exc)
-                continue
-            if not valid_values:
+                safe_dim = require_identifier(dim_table, what="table name")
+                safe_pk = require_identifier(pk_name, what="column name")
+            except ValueError as exc:
+                logger.error("  %s: %s", dim_table, exc)
+                stats["errors"] += 1
                 continue
 
-            valid_list = sorted(valid_values, key=str)
-            orphan_counter: Counter = Counter()
-            query_error = False
-            for start in range(0, len(valid_list), MAX_IN_VARS):
-                chunk = valid_list[start:start + MAX_IN_VARS]
-                stmt = text(
-                    f"SELECT {fk_col}, COUNT(*) FROM {table_name} "
-                    f"WHERE {fk_col} IS NOT NULL AND {fk_col} NOT IN :vals "
-                    f"GROUP BY {fk_col}").bindparams(bindparam("vals", expanding=True))
+            for fact_table, fk_column in _dimension_fact_map(model):
+                fact_object = Base.metadata.tables.get(fact_table)
+                if fact_object is None:
+                    continue
                 try:
-                    for value, count in self.session.execute(
-                            stmt, {"vals": chunk}).fetchall():
-                        orphan_counter[value] += count
+                    safe_fact = require_identifier(fact_table, what="table name")
+                    safe_fk = require_identifier(fk_column, what="column name")
+                except ValueError as exc:
+                    logger.warning("  %s: %s", dim_table, exc)
+                    stats["errors"] += 1
+                    continue
+
+                predicate = _orphan_predicate(safe_fact, safe_fk, safe_dim,
+                                              safe_pk)
+                try:
+                    orphans = int(self.session.execute(text(
+                        f"SELECT COUNT(*) FROM {safe_fact} f WHERE {predicate}"
+                    )).scalar() or 0)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("    Could not query orphans for %s.%s: %s",
-                                   table_name, fk_col, exc)
-                    query_error = True
-                    break
-            if query_error or not orphan_counter:
-                continue
-
-            candidates = list(orphan_counter.keys())
-            truly_orphan: Counter = Counter()
-            for start in range(0, len(candidates), MAX_IN_VARS):
-                chunk = candidates[start:start + MAX_IN_VARS]
-                present = {row[0] for row in self.session.execute(
-                    text(f"SELECT {pk_col} FROM {dim_table} WHERE {pk_col} IN :vals")
-                    .bindparams(bindparam("vals", expanding=True)),
-                    {"vals": chunk}).fetchall()}
-                for value in chunk:
-                    if value not in present:
-                        truly_orphan[value] = orphan_counter[value]
-            orphan_counter = truly_orphan
-            if not orphan_counter:
-                continue
-
-            orphaned_values = list(orphan_counter.keys())
-            results[key]["orphaned"] = sum(orphan_counter.values())
-            results[key]["details"] = [{"value": v, "count": orphan_counter[v]}
-                                       for v in orphaned_values[:100]]
-            if dry_run:
-                continue
-
-            pk_cols_list = inspector.get_pk_constraint(table_name).get(
-                "constrained_columns", [])
-            single_pk = pk_cols_list[0] if len(pk_cols_list) == 1 else None
-            fixed_values: List[Any] = []
-            remaining_values: List[Any] = []
-
-            for orphan_val in orphaned_values:
-                new_val = None
-                if name_col and isinstance(orphan_val, str):
-                    try:
-                        match = self.session.execute(text(
-                            f"SELECT {pk_col} FROM {dim_table} "
-                            f"WHERE LOWER({name_col}) LIKE LOWER(:pat) LIMIT 1"
-                        ), {"pat": f"%{orphan_val}%"}).first()
-                        if match:
-                            new_val = match[0]
-                    except Exception:  # noqa: BLE001
-                        pass
-                if new_val is None:
-                    remaining_values.append(orphan_val)
+                    logger.warning("  %s.%s: could not count orphans: %s",
+                                   safe_fact, safe_fk, exc)
+                    stats["errors"] += 1
                     continue
-                try:
-                    self.session.execute(text(
-                        f"UPDATE {table_name} SET {fk_col} = :new_val "
-                        f"WHERE {fk_col} = :old_val"
-                    ), {"new_val": new_val, "old_val": orphan_val})
-                    self.session.commit()
-                    fixed_values.append(orphan_val)
+                if not orphans:
                     continue
-                except IntegrityError:
-                    self.session.rollback()
 
-                if single_pk is None:
-                    remaining_values.append(orphan_val)
-                    continue
-                try:
-                    row_ids = [r[0] for r in self.session.execute(text(
-                        f"SELECT {single_pk} FROM {table_name} "
-                        f"WHERE {fk_col} = :old_val"),
-                        {"old_val": orphan_val}).fetchall()]
-                except Exception:  # noqa: BLE001
-                    remaining_values.append(orphan_val)
-                    continue
-                still_orphan = False
-                for row_id in row_ids:
-                    try:
-                        self.session.execute(text(
-                            f"UPDATE {table_name} SET {fk_col} = :new_val "
-                            f"WHERE {single_pk} = :row_id"),
-                            {"new_val": new_val, "row_id": row_id})
-                        self.session.commit()
-                    except IntegrityError:
-                        self.session.rollback()
-                        still_orphan = True
-                        break
-                if still_orphan:
-                    remaining_values.append(orphan_val)
-                else:
-                    fixed_values.append(orphan_val)
-
-            col_info = {c["name"]: c for c in inspector.get_columns(table_name)}
-            fk_nullable = col_info.get(fk_col, {}).get("nullable", True)
-            if remaining_values:
-                if fk_nullable:
-                    for start in range(0, len(remaining_values), MAX_IN_VARS):
-                        chunk = remaining_values[start:start + MAX_IN_VARS]
-                        stmt = text(
-                            f"UPDATE {table_name} SET {fk_col} = NULL "
-                            f"WHERE {fk_col} IN :vals"
-                        ).bindparams(bindparam("vals", expanding=True))
-                        self.session.execute(stmt, {"vals": chunk})
-                    logger.warning("    %s.%s: NULLed %d unresolvable FK value(s)",
-                                   table_name, fk_col, len(remaining_values))
-                else:
-                    qname = f"_quarantine_{table_name}"
-                    self.session.execute(text(
-                        f"CREATE TABLE IF NOT EXISTS {qname} AS SELECT *, "
-                        f"CAST(NULL AS TEXT) AS _orphan_fk_col, "
-                        f"CAST(NULL AS TEXT) AS _orphan_value, "
-                        f"CAST(NULL AS TIMESTAMP) AS _quarantined_at "
-                        f"FROM {table_name} WHERE 1=0"))
-                    moved = 0
-                    for start in range(0, len(remaining_values), MAX_IN_VARS):
-                        chunk = remaining_values[start:start + MAX_IN_VARS]
-                        self.session.execute(text(
-                            f"INSERT INTO {qname} SELECT *, :fk_col_name, "
-                            f"CAST({fk_col} AS TEXT), CURRENT_TIMESTAMP "
-                            f"FROM {table_name} WHERE {fk_col} IN :vals"
-                        ).bindparams(bindparam("vals", expanding=True)),
-                        {"vals": chunk, "fk_col_name": fk_col})
-                        result = self.session.execute(text(
-                            f"DELETE FROM {table_name} WHERE {fk_col} IN :vals"
-                        ).bindparams(bindparam("vals", expanding=True)),
-                        {"vals": chunk})
-                        moved += int(result.rowcount or 0)
-                    results[key]["quarantined"] = moved
+                column = fact_object.columns.get(fk_column)
+                if column is None or not column.nullable:
+                    stats["skipped_notnull"] += 1
                     logger.warning(
-                        "    %s.%s: MOVED %d row(s) into %s (NOT NULL FK that does "
-                        "not resolve). Restore with INSERT INTO %s SELECT ... FROM "
-                        "%s.", table_name, fk_col, moved, qname, table_name, qname)
-                self.session.commit()
+                        "    %s.%s: %d unresolvable value(s) in a NOT NULL foreign "
+                        "key; it cannot be cleared and is left for manual review.",
+                        safe_fact, safe_fk, orphans)
+                    continue
+                if dry_run:
+                    stats["fixed"] += orphans
+                    continue
 
-            results[key]["fixed"] = sum(orphan_counter[v] for v in fixed_values)
-            remaining_orphans = 0
-            for start in range(0, len(valid_list), MAX_IN_VARS):
-                chunk = valid_list[start:start + MAX_IN_VARS]
-                stmt = text(
-                    f"SELECT COUNT(*) FROM {table_name} "
-                    f"WHERE {fk_col} IS NOT NULL AND {fk_col} NOT IN :vals"
-                ).bindparams(bindparam("vals", expanding=True))
-                remaining_orphans += int(self.session.execute(
-                    stmt, {"vals": chunk}).scalar() or 0)
-            results[key]["still_orphaned"] = remaining_orphans
-            if remaining_orphans:
-                logger.error("    %s.%s: %d row(s) still carry an unresolvable FK; "
-                             "manual review.", table_name, fk_col, remaining_orphans)
-            else:
-                logger.info("    %s.%s: repair complete (%d fixed, %d orphaned)",
-                            table_name, fk_col, results[key]["fixed"],
-                            results[key]["orphaned"])
+                try:
+                    result = self.session.execute(text(
+                        f"UPDATE {safe_fact} AS f SET {safe_fk} = NULL "
+                        f"WHERE {predicate}"))
+                    stats["fixed"] += int(result.rowcount or 0)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("    Could not align %s.%s: %s",
+                                   safe_fact, safe_fk, exc)
+                    stats["errors"] += 1
+
+            if not dry_run:
+                try:
+                    self.session.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("  %s: the alignment commit failed: %s",
+                                 dim_table, exc)
+                    self.session.rollback()
+                    stats["errors"] += 1
         return results
-
-    # -- audit helpers -----------------------------------------------------
 
     def validate_country_codes(self) -> Dict[str, Any]:
-        """Country coverage, per-code counts, and code/name consistency.
-
-        A non-zero name_mismatches after A6a means something wrote the pair
-        directly: country_name is no longer the canonical label for its code.
-        """
+        """Country coverage, per-code counts, and code/name consistency."""
         _build_country_tables()
         try:
             rows = self.session.execute(text(
@@ -4016,6 +3297,7 @@ class DataConsolidator:
                 "name_mismatch_samples": mismatch_samples}
 
     def _location_vocabulary_id(self, registry: Any = None) -> Optional[str]:
+        """The vocabulary id governing ``dim_location.name``, or None."""
         loaded = _load_registry(registry if registry is not None
                                 else getattr(self, "registry", None))
         if loaded is None:
@@ -4027,6 +3309,7 @@ class DataConsolidator:
             return None
 
     def _check_hierarchy(self, registry: Any = None) -> Dict[str, Any]:
+        """How many non-administrative locations carry a parent."""
         pack = None
         loaded = _load_registry(registry if registry is not None
                                 else getattr(self, "registry", None))
@@ -4049,6 +3332,7 @@ class DataConsolidator:
         return {"placed": placed, "total_non_admin": total}
 
     def _check_remaining_orphans(self) -> Dict[str, int]:
+        """FK columns that still name a deleted dimension key, with counts."""
         orphans: Dict[str, int] = {}
         for model_class in _dimension_models():
             table_name = model_class.__tablename__
@@ -4073,11 +3357,7 @@ class DataConsolidator:
         return orphans
 
     def _check_concept_conflicts(self, vocabulary_id: Optional[str]) -> Dict[str, int]:
-        """concept_id vs the concept its own standard_code names.
-
-        The check this replaces compared standard_code to location_code, which are
-        never equal, so it flagged every stamped row and measured nothing.
-        """
+        """``concept_id`` vs the concept its own ``standard_code`` names."""
         result = {"stamped": 0, "conflicting": 0, "dangling": 0}
         if not vocabulary_id:
             return result
@@ -4099,9 +3379,93 @@ class DataConsolidator:
             {"v": vocabulary_id})
         return result
 
-    # -- burden / resistance ----------------------------------------------
+    def expand_burden_to_daily(
+        self,
+        force: Optional[bool] = None,
+        seed: Optional[int] = None,
+        base_variation: Optional[float] = None,
+        *,
+        default_population: Optional[float] = None,
+        population_indicator: Optional[str] = None,
+        national_allocation: Optional[bool] = None,
+        population_divisor: Optional[float] = None,
+        rate_scale: Optional[str] = None,
+        prefer: Optional[str] = None,
+        group_by_level: Optional[str] = None,
+        locations: Optional[Iterable[int]] = None,
+        years: Optional[Iterable[int]] = None,
+        limit: Optional[int] = None,
+        allow_mixed_grain: Optional[bool] = None,
+        dry_run: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Expand yearly burden into daily cases. See ``BurdenExpander.expand``.
+
+        Every argument is a tri-state override: ``None`` defers to the pack.
+        """
+        return BurdenExpander(
+            self.session,
+            registry=getattr(self, "registry", None),
+            run_id=getattr(self, "run_id", None),
+        ).expand(
+            force=force, seed=seed, base_variation=base_variation,
+            default_population=default_population,
+            population_indicator=population_indicator,
+            national_allocation=national_allocation,
+            population_divisor=population_divisor, rate_scale=rate_scale,
+            prefer=prefer, group_by_level=group_by_level,
+            locations=locations, years=years, limit=limit,
+            allow_mixed_grain=allow_mixed_grain, dry_run=dry_run,
+            run_id=run_id)
+
+    def _burden_locations_per_country(self,
+                                     index: "_PopulationIndex") -> Dict[str, int]:
+        """Compatibility delegate for ``scripts/fix_cases.py --check``."""
+        return BurdenExpander(self.session).burden_locations_per_country(index)
+
+    def _ancestor_map(self, target_level: str, *, grid_level: str = "grid",
+                      max_hops: int = 8) -> Dict[int, int]:
+        """Compatibility delegate for ``scripts/fix_cases.py --check``."""
+        return BurdenExpander(self.session).ancestor_map(
+            target_level, grid_level=grid_level, max_hops=max_hops)
+
+    def _location_stable_keys(self) -> Dict[int, int]:
+        """Compatibility delegate: seed keys for the daily generator."""
+        return BurdenExpander(self.session).location_stable_keys()
+
+    def _expected_admin_levels(self,
+                               case_location_of: Mapping[int, int]) -> Set[str]:
+        """Compatibility delegate: the admin levels a write grain produces."""
+        return BurdenExpander(self.session).expected_admin_levels(case_location_of)
+
+    def _guard_write_grain(self, first_year: int, last_year: int,
+                           expected_levels: Set[str], grain_label: str,
+                           *, force: bool, allow_mixed_grain: bool) -> int:
+        """Compatibility delegate: refuse or purge a mixed-grain write."""
+        return BurdenExpander(self.session).guard_write_grain(
+            first_year, last_year, expected_levels, grain_label,
+            force=force, allow_mixed_grain=allow_mixed_grain)
+
+    def _record_expansion_parameters(
+        self, run_id: Optional[str], stats: Mapping[str, Any],
+        kernel: "_BurdenKernel", policy: "_ExpansionPolicy", prefer: str,
+        rate_scale: str, national_allocation: bool,
+        population_divisor: Optional[float], population_indicator: str,
+        default_population: Optional[float], seed: int,
+        group_by_level: Optional[str],
+    ) -> None:
+        """Compatibility delegate: write the expansion policy to run_manifest."""
+        BurdenExpander(self.session).record_parameters(
+            run_id, stats, kernel, policy, prefer, rate_scale,
+            national_allocation, population_divisor, population_indicator,
+            default_population, seed, group_by_level)
+
+    def _ensure_dim_time(self, year: int) -> int:
+        """Compatibility delegate: add the missing ``dim_time`` rows for ``year``."""
+        return ensure_dim_time_rows(self.session, int(year))
 
     def fix_orphaned_burden_records(self) -> int:
+        """Re-point burden rows whose ``location_id`` names no location."""
         logger.info("=" * 60)
         logger.info("FIXING ORPHANED BURDEN RECORDS")
         logger.info("=" * 60)
@@ -4157,773 +3521,6 @@ class DataConsolidator:
         self.session.commit()
         logger.info("Repaired %d orphan location group(s)", fixed)
         return fixed
-
-
-    def expand_burden_to_daily(
-        self,
-        force: bool = False,
-        seed: int = 42,
-        base_variation: Optional[float] = None,
-        *,
-        default_population: Optional[float] = None,
-        population_indicator: str = "SP.POP.TOTL",
-        national_allocation: bool = False,
-        population_divisor: Optional[float] = None,
-        rate_scale: str = "per_100k",
-        prefer: str = _BURDEN_MEASURE_CASES_MEAN,
-        group_by_level: Optional[str] = None,
-        locations: Optional[Iterable[int]] = None,
-        years: Optional[Iterable[int]] = None,
-        limit: Optional[int] = None,
-        allow_mixed_grain: bool = False,
-        run_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Expand yearly burden into daily cases summing to each annual total.
-
-        A record carries one of two measures, or both:
-
-        ``cases_mean``
-            An absolute case count for the cell-year. Self-contained: no
-            population, no allocation, no unit assumption.
-        ``incidence_rate``
-            A rate whose scale the schema does not document. Converted with
-            ``rate / _RATE_SCALES[rate_scale] * population``.
-
-        **``prefer`` decides which is used when both are present**, and it
-        defaults to ``cases_mean``. Preferring the rate discards a measured
-        absolute count in favour of an assumed population denominator, which is
-        what the previous ordering did: every record carrying both was routed to
-        the rate branch, found no denominator, and was counted in
-        ``no_population``.
-
-        Every choice that changes a stored number is recorded - measure
-        preference, rate scale, allocation and divisor, write grain, seed, kernel
-        origin and the kernel's own weights - in
-        ``run_manifest.parameters.expansion`` (see :mod:`utilities.run_manifest`).
-        A deposited database can therefore be attributed to a stated policy, and
-        two runs compared without reading code.
-
-        Expanded rows are marked twice: ``identification_method_code =
-        'ESTIMATE'`` and ``case_status = 'estimated'``. The second is new.
-        Writing ``'confirmed'`` asserted that a modelled figure was an observed
-        case, and any analysis filtering on confirmed cases would have counted
-        synthetic rows as observations.
-
-        Parameters
-        ----------
-        base_variation : float, optional
-            ``None`` uses the allocation kernel's value, so a caller cannot
-            re-introduce a hard-coded sigma by omitting the argument.
-        allow_mixed_grain : bool
-            Refuse to add a second write grain to the same years unless this is
-            set. Two grains coexist harmlessly at the storage level - the case
-            keys differ by ``location_id``, so the unique constraint never fires -
-            and then every downstream sum double-counts by the grouping factor,
-            silently and unrecoverably.
-        run_id : str, optional
-            For the manifest. Falls back to ``self.run_id``.
-
-        Returns
-        -------
-        dict
-            ``inserted``, ``already_present``, ``skipped``, ``no_population``,
-            ``errors`` - the five keys the CLI has always read - plus ``records``,
-            ``groups``, ``merged``, ``zero``, ``years_prepared``, ``tiers``,
-            ``basis``, ``grain``, ``grain_targets``, ``unparented_cells``,
-            ``kernel`` and ``purged``.
-
-        Notes
-        -----
-        Records that share one ``(location, year, disease, source)`` are **summed
-        into one series before writing**. ``uq_fact_case_natural`` has no pathogen
-        column, so two burden rows for one disease in one place and year would
-        otherwise expand to the same 365 keys and the second insert would violate
-        the constraint.
-
-        The delete window includes ``source_code``: it is part of the case key, so
-        clearing a window without it would delete another source's rows.
-
-        ``_ensure_dim_time`` runs once per **year**, not once per record.
-        """
-        if rate_scale not in _RATE_SCALES:
-            raise ValueError(
-                f"rate_scale must be one of {sorted(_RATE_SCALES)}, got "
-                f"{rate_scale!r}")
-        if prefer not in _BURDEN_MEASURE_PREFERENCES:
-            raise ValueError(
-                f"prefer must be one of {list(_BURDEN_MEASURE_PREFERENCES)}, got "
-                f"{prefer!r}")
-        scale = float(_RATE_SCALES[rate_scale])
-        effective_run_id = run_id or getattr(self, "run_id", None)
-
-        logger.info("=" * 60)
-        logger.info("EXPANDING BURDEN DATA TO DAILY RECORDS")
-        logger.info("  measure: %s (rate scale %r)", prefer, rate_scale)
-        logger.info("=" * 60)
-
-        try:
-            self.session.execute(text("SELECT case_count FROM fact_disease_case "
-                                      "LIMIT 1"))
-        except Exception as exc:  # noqa: BLE001
-            logger.error("case_count column missing; run `alembic upgrade head`.")
-            raise RuntimeError("Missing case_count column; run migrations first.") \
-                from exc
-
-        self.session.execute(text(
-            "INSERT INTO dim_identification_method "
-            "(method_code, method_name, method_type) "
-            "VALUES ('ESTIMATE', 'Estimated', 'modeled') "
-            "ON CONFLICT (method_code) DO NOTHING"))
-        self.session.commit()
-
-        empty: Dict[str, Any] = {
-            "inserted": 0, "already_present": 0, "skipped": 0,
-            "no_population": 0, "errors": 0, "records": 0, "groups": 0,
-            "merged": 0, "zero": 0, "years_prepared": 0, "tiers": {},
-            "basis": {}, "grain": "grid cell", "grain_targets": 0,
-            "unparented_cells": 0, "kernel": FLAT_BURDEN_KERNEL.origin,
-            "purged": 0}
-
-        if not self._scalar_or_zero("SELECT COUNT(*) FROM fact_disease_burden"):
-            logger.info("No burden records found; nothing to expand.")
-            return empty
-
-        # ---- allocation policy -------------------------------------------
-        kernel = load_burden_kernel(getattr(self, "registry", None))
-        if kernel.is_flat:
-            logger.warning(
-                "  the daily series is allocated UNIFORMLY: no seasonal policy "
-                "pack is in force. A seasonal pattern later recovered from "
-                "fact_disease_case under this run does not exist in the data.")
-        elif not kernel.source:
-            logger.warning(
-                "  the allocation kernel %s cites no source. A seasonal pattern "
-                "relies on these weights, so a seasonal claim needs the pack to "
-                "name where they came from.", kernel.origin)
-
-        # ---- denominators ------------------------------------------------
-        index = _PopulationIndex(self.session, population_indicator).load()
-        divisors = (self._burden_locations_per_country(index)
-                    if national_allocation else {})
-        if national_allocation:
-            if divisors:
-                logger.warning(
-                    "  national allocation is ON: a location with no series of its "
-                    "own uses its country's population divided by the number of "
-                    "burden locations in that country (%s). Totals stay correct; "
-                    "the spatial pattern is uniform, not measured.",
-                    ", ".join(f"{c}={n}" for c, n in sorted(divisors.items())))
-            else:
-                logger.warning("  national allocation is ON but no country "
-                               "population series could be mapped; it will not "
-                               "apply.")
-
-        def _divisor_for(location_id: Any) -> float:
-            if population_divisor is not None:
-                return max(1e-9, float(population_divisor))
-            country = index.country_for(location_id) or "(unknown)"
-            return float(max(1, divisors.get(country, 1)))
-
-        # ---- write grain -------------------------------------------------
-        case_location_of: Dict[int, int] = {}
-        grain_label = "grid cell"
-        if group_by_level:
-            requested = str(group_by_level).strip().lower()
-            if requested in ("", "none", "cell", "grid"):
-                pass
-            elif requested in ("parent", "parent_location", "one-hop"):
-                for location_id, parent_location_id in self.session.execute(text(
-                    "SELECT location_id, parent_location_id FROM dim_location "
-                    "ORDER BY location_id")).fetchall():
-                    if location_id is not None and parent_location_id is not None:
-                        case_location_of[int(location_id)] = int(parent_location_id)
-                grain_label = "each cell's parent_location_id"
-            else:
-                case_location_of = self._ancestor_map(requested)
-                grain_label = f"admin_level={requested}"
-            if case_location_of:
-                logger.info("  writing at %s: %d cell(s) map to %d target(s)",
-                            grain_label, len(case_location_of),
-                            len(set(case_location_of.values())))
-            elif requested not in ("", "none", "cell", "grid"):
-                logger.warning(
-                    "  grouping to %r mapped no grid cell; writing per cell "
-                    "instead.", requested)
-
-        # ---- which records ----------------------------------------------
-        where: List[str] = [
-            "((incidence_rate IS NOT NULL AND incidence_rate > 0) "
-            " OR (cases_mean     IS NOT NULL AND cases_mean     > 0))"]
-        params: Dict[str, Any] = {}
-
-        wanted_locations = sorted({int(v) for v in (locations or [])
-                                   if v is not None})
-        if wanted_locations:
-            placeholders = ", ".join(f":loc{i}" for i in range(len(wanted_locations)))
-            where.append(f"location_id IN ({placeholders})")
-            params.update({f"loc{i}": value
-                           for i, value in enumerate(wanted_locations)})
-
-        wanted_years = sorted({int(v) for v in (years or []) if v is not None})
-        if wanted_years:
-            placeholders = ", ".join(f":yr{i}" for i in range(len(wanted_years)))
-            where.append(f"year IN ({placeholders})")
-            params.update({f"yr{i}": value for i, value in enumerate(wanted_years)})
-
-        sql = ("SELECT burden_id, location_id, year, disease_code, source_code, "
-               "       incidence_rate, cases_mean FROM fact_disease_burden "
-               f"WHERE {' AND '.join(where)} ORDER BY burden_id")
-        if limit is not None:
-            sql += " LIMIT :lim"
-            params["lim"] = max(1, int(limit))
-
-        burden_records = self.session.execute(text(sql), params).fetchall()
-        if not burden_records:
-            logger.warning("No burden records matched the selected filters.")
-            return empty
-
-        selected_years = sorted({int(row[2]) for row in burden_records
-                                 if row[2] is not None})
-        first_year = selected_years[0] if selected_years else None
-        last_year = selected_years[-1] if selected_years else None
-
-        # ---- refuse to mix grains in the same years ----------------------
-        purged = 0
-        if first_year is not None:
-            purged = self._guard_write_grain(
-                first_year, last_year,
-                self._expected_admin_levels(case_location_of), grain_label,
-                force=force, allow_mixed_grain=allow_mixed_grain)
-
-        # ---- annual totals, grouped by case key -------------------------
-        annual_by_key: Dict[Tuple[int, int, str, str], float] = {}
-        tier_counts: Dict[str, int] = {}
-        basis_counts: Dict[str, int] = {}
-        prepared_years: Set[int] = set()
-        unparented_cells: Set[int] = set()
-        skipped = no_population = 0
-        failures = 0
-        logged_skips = 0
-        logged_allocations = 0
-        location_keys = self._location_stable_keys()
-
-        def _prepare_year(year_value: int) -> bool:
-            if year_value in prepared_years:
-                return True
-            try:
-                self._ensure_dim_time(int(year_value))
-            except Exception as exc:  # noqa: BLE001
-                logger.error("  could not extend dim_time to %s: %s",
-                             year_value, exc)
-                return False
-            prepared_years.add(int(year_value))
-            return True
-
-        for (burden_id, location_id, year, disease_code,
-             source_code, incidence_rate, cases_mean) in burden_records:
-            if location_id is None or year is None or disease_code is None:
-                skipped += 1
-                continue
-            try:
-                location_key, year_key = int(location_id), int(year)
-            except (TypeError, ValueError):
-                skipped += 1
-                continue
-
-            rate_value = _positive(incidence_rate)
-            mean_value = _positive(cases_mean)
-
-            # Which measure this record uses. `prefer` decides when both exist;
-            # the loser is not used and is not an error.
-            if prefer == _BURDEN_MEASURE_INCIDENCE_RATE:
-                use_rate = rate_value is not None
-                use_mean = (not use_rate) and mean_value is not None
-            else:
-                use_mean = mean_value is not None
-                use_rate = (not use_mean) and rate_value is not None
-
-            if not use_rate and not use_mean:
-                skipped += 1
-                continue
-
-            population: Optional[float] = None
-            tier = _BURDEN_MEASURE_CASES_MEAN if use_mean else "none"
-
-            if use_rate:
-                # The denominator is resolved ONLY for a rate record. This is the
-                # ordering the previous version got wrong: it resolved (or skipped
-                # resolving) before deciding the measure, so a record carrying both
-                # ended up in the rate branch with no population.
-                hit = index.resolve(location_key, year_key,
-                                    allow_country=national_allocation)
-                if hit is not None:
-                    population, tier = hit.value, hit.tier
-                    if hit.is_country_level:
-                        divisor = _divisor_for(location_key)
-                        population = population / divisor
-                        if logged_allocations < _BURDEN_LOG_SAMPLE:
-                            logged_allocations += 1
-                            logger.info(
-                                "  allocation: burden_id %s (location=%s, year=%s) "
-                                "uses %s population %s / %s = %.0f",
-                                burden_id, location_key, year_key, hit.tier,
-                                f"{hit.value:,.0f}", f"{divisor:,.0f}", population)
-                elif default_population is not None:
-                    population, tier = float(default_population), "default"
-
-                if population is None or population <= 0:
-                    no_population += 1
-                    if logged_skips < _BURDEN_LOG_SAMPLE:
-                        logged_skips += 1
-                        logger.info(
-                            "  skipping burden_id %s (location=%s, year=%s, "
-                            "disease=%s): no %r row for this location and no "
-                            "country series%s.",
-                            burden_id, location_key, year_key, disease_code,
-                            population_indicator,
-                            "" if national_allocation
-                            else " (national allocation is OFF)")
-                    continue
-                annual_cases = (rate_value / scale) * float(population)
-            else:
-                annual_cases = float(mean_value)
-
-            if not _prepare_year(year_key):
-                failures += 1
-                continue
-
-            case_location = case_location_of.get(location_key, location_key)
-            if case_location == location_key and case_location_of:
-                unparented_cells.add(location_key)
-
-            key = (case_location, year_key, str(disease_code),
-                   str(source_code or ""))
-            annual_by_key[key] = annual_by_key.get(key, 0.0) + annual_cases
-            tier_counts[tier] = tier_counts.get(tier, 0) + 1
-            basis = (_BURDEN_MEASURE_CASES_MEAN if use_mean
-                     else _BURDEN_MEASURE_INCIDENCE_RATE)
-            basis_counts[basis] = basis_counts.get(basis, 0) + 1
-
-        merged = len(burden_records) - skipped - no_population - len(annual_by_key)
-        if merged > 0:
-            logger.info(
-                "  %d burden record(s) shared a case key with another and were "
-                "SUMMED: uq_fact_case_natural has no pathogen column, so one "
-                "daily series per (location, year, disease, source) is the only "
-                "shape fact_disease_case can hold.", merged)
-
-        # ---- write -------------------------------------------------------
-        stats: Dict[str, Any] = {
-            "inserted": 0, "already_present": 0, "skipped": skipped,
-            "no_population": no_population, "errors": failures,
-            "records": len(burden_records), "groups": len(annual_by_key),
-            "merged": max(0, merged), "zero": 0,
-            "years_prepared": len(prepared_years), "tiers": tier_counts,
-            "basis": basis_counts, "grain": grain_label,
-            "grain_targets": len(set(case_location_of.values())),
-            "unparented_cells": len(unparented_cells),
-            "kernel": kernel.origin, "purged": purged}
-
-        if not annual_by_key:
-            logger.warning(
-                "Nothing to expand: %d record(s) examined, %d had no denominator, "
-                "%d were skipped for a missing location/year/disease.",
-                len(burden_records), no_population, skipped)
-            self._record_expansion_parameters(
-                effective_run_id, stats, kernel, prefer, rate_scale,
-                national_allocation, population_divisor, population_indicator,
-                default_population, seed, group_by_level)
-            return stats
-
-        statement = text(
-            "INSERT INTO fact_disease_case ("
-            "  location_id, date_id_onset, date_id_reported, disease_code, "
-            "  identification_method_code, source_code, case_status, host_type, "
-            "  age_group, sex, outcome, case_count"
-            ") VALUES ("
-            "  :loc_id, :date_id, :date_id, :disease, 'ESTIMATE', :src_code, "
-            "  'estimated', 'human', '', '', 'unknown', :case_count)")
-
-        window_where = (
-            "WHERE location_id = :loc_id "
-            "AND date_id_onset >= :start_date AND date_id_onset <= :end_date "
-            "AND disease_code = :disease "
-            "AND identification_method_code = 'ESTIMATE' "
-            "AND ((:src_code IS NULL AND source_code IS NULL) "
-            "     OR source_code = :src_code)")
-        window_sql = text(f"DELETE FROM fact_disease_case {window_where}")
-        count_sql = text(f"SELECT COUNT(*) FROM fact_disease_case {window_where}")
-
-        for key in sorted(annual_by_key):
-            location_key, year_key, disease_code, source_code = key
-            annual_cases = annual_by_key[key]
-
-            target = int(round(max(0.0, annual_cases)))
-            if target <= 0:
-                stats["zero"] = int(stats["zero"]) + 1
-                logger.debug("  skipping (%s, %s, %s, %s): annual total %.3f "
-                             "rounds to 0", location_key, year_key, disease_code,
-                             source_code, annual_cases)
-                continue
-
-            window = {"loc_id": location_key,
-                      "start_date": f"{year_key}-01-01",
-                      "end_date": f"{year_key}-12-31",
-                      "disease": disease_code,
-                      "src_code": source_code or None}
-            existing = int(self.session.execute(count_sql, window).scalar() or 0)
-            if existing and not force:
-                stats["already_present"] = int(stats["already_present"]) + 1
-                continue
-
-            daily = _burden_generate_daily_case_counts(
-                annual_cases=annual_cases, year=year_key,
-                location_id=location_key,
-                base_variation=base_variation, seed=seed,
-                kernel=kernel,
-                stable_key=location_keys.get(location_key))
-            try:
-                if existing:
-                    deleted = self.session.execute(window_sql, window).rowcount or 0
-                    logger.debug("    deleted %d existing ESTIMATE row(s)", deleted)
-                payload = [{"loc_id": location_key, "date_id": row["date_id"],
-                            "disease": disease_code,
-                            "src_code": source_code or None,
-                            "case_count": int(row["case_count"])}
-                           for row in daily.to_dict(orient="records")]
-                for start in range(0, len(payload), 5000):
-                    self.session.execute(statement, payload[start:start + 5000])
-                self.session.commit()
-                stats["inserted"] = int(stats["inserted"]) + len(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("    error expanding (%s, %s, %s, %s): %s: %s",
-                             location_key, year_key, disease_code, source_code,
-                             type(exc).__name__, exc)
-                self.session.rollback()
-                stats["errors"] = int(stats["errors"]) + 1
-
-        logger.info(
-            "BURDEN EXPANSION COMPLETE: %d inserted, %d present, %d zero-total, "
-            "%d no-population, %d skipped, %d error(s); %d record(s) -> %d group(s), "
-            "%d summed",
-            stats["inserted"], stats["already_present"], stats["zero"],
-            stats["no_population"], stats["skipped"], stats["errors"],
-            stats["records"], stats["groups"], stats["merged"])
-        logger.info("  measures: %s", ", ".join(
-            f"{name}={count}" for name, count in sorted(basis_counts.items()))
-            or "(none)")
-        logger.info("  denominators: %s", ", ".join(
-            f"{name}={count}" for name, count in sorted(tier_counts.items()))
-            or "(none)")
-        logger.info("  allocation kernel: %s", kernel.origin)
-        if case_location_of:
-            logger.info(
-                "  written at %s: %d target(s)%s. A large `summed` count here is "
-                "NORMAL at a coarser grain (cells sharing a target), not a "
-                "duplicate.",
-                grain_label, stats["grain_targets"],
-                f"; {len(unparented_cells)} cell(s) had no such ancestor and kept "
-                f"their own location_id" if unparented_cells else "")
-
-        self._record_expansion_parameters(
-            effective_run_id, stats, kernel, prefer, rate_scale,
-            national_allocation, population_divisor, population_indicator,
-            default_population, seed, group_by_level)
-
-        if stats["no_population"]:
-            logger.warning(
-                "  %d rate record(s) had no denominator for %r. They are the only "
-                "records that need one: a %r record is self-contained. Use "
-                "--national-allocation if the population is a national series.",
-                stats["no_population"], population_indicator,
-                _BURDEN_MEASURE_CASES_MEAN)
-        if stats["zero"]:
-            logger.warning(
-                "  %d group(s) round to 0 cases and were not written. If that is "
-                "all of them on a %r run, the rate scale is wrong: try "
-                "--rate-scale per_person (cell shares are small, so a per-100k "
-                "assumption yields fractions of a case).",
-                stats["zero"], _BURDEN_MEASURE_INCIDENCE_RATE)
-        return stats
-
-
-    def _burden_locations_per_country(self, index: "_PopulationIndex") -> Dict[str, int]:
-        """How many distinct burden locations each country holds.
-
-        This is the allocation divisor: giving each of N cells ``P/N`` makes the
-        sum over those cells exactly ``P``, so the national total is preserved
-        even though the spatial pattern is uniform. Computed over **all** burden
-        locations, not over the selected subset, so ``--limit`` cannot silently
-        change the divisor.
-        """
-        counts: Dict[str, int] = {}
-        try:
-            rows = self.session.execute(text(
-                "SELECT DISTINCT location_id FROM fact_disease_burden "
-                "WHERE location_id IS NOT NULL")).fetchall()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("  could not count burden locations per country (%s); "
-                           "the allocation divisor will be 1.", exc)
-            return counts
-        for (location_id,) in rows:
-            country = index.country_for(location_id) or "(unknown)"
-            counts[country] = counts.get(country, 0) + 1
-        return counts
-
-    def _ancestor_map(self, target_level: str, *, grid_level: str = "grid",
-                      max_hops: int = 8) -> Dict[int, int]:
-        """``grid cell -> its nearest ancestor at target_level``.
-
-        Walks ``parent_location_id`` once per cell with a cycle guard. A cell
-        whose chain never reaches ``target_level`` is simply absent from the map,
-        and the expansion then keeps that cell at its own ``location_id`` - it
-        does not drop the record and does not invent an ancestor.
-
-        Read-only, one query. ``max_hops`` bounds a corrupted parent chain: a
-        two-node cycle would otherwise loop forever, and a plausible-looking
-        wrong ancestor is worse than no ancestor.
-        """
-        rows = self.session.execute(text(
-            "SELECT location_id, admin_level, parent_location_id "
-            "FROM dim_location ORDER BY location_id")).fetchall()
-
-        parent_of: Dict[int, Optional[int]] = {}
-        level_of: Dict[int, str] = {}
-        for location_id, admin_level, parent_location_id in rows:
-            if location_id is None:
-                continue
-            key = int(location_id)
-            level_of[key] = str(admin_level or "").strip().lower()
-            parent_of[key] = (None if parent_location_id is None
-                              else int(parent_location_id))
-
-        wanted = str(target_level).strip().lower()
-        start_level = str(grid_level).strip().lower()
-        found: Dict[int, int] = {}
-        for key, label in level_of.items():
-            if label != start_level:
-                continue
-            current = parent_of.get(key)
-            hops = 0
-            seen = {key}
-            while current is not None and hops < max_hops and current not in seen:
-                if level_of.get(current) == wanted:
-                    found[key] = current
-                    break
-                seen.add(current)
-                current = parent_of.get(current)
-                hops += 1
-        return found
-
-
-    def _location_stable_keys(self) -> Dict[int, int]:
-        """``location_id -> stable seed key`` for the whole location dimension.
-
-        One read, because the generator needs it per series and the alternative is
-        a query per burden record.
-        """
-        keys: Dict[int, int] = {}
-        try:
-            rows = self.session.execute(text(
-                "SELECT location_id, location_code, name FROM dim_location "
-                "ORDER BY location_id")).fetchall()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("  could not read location codes (%s); the daily series "
-                           "will be seeded on the surrogate key, which is not "
-                           "stable across a rebuild.", exc)
-            return keys
-        for location_id, location_code, name in rows:
-            if location_id is None:
-                continue
-            keys[int(location_id)] = _stable_location_key(location_code, name)
-        return keys
-
-    def _expected_admin_levels(self, case_location_of: Mapping[int, int]) -> Set[str]:
-        """The ``admin_level`` values the requested write grain produces."""
-        if not case_location_of:
-            return {"grid"}
-        target_ids = sorted(set(case_location_of.values()))
-        levels: Set[str] = set()
-        try:
-            for _location_id, admin_level in _chunked_in(
-                    self.session,
-                    "SELECT location_id, admin_level FROM dim_location "
-                    "WHERE location_id IN :vals ORDER BY location_id",
-                    {}, target_ids):
-                levels.add(str(admin_level or "").strip().lower() or "(null)")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("could not read the target admin levels: %s", exc)
-        return levels or {"(unknown)"}
-
-    def _guard_write_grain(self, first_year: int, last_year: int,
-                           expected_levels: Set[str], grain_label: str,
-                           *, force: bool, allow_mixed_grain: bool) -> int:
-        """Refuse, or purge, when ESTIMATE rows at another grain exist.
-
-        Two grains in one year do not collide - the case keys differ by
-        ``location_id`` - so the database accepts them and every downstream sum
-        then double-counts by the grouping factor. The check is cheap and the
-        consequence is unrecoverable once the rows are mixed, so it is a guard
-        rather than a warning.
-
-        Returns the number of rows purged (0 unless ``force`` replaced them).
-        """
-        window = {"start": f"{first_year}-01-01", "end": f"{last_year}-12-31"}
-        try:
-            present = self.session.execute(text(
-                "SELECT COALESCE(l.admin_level, '(null)') AS lvl, COUNT(*) "
-                "FROM fact_disease_case c "
-                "JOIN dim_location l ON l.location_id = c.location_id "
-                "WHERE c.identification_method_code = 'ESTIMATE' "
-                "  AND c.date_id_onset >= :start AND c.date_id_onset <= :end "
-                "GROUP BY 1 ORDER BY 1"), window).fetchall()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("grain check could not run: %s", exc)
-            return 0
-
-        if not present:
-            return 0
-
-        existing = {str(row[0]).strip().lower(): int(row[1]) for row in present}
-        mixture = len(existing) > 1
-        foreign = set(existing) - {level.lower() for level in expected_levels}
-        if not mixture and not foreign:
-            return 0
-
-        detail = ", ".join(f"{level}={count}"
-                           for level, count in sorted(existing.items()))
-        if allow_mixed_grain:
-            logger.warning(
-                "  estimate rows already exist at %s over %s-%s, and this run "
-                "writes at %s (%s). MIXED GRAINS WILL COEXIST and any sum over "
-                "fact_disease_case will double-count by the grouping factor. "
-                "Proceeding because allow_mixed_grain is set.", detail,
-                first_year, last_year, grain_label,
-                ", ".join(sorted(expected_levels)))
-            return 0
-
-        if not force:
-            raise RuntimeError(
-                f"fact_disease_case already holds ESTIMATE rows at {detail} over "
-                f"{first_year}-{last_year}, while this run writes at {grain_label} "
-                f"({', '.join(sorted(expected_levels))}). Mixed grains co-exist "
-                f"without violating a constraint and silently double-count "
-                f"downstream. Re-run with force=True to replace them, or with "
-                f"allow_mixed_grain=True if the mixture is intended.")
-
-        purged = int(self.session.execute(text(
-            "DELETE FROM fact_disease_case "
-            "WHERE identification_method_code = 'ESTIMATE' "
-            "  AND date_id_onset >= :start AND date_id_onset <= :end"),
-            window).rowcount or 0)
-        self.session.commit()
-        logger.warning(
-            "  purged %d existing ESTIMATE row(s) at %s over %s-%s before writing "
-            "at %s. The previous series is gone; its parameters remain in "
-            "run_manifest for the run that wrote it.",
-            purged, detail, first_year, last_year, grain_label)
-        return purged
-
-    def _record_expansion_parameters(
-        self, run_id: Optional[str], stats: Mapping[str, Any],
-        kernel: _BurdenKernel, prefer: str, rate_scale: str,
-        national_allocation: bool, population_divisor: Optional[float],
-        population_indicator: str, default_population: Optional[float],
-        seed: int, group_by_level: Optional[str],
-    ) -> None:
-        """Write the expansion policy to ``run_manifest``. Never raises.
-
-        Everything here changes a stored number, so a database without this row
-        cannot be attributed to a procedure. A failure to record is a WARNING on a
-        run that continues: losing the rows just inserted because a JSON write
-        failed would be the worse outcome.
-        """
-        if not run_id:
-            logger.warning(
-                "  no run id available, so this expansion's parameters are NOT "
-                "recorded and the modelled rows it just wrote cannot be attributed "
-                "to a stated policy. Run through main.py, which sets one, or pass "
-                "run_id=.")
-            return
-        try:
-            _record_manifest_parameters(
-                self.session, run_id=run_id, namespace="expansion",
-                parameters={
-                    "phase": "expand_burden_to_daily",
-                    "measure_preference": prefer,
-                    "rate_scale": rate_scale,
-                    "rate_divisor": _RATE_SCALES[rate_scale],
-                    "national_allocation": bool(national_allocation),
-                    "population_divisor": population_divisor,
-                    "population_indicator": population_indicator,
-                    "default_population": default_population,
-                    "seed": int(seed),
-                    "group_by_level": group_by_level,
-                    "write_grain": stats.get("grain"),
-                    "grain_targets": stats.get("grain_targets"),
-                    "kernel": kernel.describe(),
-                    "case_status_written": "estimated",
-                    "identification_method_code": "ESTIMATE",
-                    "records": stats.get("records"),
-                    "groups": stats.get("groups"),
-                    "inserted": stats.get("inserted"),
-                    "purged": stats.get("purged"),
-                    "basis": dict(stats.get("basis") or {}),
-                    "tiers": dict(stats.get("tiers") or {}),
-                })
-            self.session.commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("  could not record the expansion parameters: %s: %s",
-                           type(exc).__name__, exc)
-            try:
-                self.session.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-
-
-    def _ensure_dim_time(self, year: int) -> int:
-        """Insert missing ``dim_time`` rows for ``year`` (``date_id`` is an FK).
-
-        ``season`` is written as NULL, deliberately. The previous version wrote
-        ``'dry'`` from November to March and ``'wet'`` otherwise - a northern- and
-        southern-hemisphere heuristic that is wrong for both in East Africa's
-        bimodal rainfall regime, and that cannot be right for a table keyed on a
-        date alone, since season is a property of a place and a calendar
-        together. A column that looks authoritative and is not is worse than an
-        empty column, so the field waits for a per-country climatology drawn from
-        a cited source.
-        """
-        from datetime import timedelta
-
-        existing = {row[0] for row in self.session.execute(text(
-            "SELECT date_id FROM dim_time WHERE year = :y"), {"y": int(year)})}
-        current = datetime(int(year), 1, 1)
-        end = datetime(int(year), 12, 31)
-        payload = []
-        while current <= end:
-            date_id = current.strftime("%Y-%m-%d")
-            if date_id not in existing:
-                payload.append({
-                    "date_id": date_id, "date": current.date(),
-                    "year": current.year, "month": current.month,
-                    "week": current.isocalendar()[1],
-                    "day_of_year": current.timetuple().tm_yday})
-            current += timedelta(days=1)
-        if payload:
-            self.session.execute(text(
-                "INSERT INTO dim_time (date_id, date, year, month, week, "
-                "day_of_year, season, is_holiday) VALUES (:date_id, :date, "
-                ":year, :month, :week, :day_of_year, NULL, 0)"), payload)
-            self.session.commit()
-            logger.debug("  dim_time: added %d row(s) for %s", len(payload), year)
-            _warn_once(
-                "dim_time:season",
-                "  dim_time.season is not populated: a season label needs a "
-                "per-country climatology, and a single global dry/wet split is "
-                "wrong for bimodal regimes and for either hemisphere. The column "
-                "is left NULL rather than filled with an unsupported value.")
-        return len(payload)
-
 
     def _compute_resistance_status(self) -> Dict[str, Any]:
         """Four passes, strongest signal first; only rows still unclassified."""
@@ -5051,6 +3648,7 @@ class DataConsolidator:
                 "unclassified": unclassified}
 
     def _verify_resistance_status(self) -> None:
+        """Log the stored classification distribution and any remainder."""
         distribution = self.session.execute(text(
             "SELECT resistance_status, COUNT(*) FROM fact_insecticide_resistance "
             "WHERE resistance_status IS NOT NULL AND resistance_status != '' "
@@ -5063,11 +3661,10 @@ class DataConsolidator:
         if remaining:
             logger.warning("  %d row(s) still have no resistance_status", remaining)
 
-    # -- duplicates --------------------------------------------------------
-
     def detect_duplicates(self, tables: Optional[Iterable[str]] = None, *,
                           registry: Any = None,
                           max_groups: int = 50) -> Dict[str, Any]:
+        """Read-only duplicate and conflicting-concept report per dimension."""
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
         wanted = ({str(n).strip() for n in tables if str(n).strip()}
@@ -5184,6 +3781,7 @@ class DataConsolidator:
         return results
 
     def resolve_fact_table_duplicates(self) -> Dict[str, int]:
+        """Collapse in-batch duplicate groups in every fact table, by its spec."""
         logger.info("Resolving fact table duplicates...")
         results: Dict[str, int] = {}
         for table_name, spec in sorted(_FACT_AGGREGATION_SPEC.items()):
@@ -5215,6 +3813,7 @@ class DataConsolidator:
 
     def _collapse_group(self, table_name: str, model, key_columns: List[str],
                         filters: Dict[str, Any]) -> int:
+        """Aggregate one duplicate group into one row. Returns 1 or 0."""
         spec = _FACT_AGGREGATION_SPEC.get(table_name) or {}
         ops: Dict[str, str] = {}
         for column in spec.get("sums") or ():
@@ -5264,8 +3863,6 @@ class DataConsolidator:
             f"VALUES ({', '.join(':' + c for c in insert_columns)})"), payload)
         return 1
 
-    # -- orchestration -----------------------------------------------------
-
     def consolidate_all(self, gadm_gpkg: Optional[str] = None,
                         country_codes: Optional[List[str]] = None,
                         dry_run: bool = False, *,
@@ -5276,23 +3873,14 @@ class DataConsolidator:
                         overwrite_human_names: bool = False,
                         audit_country_geometry: bool = False,
                         burden_grain: Optional[str] = None,
-                        burden_prefer: str = _BURDEN_MEASURE_CASES_MEAN,
-                        burden_rate_scale: str = "per_100k",
-                        burden_national_allocation: bool = False,
-                        burden_force: bool = False
+                        burden_prefer: Optional[str] = None,
+                        burden_rate_scale: Optional[str] = None,
+                        burden_national_allocation: Optional[bool] = None,
+                        burden_force: Optional[bool] = None,
                         ) -> Dict[str, Any]:
         """Run every phase in the one safe order.
 
-        Country codes are canonicalised at A6a, before any phase that groups or
-        filters by country. audit_country_geometry=True also cross-checks rows that
-        were already canonical, at one coordinate lookup per row.
-
-        The ``burden_*`` arguments are the expansion policy. They are parameters
-        rather than constants because each of them changes a stored number, and
-        because the pipeline and the CLI must be able to reach the same code path
-        - they previously disagreed silently, one writing per cell and the other
-        at admin grain. ``burden_force=False`` by default: overwriting a series
-        someone else generated is a decision, not a default.
+        Country codes are canonicalised at A6a, before any phase grouping by country.
         """
         resolved_registry = _load_registry(
             registry if registry is not None else getattr(self, "registry", None))
@@ -5464,10 +4052,6 @@ class DataConsolidator:
             logger.info("  (dry run) burden expansion skipped")
         else:
             try:
-                # The run id and the policy are both passed through: without the
-                # first, the modelled rows cannot be attributed; without the
-                # second, the pipeline silently writes at a different grain from
-                # the CLI and downstream sums double-count.
                 burden_stats = self.expand_burden_to_daily(
                     force=burden_force, prefer=burden_prefer,
                     rate_scale=burden_rate_scale,
@@ -5487,18 +4071,28 @@ class DataConsolidator:
 
         logger.info("-" * 60)
         logger.info("RESISTANCE: CLASSIFY BIOASSAYS")
-        try:
-            results["resistance"] = self._compute_resistance_status()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("  resistance classification failed: %s: %s",
-                         type(exc).__name__, exc)
-            results["resistance"] = {"status": "error", "reason": str(exc)}
+        if dry_run:
+            logger.info("  (dry run) resistance classification skipped")
+            results["resistance"] = {"status": "dry_run", "classified": 0,
+                                     "unclassified": 0}
+        else:
+            try:
+                results["resistance"] = self._compute_resistance_status()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("  resistance classification failed: %s: %s",
+                             type(exc).__name__, exc)
+                results["resistance"] = {"status": "error", "reason": str(exc)}
 
         logger.info("-" * 60)
         logger.info("FACT DUPLICATES + VALIDATION")
-        results["duplicates"] = {
-            table: {"duplicate_count": count}
-            for table, count in sorted(self.resolve_fact_table_duplicates().items())}
+        if dry_run:
+            logger.info("  (dry run) fact duplicate collapse skipped")
+            results["duplicates"] = {}
+        else:
+            results["duplicates"] = {
+                table: {"duplicate_count": count}
+                for table, count in
+                sorted(self.resolve_fact_table_duplicates().items())}
         results["validation"] = self.validate_country_codes()
         results["hierarchy"] = self._check_hierarchy(resolved_registry)
 
@@ -5517,7 +4111,6 @@ class DataConsolidator:
                     sum(results["remaining_orphans"].values()))
         logger.info("=" * 60)
         return results
-
 
     def summarize_locations(self, *, registry: Any = None,
                             sample_limit: int = 5) -> Dict[str, Any]:
@@ -5654,14 +4247,10 @@ class DataConsolidator:
                     generated_names, len(duplicate_names))
         return summary
 
-    
     def close(self) -> Dict[str, Any]:
         """Drain the pending resolution buffer, record the ledger size, close.
 
-        The buffer is kept when its flush fails, so a retry is possible. The
-        ledger count is read before the session closes, because after that the
-        number is unavailable and a summary that cannot distinguish "the ledger is
-        empty" from "the ledger was never consulted" is not a summary.
+        The buffer is kept when its flush fails, so a retry is possible.
         """
         if getattr(self, "_closed", False):
             return dict(getattr(self, "_close_report", {}) or {})
@@ -5669,6 +4258,7 @@ class DataConsolidator:
         seen: Set[Tuple[str, str, str, str]] = set()
 
         def _offer(candidate: Any) -> None:
+            """Add a candidate if its four-part key is new."""
             if candidate is None:
                 return
             key = (str(getattr(candidate, "source_table", "") or "").strip(),
@@ -5740,8 +4330,6 @@ class DataConsolidator:
         return report
 
 
-# -- module-level wrapper --------------------------------------------------
-
 def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
                       gadm_gpkg: Optional[str] = None,
                       country_codes: Optional[Iterable[str]] = None,
@@ -5753,16 +4341,13 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
                       overwrite_human_names: bool = False,
                       audit_country_geometry: bool = False,
                       burden_grain: Optional[str] = None,
-                      burden_prefer: str = _BURDEN_MEASURE_CASES_MEAN,
-                      burden_rate_scale: str = "per_100k",
-                      burden_national_allocation: bool = False,
-                      burden_force: bool = False) -> Dict[str, Any]:
-    """Run consolidation and always close() (the only drain of the buffer).
+                      burden_prefer: Optional[str] = None,
+                      burden_rate_scale: Optional[str] = None,
+                      burden_national_allocation: Optional[bool] = None,
+                      burden_force: Optional[bool] = None) -> Dict[str, Any]:
+    """Run consolidation and always ``close()``, the only drain of the buffer.
 
-    core.vocabulary.* keys other than gadm_gpkg are warned about and ignored.
-
-    The ``burden_*`` arguments reach ``expand_burden_to_daily`` unchanged, so an
-    orchestrator can select the expansion policy without a second code path.
+    The ``burden_*`` arguments are overrides: ``None`` defers to the pack.
     """
     config = dict(core_cfg or {})
     admin_boundaries = config.get("admin_boundaries") or {}
@@ -5835,9 +4420,39 @@ def run_consolidation(core_cfg: Optional[Mapping[str, Any]] = None, *,
 __all__ = [
     "DataConsolidator",
     "enrich_location_dataframe",
+    "run_consolidation",
     "get_country_from_coords",
     "get_country_name",
     "get_iso_country_code",
     "haversine_distance",
-    "run_consolidation",
+    "BURDEN_KERNEL_KEY",
+    "BURDEN_MEASURE_CASES_MEAN",
+    "BURDEN_MEASURE_INCIDENCE_RATE",
+    "BURDEN_MEASURE_PREFERENCES",
+    "BurdenExpander",
+    "DEFAULT_MAX_PROJECTED_ROWS",
+    "FLAT_BURDEN_KERNEL",
+    "default_expansion_policy",
+    "ensure_dim_time",
+    "expand_burden_to_daily",
+    "generate_daily_case_counts",
+    "guard_projected_volume",
+    "load_burden_kernel",
+    "load_expansion_policy",
+    "project_case_rows",
+    "_BURDEN_KERNEL_DEFAULTS",
+    "_BURDEN_LOG_SAMPLE",
+    "_BURDEN_MEASURE_CASES_MEAN",
+    "_BURDEN_MEASURE_INCIDENCE_RATE",
+    "_BURDEN_MEASURE_PREFERENCES",
+    "_BurdenKernel",
+    "_ExpansionPolicy",
+    "_PopulationHit",
+    "_PopulationIndex",
+    "_RATE_SCALES",
+    "_burden_generate_daily_case_counts",
+    "_days_in_year",
+    "_ensure_dim_time",
+    "_positive",
+    "_stable_location_key",
 ]

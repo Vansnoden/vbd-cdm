@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Pydantic schemas for the CDM.
-"""
+"""Pydantic schemas for the CDM."""
 
 from __future__ import annotations
 import json
@@ -102,11 +100,9 @@ def _require_decision(value: Optional[str]) -> Optional[str]:
     return value
 
 
-# =============================================================================
-# DIMENSIONS
-# =============================================================================
-
 class DimTimeCreate(BaseModel):
+    """A ``dim_time`` row. ``season`` is NULL until a climatology exists."""
+
     date_id: str = Field(..., description="Date in YYYY-MM-DD format")
     date: date
     year: int
@@ -130,6 +126,8 @@ class DimTimeCreate(BaseModel):
 
 
 class DimLocationCreate(BaseModel):
+    """A ``dim_location`` row."""
+
     location_id: Optional[int] = None
     location_code: Optional[str] = None
     name: str
@@ -159,7 +157,9 @@ class DimLocationCreate(BaseModel):
 
 
 class DimDiseaseCreate(BaseModel):
-    disease_code: str = Field(..., max_length=20)
+    """A ``dim_disease`` row. Every length matches ``String(…)`` in the DDL."""
+
+    disease_code: str = Field(..., max_length=100)
     disease_name: str
     description: Optional[str] = None
     source_standard: Optional[str] = None
@@ -170,7 +170,9 @@ class DimDiseaseCreate(BaseModel):
 
 
 class DimVectorCreate(BaseModel):
-    vector_code: str = Field(..., max_length=20)
+    """A ``dim_vector`` row."""
+
+    vector_code: str = Field(..., max_length=100)
     species_name: str
     subspecies: Optional[str] = None
     description: Optional[str] = None
@@ -182,7 +184,9 @@ class DimVectorCreate(BaseModel):
 
 
 class DimInsecticideCreate(BaseModel):
-    insecticide_code: str = Field(..., max_length=20)
+    """A ``dim_insecticide`` row."""
+
+    insecticide_code: str = Field(..., max_length=100)
     insecticide_name: str
     chemical_class: Optional[str] = None
     description: Optional[str] = None
@@ -193,7 +197,9 @@ class DimInsecticideCreate(BaseModel):
 
 
 class DimIdentificationMethodCreate(BaseModel):
-    method_code: str = Field(..., max_length=20)
+    """A ``dim_identification_method`` row."""
+
+    method_code: str = Field(..., max_length=100)
     method_name: str
     method_type: Optional[str] = None
     description: Optional[str] = None
@@ -203,7 +209,9 @@ class DimIdentificationMethodCreate(BaseModel):
 
 
 class DimResistanceTestTypeCreate(BaseModel):
-    test_type_code: str = Field(..., max_length=20)
+    """A ``dim_resistance_test_type`` row."""
+
+    test_type_code: str = Field(..., max_length=100)
     test_type_name: str
     exposure_time_unit: Optional[str] = None
     description: Optional[str] = None
@@ -213,7 +221,9 @@ class DimResistanceTestTypeCreate(BaseModel):
 
 
 class DimSocioeconomicIndicatorCreate(BaseModel):
-    indicator_code: str = Field(..., max_length=50)
+    """A ``dim_socioeconomic_indicator`` row."""
+
+    indicator_code: str = Field(..., max_length=100)
     indicator_name: str
     unit: Optional[str] = None
     source: Optional[str] = None
@@ -226,7 +236,7 @@ class DimSocioeconomicIndicatorCreate(BaseModel):
 class DimSourceCreate(BaseModel):
     """A data source's provenance row."""
 
-    source_code: str = Field(..., max_length=20)
+    source_code: str = Field(..., max_length=100)
     source_name: str
     source_description: Optional[str] = None
     source_standard: Optional[str] = None
@@ -311,11 +321,9 @@ class DimConceptResponse(DimConceptCreate):
     model_config = _FROM_ATTRS
 
 
-# =============================================================================
-# FACT TABLES
-# =============================================================================
-
 class FactVectorObservationCreate(BaseModel):
+    """A ``fact_vector_observation`` row."""
+
     location_id: int
     date_id: str
     vector_code: str
@@ -344,6 +352,8 @@ class FactVectorObservationCreate(BaseModel):
 
 
 class FactDiseaseCaseCreate(BaseModel):
+    """A ``fact_disease_case`` row."""
+
     location_id: int
     date_id_onset: str
     date_id_reported: str
@@ -382,6 +392,11 @@ class FactDiseaseCaseCreate(BaseModel):
 
 
 class FactInsecticideResistanceCreate(BaseModel):
+    """A ``fact_insecticide_resistance`` row.
+
+    ``concentration`` is genuinely NULL-able; NULL is its own key, not a sentinel.
+    """
+
     location_id: int
     date_id: str
     vector_code: str
@@ -412,6 +427,16 @@ class FactInsecticideResistanceCreate(BaseModel):
     def _check_date_id(cls, v: str) -> str:
         return _validate_yyyy_mm_dd(v)
 
+    @field_validator("concentration")
+    @classmethod
+    def _check_concentration(cls, v: Optional[float]) -> Optional[float]:
+        """A negative concentration is not a measurement; use NULL."""
+        if v is not None and v < 0:
+            raise ValueError(
+                "concentration cannot be negative; use None to record that the "
+                "assay had no concentration")
+        return v
+
     @field_validator("mortality")
     @classmethod
     def _check_mortality(cls, v: Optional[float]) -> Optional[float]:
@@ -431,6 +456,8 @@ class FactInsecticideResistanceCreate(BaseModel):
 
 
 class FactBionomicsCreate(BaseModel):
+    """A ``fact_bionomics`` row."""
+
     location_id: int
     date_id: str
     vector_code: str
@@ -448,6 +475,8 @@ class FactBionomicsCreate(BaseModel):
 
 
 class FactInterventionCreate(BaseModel):
+    """A ``fact_intervention`` row."""
+
     location_id: int
     date_start: str
     date_end: Optional[str] = None
@@ -479,6 +508,8 @@ class FactInterventionCreate(BaseModel):
 
 
 class FactSocioeconomicConditionCreate(BaseModel):
+    """A ``fact_socioeconomic_condition`` row. ``source_code`` is part of the key."""
+
     location_id: int
     year: int
     indicator_code: str
@@ -494,6 +525,8 @@ class FactSocioeconomicConditionCreate(BaseModel):
 
 
 class FactHealthFacilityCreate(BaseModel):
+    """A ``fact_health_facility`` row."""
+
     facility_code: str
     location_id: int
     source_code: str
@@ -519,6 +552,8 @@ class FactHealthFacilityCreate(BaseModel):
 
 
 class FactDiseaseBurdenCreate(BaseModel):
+    """A ``fact_disease_burden`` row. ``pathogen_species`` is part of the key."""
+
     location_id: int
     year: int
     disease_code: str
@@ -538,9 +573,11 @@ class FactDiseaseBurdenCreate(BaseModel):
 
 
 class FactEnvironmentalCreate(BaseModel):
+    """A ``fact_environment`` row. ``source_code`` is part of the key."""
+
     location_id: int
     date_id: str
-    variable: str = Field(..., max_length=50)
+    variable: str = Field(..., max_length=100)
     value: float
     source_code: str
 
@@ -549,10 +586,6 @@ class FactEnvironmentalCreate(BaseModel):
     def _check_date_id(cls, v: str) -> str:
         return _validate_yyyy_mm_dd(v)
 
-
-# =============================================================================
-# CONCEPT MAPPING AND THE RESOLUTION LEDGER
-# =============================================================================
 
 class _FactConceptMapFields(BaseModel):
     """Field and single-field-validator set shared by the concept-map schemas."""
@@ -668,10 +701,6 @@ class ResolutionLogResponse(ResolutionLogCreate):
     log_id: int
     model_config = _FROM_ATTRS
 
-
-# =============================================================================
-# RESPONSE SCHEMAS
-# =============================================================================
 
 class DimTimeResponse(DimTimeCreate):
     model_config = _FROM_ATTRS

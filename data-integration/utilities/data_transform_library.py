@@ -3,7 +3,7 @@ import gc
 import pandas as pd
 import numpy as np
 from functools import wraps
-from typing import Generator, Optional, List, Dict, Any, Union
+from typing import Generator, Optional, List, Dict, Any, Union, Iterable
 import warnings
 import logging
 from rasterio.windows import Window
@@ -24,6 +24,41 @@ def ensure_file_exists():
             return func(fp, *args, **kwargs)
         return wrapper
     return decorator
+
+
+def ensure_dates_exist(date_ids: Iterable[Any], session: Any = None) -> int:
+    """Insert the ``dim_time`` rows for ``date_ids``, via the single writer.
+
+    Delegates to ``utilities.burden_expansion.ensure_dim_time`` per year, so
+    ``season`` is NULL here exactly as it is there.
+    """
+    from utilities.burden_expansion import ensure_dim_time
+
+    years = set()
+    for value in date_ids or ():
+        text_value = str(value or "").strip()
+        if len(text_value) < 4:
+            continue
+        try:
+            years.add(int(text_value[:4]))
+        except (TypeError, ValueError):
+            continue
+    if not years:
+        return 0
+
+    added = 0
+    own_session = session is None
+    if own_session:
+        from database.session import SessionLocal
+
+        session = SessionLocal()
+    try:
+        for year in sorted(years):
+            added += ensure_dim_time(session, int(year))
+    finally:
+        if own_session:
+            session.close()
+    return added
 
 
 def validate_extension(*valid_extensions: str):

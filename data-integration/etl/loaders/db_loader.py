@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
-"""
-DBLoader - Loads DataFrames into the CDM with upsert support and, for
-PostgreSQL, COPY through a staging table.
-"""
+"""DBLoader - upsert into the CDM, with COPY for PostgreSQL."""
 
 from __future__ import annotations
 
 import csv as _csv
 import datetime
 import logging
+from dataclasses import dataclass
 from io import StringIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from sqlalchemy import inspect, text
@@ -18,12 +16,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from database import models
 from database.session import DATABASE_URL, SessionLocal, engine
+from utilities.constants import DECISION_AUTO_ACCEPTED as _APPLIED_DECISION
 
 logger = logging.getLogger(__name__)
 
-
 NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
-    # ---------- Dimensions ----------
     "dim_location": {
         "columns": ["location_code"],
         "sentinels": {},
@@ -38,18 +35,19 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     "dim_socioeconomic_indicator": {"columns": ["indicator_code"], "sentinels": {}},
     "dim_time":                    {"columns": ["date_id"], "sentinels": {}},
 
-    # ---------- Facts ----------
     "fact_environment": {
-        "columns": ["location_id", "date_id", "variable"],
+        "columns": ["location_id", "date_id", "variable", "source_code"],
         "sentinels": {},
     },
     "fact_disease_burden": {
         "columns": ["location_id", "year", "disease_code", "pathogen_species"],
-        "sentinels": {},
+        # "" keeps the full key usable: without it the shorter in_batch_key is
+        # used and a NULL pathogen collapses P. falciparum into P. vivax.
+        "sentinels": {"pathogen_species": ""},
         "in_batch_key": ["location_id", "year", "disease_code"],
     },
     "fact_socioeconomic_condition": {
-        "columns": ["location_id", "year", "indicator_code"],
+        "columns": ["location_id", "year", "indicator_code", "source_code"],
         "sentinels": {},
     },
     "fact_health_facility": {
@@ -64,7 +62,9 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     "fact_insecticide_resistance": {
         "columns": ["location_id", "date_id", "vector_code", "insecticide_code",
                     "test_type_code", "source_code", "concentration"],
-        "sentinels": {"concentration": -1.0},
+        # A sentinel here would be a measurement; NULL concentration is keyed by
+        # the partial unique index instead.
+        "sentinels": {},
     },
     "fact_bionomics": {
         "columns": ["location_id", "date_id", "vector_code", "source_code"],
@@ -83,26 +83,25 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     },
 }
 
-_APPLIED_DECISION = "auto_accepted"
+_CONFLICT_WHERE: Dict[str, Any] = {
+    "fact_insecticide_resistance": text("concentration IS NULL"),
+}
+
+_SQLITE_BIND_LIMIT = 30000
 
 _COPY_NULL_MARKER = "\\N"
 
 
-class DBLoader:
-    """Loads DataFrames into the CDM tables.
+@dataclass(frozen=True)
+class _ConflictTarget:
+    """One ``ON CONFLICT`` target: its columns, plus a partial-index predicate."""
 
-    Parameters
-    ----------
-    batch_size : int
-        Rows per statement for the non-COPY paths.
-    upsert : bool
-        When True (the default), use ``ON CONFLICT``. When False, plain append —
-        which will fail on a duplicate and is only useful for a first load into
-        an empty table.
-    use_copy : bool
-        (PostgreSQL only) Use ``COPY`` into a staging table when the batch is
-        larger than ``2 * batch_size``. Ignored on other backends.
-    """
+    columns: Tuple[str, ...]
+    index_where: Any = None
+
+
+class DBLoader:
+    """Loads DataFrames into the CDM tables."""
 
     def __init__(self, batch_size: int = 1000, upsert: bool = True,
                  use_copy: bool = False) -> None:
@@ -112,10 +111,6 @@ class DBLoader:
         self._table_models = self._build_model_map()
         self._db_type = self._detect_db_type()
 
-    # -------------------------------------------------------------------------
-    # Construction helpers
-    # -------------------------------------------------------------------------
-
     def _build_model_map(self) -> Dict[str, Any]:
         """Map table names to SQLAlchemy model classes, by derivation."""
         model_map = {}
@@ -124,8 +119,8 @@ class DBLoader:
                 model_map[obj.__tablename__] = obj
         return model_map
 
-
     def _detect_db_type(self) -> str:
+        """Which dialect ``DATABASE_URL`` names."""
         if DATABASE_URL.startswith("postgresql"):
             return "postgresql"
         if DATABASE_URL.startswith("sqlite"):
@@ -134,39 +129,73 @@ class DBLoader:
             return "mysql"
         raise ValueError(f"Unsupported database type: {DATABASE_URL}")
 
-
     def _get_primary_key_columns(self, table_name: str) -> List[str]:
+        """The table's primary-key columns, in constraint order."""
         inspector = inspect(engine)
         return inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
 
-
     def _get_column_types(self, table_name: str) -> Dict[str, str]:
+        """The table's columns mapped to their SQL type strings."""
         inspector = inspect(engine)
         return {
             col["name"]: str(col["type"])
             for col in inspector.get_columns(table_name)
         }
 
+    def _get_conflict_targets(self, table_name: str, pk_cols: List[str],
+                              batch: Optional[Sequence[Dict[str, Any]]] = None
+                              ) -> List[_ConflictTarget]:
+        """The ``ON CONFLICT`` target(s) a batch needs.
 
-    def _get_conflict_targets(self, table_name: str, pk_cols: List[str]) -> List[str]:
-        """The natural-key columns that form the ``ON CONFLICT`` target."""
-
+        Normally one target: the declared natural key. A table whose key includes
+        a nullable measurement column has a partial unique index for the NULL
+        case, so a mixed batch is split into two targets.
+        """
         config = NATURAL_KEY_CONFIG.get(table_name)
-        if config and config["columns"]:
-            return list(config["columns"])
-        return pk_cols
+        columns = tuple(list(config["columns"]) if config and config["columns"]
+                        else list(pk_cols))
+        partial = _CONFLICT_WHERE.get(table_name)
+        if partial is None:
+            return [_ConflictTarget(columns)]
 
-    # -------------------------------------------------------------------------
-    # Natural-key hygiene
-    # -------------------------------------------------------------------------
+        null_columns = tuple(c for c in columns if c != "concentration")
+        if batch is None:
+            return [_ConflictTarget(columns)]
+
+        has_null = any(row.get("concentration") is None for row in batch)
+        has_value = any(row.get("concentration") is not None for row in batch)
+        targets: List[_ConflictTarget] = []
+        if has_value:
+            targets.append(_ConflictTarget(columns))
+        if has_null:
+            targets.append(_ConflictTarget(null_columns, partial))
+        return targets or [_ConflictTarget(columns)]
+
+    def _split_by_conflict_target(self, table_name: str, pk_cols: List[str],
+                                  batch: Sequence[Dict[str, Any]]
+                                  ) -> List[Tuple[_ConflictTarget, List[Dict[str, Any]]]]:
+        """Partition a batch so every part is served by exactly one target."""
+        targets = self._get_conflict_targets(table_name, pk_cols, batch)
+        if len(targets) == 1:
+            return [(targets[0], list(batch))]
+
+        null_target = next((t for t in targets if t.index_where is not None), None)
+        value_target = next((t for t in targets if t.index_where is None), None)
+        groups: List[Tuple[_ConflictTarget, List[Dict[str, Any]]]] = []
+        if value_target is not None:
+            values = [r for r in batch if r.get("concentration") is not None]
+            if values:
+                groups.append((value_target, values))
+        if null_target is not None:
+            nulls = [r for r in batch if r.get("concentration") is None]
+            if nulls:
+                groups.append((null_target, nulls))
+        return groups or [(targets[0], list(batch))]
 
     def _prepare_for_upsert(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
         """Apply natural-key hygiene to a DataFrame before insert.
 
-        1. Substitute sentinels for NULLs in nullable natural-key columns, so the
-           unique constraint catches duplicates reliably.
-        2. Collapse duplicate rows within the batch. PostgreSQL rejects a
-           multi-row ``ON CONFLICT`` that touches the same target row twice.
+        Sentinels fill NULLs in key columns; then in-batch duplicates are collapsed.
         """
         config = NATURAL_KEY_CONFIG.get(table_name)
         if not config:
@@ -218,15 +247,12 @@ class DBLoader:
 
         return df
 
-    # -------------------------------------------------------------------------
-    # PostgreSQL COPY through a staging table
-    # -------------------------------------------------------------------------
-
     def _copy_upsert_postgresql(self, df: pd.DataFrame, table_name: str,
                                 model: Any) -> int:
         """Bulk-load via ``COPY`` into a temp table, then merge."""
         pk_cols = self._get_primary_key_columns(table_name)
-        conflict_targets = self._get_conflict_targets(table_name, pk_cols)
+        targets = self._get_conflict_targets(table_name, pk_cols)
+        conflict_targets = list(targets[0].columns)
 
         staging_table = f"{table_name}_staging"
         model_columns = [c.name for c in model.__table__.columns]
@@ -320,122 +346,127 @@ class DBLoader:
         )
         return len(df)
 
-    # -------------------------------------------------------------------------
-    # Batched upserts
-    # -------------------------------------------------------------------------
+    def _select_columns(self, df: pd.DataFrame, pk_cols: List[str]
+                        ) -> List[str]:
+        """Columns to send, dropping an autoincrement PK that is entirely NULL."""
+        columns = list(df.columns)
+        for pk in pk_cols:
+            if pk in columns and df[pk].isna().all():
+                columns.remove(pk)
+        return columns
 
     def _upsert_postgresql(self, df: pd.DataFrame, table_name: str,
                            model: Any) -> int:
         """Batched ``ON CONFLICT DO UPDATE`` for PostgreSQL."""
-        from sqlalchemy.dialects.postgresql import insert
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
 
-        pk_cols = self._get_primary_key_columns(table_name)
-        conflict_targets = self._get_conflict_targets(table_name, pk_cols)
-
-        records = df.to_dict(orient="records")
-        for record in records:
-            for pk in pk_cols:
-                if record.get(pk) is None:
-                    record.pop(pk, None)
-
-        update_dict = {
-            col: None  # placeholder; replaced per batch below
-            for col in df.columns
-            if col not in pk_cols
-            and col not in conflict_targets
-            and df[col].notna().any()
-        }
+        pk_cols = self._get_pk_list(table_name)
+        columns = self._select_columns(df, pk_cols)
+        records = self._payload(df, columns)
 
         total_written = 0
         with SessionLocal() as session:
-            for start in range(0, len(records), self.batch_size):
-                batch = records[start:start + self.batch_size]
-                if not batch:
-                    continue
-
-                stmt = insert(model).values(batch)
-                active_cols = [
-                    col for col in update_dict if col in batch[0]
-                ]
-
-                if active_cols:
-                    upsert_stmt = stmt.on_conflict_do_update(
-                        index_elements=conflict_targets,
-                        set_={col: stmt.excluded[col] for col in active_cols},
+            for target, batch in self._split_by_conflict_target(
+                    table_name, pk_cols, records):
+                chunk = self._effective_batch(columns)
+                for start in range(0, len(batch), chunk):
+                    rows = batch[start:start + chunk]
+                    if not rows:
+                        continue
+                    statement = dialect_insert(model)
+                    active_cols = [
+                        col for col in columns
+                        if col not in pk_cols
+                        and col not in target.columns
+                        and any(row.get(col) is not None for row in rows)
+                    ]
+                    if active_cols:
+                        upsert = statement.on_conflict_do_update(
+                            index_elements=list(target.columns),
+                            index_where=target.index_where,
+                            set_={col: statement.excluded[col]
+                                  for col in active_cols},
+                        )
+                    else:
+                        upsert = statement.on_conflict_do_nothing(
+                            index_elements=list(target.columns),
+                            index_where=target.index_where,
+                        )
+                    result = session.execute(upsert, rows)
+                    rowcount = getattr(result, "rowcount", None)
+                    total_written += (
+                        len(rows) if rowcount is None or rowcount < 0 else rowcount
                     )
-                else:
-                    upsert_stmt = stmt.on_conflict_do_nothing(
-                        index_elements=conflict_targets
-                    )
-
-                result = session.execute(upsert_stmt)
-                rowcount = getattr(result, "rowcount", None)
-                total_written += (
-                    len(batch) if rowcount is None or rowcount < 0 else rowcount
-                )
-                session.commit()
+                    session.commit()
 
         return total_written
-
 
     def _upsert_sqlite(self, df: pd.DataFrame, table_name: str,
                        model: Any) -> int:
-        """``ON CONFLICT DO UPDATE`` for SQLite."""
+        """``ON CONFLICT DO UPDATE`` for SQLite, one executemany per target."""
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
 
-        from sqlalchemy.dialects.sqlite import insert
-
-        pk_cols = self._get_primary_key_columns(table_name)
-        conflict_targets = self._get_conflict_targets(table_name, pk_cols)
-
-        update_cols = [
-            col for col in df.columns
-            if col not in pk_cols
-            and col not in conflict_targets
-            and df[col].notna().any()
-        ]
-
-        records = df.to_dict(orient="records")
-        for record in records:
-            for pk in pk_cols:
-                if record.get(pk) is None:
-                    record.pop(pk, None)
+        pk_cols = self._get_pk_list(table_name)
+        columns = self._select_columns(df, pk_cols)
+        records = self._payload(df, columns)
 
         total_written = 0
         with SessionLocal() as session:
-            for start in range(0, len(records), self.batch_size):
-                batch = records[start:start + self.batch_size]
-                if not batch:
-                    continue
-
-                stmt = insert(model).values(batch)
-                if update_cols and conflict_targets:
-                    upsert_stmt = stmt.on_conflict_do_update(
-                        index_elements=conflict_targets,
-                        set_={
-                            col: stmt.excluded[col]
-                            for col in update_cols
-                            if col in batch[0]
-                        },
-                    )
-                elif conflict_targets:
-                    upsert_stmt = stmt.on_conflict_do_nothing(
-                        index_elements=conflict_targets
-                    )
-                else:
-                    upsert_stmt = stmt
-
-                result = session.execute(upsert_stmt)
-                rowcount = getattr(result, "rowcount", None)
-                rc = len(batch) if rowcount is None or rowcount < 0 else rowcount
-                total_written += rc
-                session.commit()
+            for target, batch in self._split_by_conflict_target(
+                    table_name, pk_cols, records):
+                chunk = self._effective_batch(columns)
+                for start in range(0, len(batch), chunk):
+                    rows = batch[start:start + chunk]
+                    if not rows:
+                        continue
+                    statement = dialect_insert(model)
+                    active_cols = [
+                        col for col in columns
+                        if col not in pk_cols
+                        and col not in target.columns
+                        and any(row.get(col) is not None for row in rows)
+                    ]
+                    if active_cols and target.columns:
+                        upsert = statement.on_conflict_do_update(
+                            index_elements=list(target.columns),
+                            index_where=target.index_where,
+                            set_={col: statement.excluded[col]
+                                  for col in active_cols},
+                        )
+                    elif target.columns:
+                        upsert = statement.on_conflict_do_nothing(
+                            index_elements=list(target.columns),
+                            index_where=target.index_where,
+                        )
+                    else:
+                        upsert = statement
+                    result = session.execute(upsert, rows)
+                    rowcount = getattr(result, "rowcount", None)
+                    written = (len(rows) if rowcount is None or rowcount < 0
+                               else rowcount)
+                    total_written += written
+                    session.commit()
 
         return total_written
 
+    def _get_pk_list(self, table_name: str) -> List[str]:
+        """The primary-key columns, from the inspector."""
+        return self._get_primary_key_columns(table_name)
+
+    def _payload(self, df: pd.DataFrame, columns: List[str]) -> List[Dict[str, Any]]:
+        """Uniform row dicts, so one executemany serves the whole batch."""
+        return [
+            {col: record.get(col) for col in columns}
+            for record in df.to_dict(orient="records")
+        ]
+
+    def _effective_batch(self, columns: Sequence[str]) -> int:
+        """Rows per statement, capped so ``rows x columns`` stays inside the cap."""
+        width = max(1, len(columns))
+        return max(1, min(int(self.batch_size), _SQLITE_BIND_LIMIT // width))
 
     def _simple_insert(self, df: pd.DataFrame, table_name: str) -> int:
         """Plain append. Bypasses every sentinel and dedup rule above."""
-
         written = 0
         for start in range(0, len(df), self.batch_size):
             chunk = df.iloc[start:start + self.batch_size]
@@ -445,13 +476,8 @@ class DBLoader:
             written += len(chunk)
         return written
 
-    # -------------------------------------------------------------------------
-    # Public: table load
-    # -------------------------------------------------------------------------
-
     def load_table(self, table_name: str, df: pd.DataFrame) -> int:
         """Load a DataFrame into ``table_name``. Returns rows actually written."""
-
         if df.empty:
             logger.info("No data to load for table %s", table_name)
             return 0
@@ -565,7 +591,6 @@ class DBLoader:
         )
         return written
 
-
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """Load multiple tables. Returns ``{table: rows written}``."""
         return {
@@ -573,13 +598,8 @@ class DBLoader:
             for table_name, df in table_dfs.items()
         }
 
-    # -------------------------------------------------------------------------
-    # Public: resolution ledger
-    # -------------------------------------------------------------------------
-
     def load_resolutions(self, resolutions: "List[Any]") -> int:
         """Persist a run's resolutions: append the ledger, project the current state."""
-
         if not resolutions:
             logger.info("No resolutions to load")
             return 0
@@ -795,7 +815,6 @@ class DBLoader:
             "Projected %d current-state row(s) into fact_concept_map", projected
         )
         return submitted
-
 
     def _count_protected(self, projection_batch: List[Dict[str, Any]]) -> int:
         """How many projections the review guard will refuse to apply."""

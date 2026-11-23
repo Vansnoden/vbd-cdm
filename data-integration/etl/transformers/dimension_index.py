@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-In-run dimension key index: one raw value, one CDM code, one concept.
-"""
+"""In-run dimension key index: one raw value, one CDM code, one concept."""
 
 from __future__ import annotations
 
@@ -24,10 +22,6 @@ from etl.transformers.concept_resolver import (
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Vocabulary
-# =============================================================================
-
 CODE_POLICY_IDENTITY = "identity"
 CODE_POLICY_SLUG = "slug"
 CODE_POLICY_CONCEPT = "concept"
@@ -48,10 +42,6 @@ _WHITESPACE = re.compile(r"\s+")
 _SLUG_PUNCT = re.compile(r"[^a-z0-9]+")
 
 
-# =============================================================================
-# Pure helpers
-# =============================================================================
-
 def _as_text(value: Any) -> str:
     """``str(value)`` with None/NaN/NA mapped to ''. Never raises."""
     if value is None:
@@ -67,6 +57,7 @@ def _as_text(value: Any) -> str:
 
 
 def _coerce_int(value: Any) -> Optional[int]:
+    """``int`` from a value that may be text or a float, or None."""
     text_value = _as_text(value).strip()
     if not text_value:
         return None
@@ -86,6 +77,7 @@ def _default_key(value: str) -> str:
 
 
 def _slugify(value: str) -> str:
+    """A lower-case underscore code built from the value's alphanumerics."""
     folded = _WHITESPACE.sub(" ", value.strip()).casefold()
     return _SLUG_PUNCT.sub("_", folded).strip("_")
 
@@ -101,7 +93,6 @@ def _read_field(source: Any, name: str) -> Any:
 
 def _concept_fields(concept: Any) -> tuple[dict[str, Any], Optional[str]]:
     """Translate a resolution into ``DimensionEntry`` fields."""
-
     if concept is None:
         return {}, None
 
@@ -133,10 +124,6 @@ def _concept_fields(concept: Any) -> tuple[dict[str, Any], Optional[str]]:
     return fields, None
 
 
-# =============================================================================
-# Entry
-# =============================================================================
-
 @dataclass(frozen=True)
 class DimensionEntry:
     """One dimension row as the transform loop needs it."""
@@ -153,11 +140,7 @@ class DimensionEntry:
     origin: str = ORIGIN_ASSIGNED
 
     def __post_init__(self) -> None:
-        """Enforce the two structural invariants at construction time.
-
-        Cheap, and it means no code path anywhere can produce an entry that
-        claims a review verdict or stamps a concept without a decision.
-        """
+        """Enforce the two structural invariants at construction time."""
         if not _as_text(self.code).strip():
             raise ValueError("DimensionEntry.code must be a non-empty string")
 
@@ -208,12 +191,17 @@ class DimensionEntry:
         }
 
 
-# =============================================================================
-# Index
-# =============================================================================
-
 class DimensionKeyIndex:
     """In-run map raw value -> CDM code, and code -> concept + PK."""
+
+    _SEED_ALIASES: tuple = (
+        ("pk", "pk_field"),
+        ("concept_code", "concept_code_field"),
+        ("concept_id", "concept_id_field"),
+        ("standard_code", "standard_code_field"),
+        ("concept_name", "concept_name_field"),
+        ("alias_text", "alias_field"),
+    )
 
     def __init__(self, *, code_policy: str = CODE_POLICY_IDENTITY,
                  key: Optional[Callable[[str], str]] = None,
@@ -234,12 +222,9 @@ class DimensionKeyIndex:
         self._key_fn: Callable[[str], str] = key or _default_key
         self._by_code: dict[str, DimensionEntry] = {}
         self._by_key: dict[str, str] = {}
+        self._seed_spec: Optional[dict] = None
         self._warned: set[tuple[str, str]] = set()
         self._stats: Counter = Counter()
-
-    # -------------------------------------------------------------------------
-    # Construction
-    # -------------------------------------------------------------------------
 
     @classmethod
     def from_session(cls, session, table: str, *, code_field: str,
@@ -251,11 +236,11 @@ class DimensionKeyIndex:
                      alias_field: Optional[str] = None,
                      **kwargs: Any) -> "DimensionKeyIndex":
         """Seed an index from the dimension table it describes."""
-        
         identifier_args = {
             "table": _require_identifier(table),
             "code_field": _require_identifier(code_field, what="column name"),
         }
+        prepared: dict[str, Optional[str]] = {}
         for argument, value in (
             ("pk_field", pk_field),
             ("concept_code_field", concept_code_field),
@@ -264,57 +249,14 @@ class DimensionKeyIndex:
             ("concept_name_field", concept_name_field),
             ("alias_field", alias_field),
         ):
-            if value is not None:
-                identifier_args[argument] = _require_identifier(
-                    value, what="column name"
-                )
+            prepared[argument] = (
+                None if value is None
+                else _require_identifier(value, what="column name"))
 
-        prepared = {
-            "pk_field": identifier_args.get("pk_field"),
-            "concept_code_field": identifier_args.get("concept_code_field"),
-            "concept_id_field": identifier_args.get("concept_id_field"),
-            "standard_code_field": identifier_args.get("standard_code_field"),
-            "concept_name_field": identifier_args.get("concept_name_field"),
-            "alias_field": identifier_args.get("alias_field"),
-        }
         kwargs.setdefault("label", identifier_args["table"])
         index = cls(**kwargs)
-
-        select_parts = [f"{identifier_args['code_field']} AS code"]
-        for alias, column in (
-            ("pk", prepared["pk_field"]),
-            ("concept_code", prepared["concept_code_field"]),
-            ("concept_id", prepared["concept_id_field"]),
-            ("standard_code", prepared["standard_code_field"]),
-            ("concept_name", prepared["concept_name_field"]),
-            ("alias_text", prepared["alias_field"]),
-        ):
-            select_parts.append(
-                f"{column} AS {alias}" if column else f"NULL AS {alias}"
-            )
-
-        sql = (
-            f"SELECT {', '.join(select_parts)} "
-            f"FROM {identifier_args['table']} "
-            f"ORDER BY {identifier_args['code_field']}"
-        )
-
-        rows = session.execute(text(sql)).mappings().all()
-        for row in rows:
-            code = index.register(
-                row["code"],
-                raw=row["alias_text"] if "alias_text" in row else None,
-                pk=row["pk"],
-                concept_code=row["concept_code"],
-                concept_name=row["concept_name"],
-                concept_id=row["concept_id"],
-                standard_code=row["standard_code"],
-            )
-            if prepared["alias_field"] and row["alias_text"] is not None:
-                seed_text = _as_text(row["alias_text"]).strip()
-                if seed_text:
-                    index._bind(seed_text, code.code)
-
+        index._seed_spec = dict(identifier_args, **prepared)
+        index.refresh(session)
         logger.info(
             "seeded %s from %s.%s: %d code(s), %d binding(s), %d with concept",
             index.label, identifier_args["table"], identifier_args["code_field"],
@@ -322,15 +264,38 @@ class DimensionKeyIndex:
         )
         return index
 
-    # -------------------------------------------------------------------------
-    # Assignment
-    # -------------------------------------------------------------------------
+    def _seed_query(self) -> Any:
+        """The SELECT that reads this index's dimension table."""
+        spec = self._seed_spec
+        if spec is None:
+            raise RuntimeError(
+                f"{self.label}: no seed spec; build the index with from_session().")
+        parts = [f"{spec['code_field']} AS code"]
+        for alias, argument in self._SEED_ALIASES:
+            column = spec.get(argument)
+            parts.append(f"{column} AS {alias}" if column else f"NULL AS {alias}")
+        return text(f"SELECT {', '.join(parts)} FROM {spec['table']} "
+                    f"ORDER BY {spec['code_field']}")
+
+    def refresh(self, session) -> int:
+        """Re-read the dimension table, merging new codes and PKs into this index."""
+        rows = session.execute(self._seed_query()).mappings().all()
+        for row in rows:
+            self.register(
+                row["code"],
+                raw=row["alias_text"],
+                pk=row["pk"],
+                concept_code=row["concept_code"],
+                concept_name=row["concept_name"],
+                concept_id=row["concept_id"],
+                standard_code=row["standard_code"],
+            )
+        return len(rows)
 
     def assign(self, raw: Any, concept: Any = None, *,
                code: Optional[str] = None,
                pk: Any = None) -> Optional[str]:
         """Record one raw value against a dimension code, returning that code."""
-
         raw_text = _as_text(raw)
         if not raw_text.strip():
             logger.debug(
@@ -393,10 +358,6 @@ class DimensionKeyIndex:
         """``assign`` then ``lookup``, returning the entry."""
         return self.lookup(self.assign(raw, concept))
 
-    # -------------------------------------------------------------------------
-    # Lookup
-    # -------------------------------------------------------------------------
-
     def lookup(self, code: Any) -> Optional[DimensionEntry]:
         """The entry for ``code``, or None."""
         return self._by_code.get(_as_text(code).strip())
@@ -427,16 +388,11 @@ class DimensionKeyIndex:
     def __contains__(self, code: object) -> bool:
         return _as_text(code).strip() in self._by_code
 
-    # -------------------------------------------------------------------------
-    # Registration and enrichment
-    # -------------------------------------------------------------------------
-
     def register(self, code: Any, *, raw: Any = None, pk: Any = None,
                  concept_code: Any = None, concept_name: Any = None,
                  concept_id: Any = None, standard_code: Any = None,
                  origin: str = ORIGIN_SEEDED) -> DimensionEntry:
         """Record a known mapping without inventing anything."""
-
         code_text = _as_text(code).strip()
         if not code_text:
             raise ValueError(
@@ -487,7 +443,6 @@ class DimensionKeyIndex:
 
     def update(self, code: Any, **fields: Any) -> DimensionEntry:
         """Enrich an existing entry. Fills gaps; never clears a value."""
-
         code_text = _as_text(code).strip()
         current = self._by_code.get(code_text)
         if current is None:
@@ -522,10 +477,6 @@ class DimensionKeyIndex:
             self._stats["with_concept"] += 1
         return entry
 
-    # -------------------------------------------------------------------------
-    # Diagnostics
-    # -------------------------------------------------------------------------
-
     def stats(self) -> dict[str, Any]:
         """Counts describing this index. Deterministic (sorted keys)."""
         summary: dict[str, Any] = {
@@ -557,10 +508,6 @@ class DimensionKeyIndex:
             "collisions": self._stats["aliased"],
         }
 
-    # -------------------------------------------------------------------------
-    # Internals
-    # -------------------------------------------------------------------------
-
     def _finish(self, entry: DimensionEntry, fields: Mapping[str, Any],
                 pk: Any, source: str) -> str:
         """Attach the concept and the PK to ``entry``, and return its code."""
@@ -588,7 +535,6 @@ class DimensionKeyIndex:
 
     def _make_key(self, value: str) -> str:
         """Apply the injected key function, surviving one that raises."""
-
         try:
             key = self._key_fn(value)
         except Exception as exc:  # noqa: BLE001 - a key function must not kill a run
@@ -640,6 +586,7 @@ class DimensionKeyIndex:
 
     def _merge(self, current: DimensionEntry,
                incoming: DimensionEntry) -> DimensionEntry:
+        """Fold an incoming entry into an existing one, first value winning."""
         merged: dict[str, Any] = {}
         conflicts: list[str] = []
 
@@ -674,7 +621,6 @@ class DimensionKeyIndex:
             )
 
         return replace(current, **merged)
-
 
     def _attach(self, code: str, fields: Mapping[str, Any], *,
                 source: str) -> DimensionEntry:
@@ -714,11 +660,9 @@ class DimensionKeyIndex:
             self._stats["with_concept"] += 1
         return entry
 
-
     def _store(self, entry: DimensionEntry) -> None:
         """Write an entry into the code map."""
         self._by_code[entry.code] = entry
-
 
     def _bind(self, raw: str, code: str) -> str:
         """Bind a raw spelling to a code without creating anything."""
@@ -736,7 +680,6 @@ class DimensionKeyIndex:
         self._by_key[key] = code
         return code
 
-
     def _note_blocked(self, code: str, value: str, reason: str) -> None:
         """Record that a concept was withheld, once per code and reason."""
         self._warn_once(
@@ -747,7 +690,6 @@ class DimensionKeyIndex:
             "concept.",
             self.label, value, reason, code,
         )
-
 
     def _note_collision(self, code: str, existing: DimensionEntry,
                         key: str, value: str) -> None:
@@ -762,7 +704,6 @@ class DimensionKeyIndex:
             self.label, existing.raw, value, code, self.code_policy,
         )
 
-
     def _warn_once(self, code: str, reason: str, message: str,
                    *args: Any) -> None:
         """Emit a warning the first time (code, reason) is seen."""
@@ -773,7 +714,6 @@ class DimensionKeyIndex:
         logger.warning(message, *args)
 
 
-
 def seed_from_rows(index: DimensionKeyIndex, rows: Iterable[Mapping[str, Any]],
                    *, code_field: str = "code",
                    raw_field: Optional[str] = None,
@@ -782,6 +722,7 @@ def seed_from_rows(index: DimensionKeyIndex, rows: Iterable[Mapping[str, Any]],
                    concept_id_field: Optional[str] = None,
                    standard_code_field: Optional[str] = None,
                    concept_name_field: Optional[str] = None) -> int:
+    """Register every row with a non-empty code. Returns rows registered."""
     registered = 0
     for row in rows:
         code = row.get(code_field)

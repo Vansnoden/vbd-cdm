@@ -1,18 +1,23 @@
-#-*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+"""Country resolution from coordinates: one polygon lookup, no heuristics."""
 
-import reverse_geocode as rg
-import numpy as np
-from typing import Tuple, Optional, Dict, List, Any
-import pandas as pd
-from functools import lru_cache
+from __future__ import annotations
+
 import logging
+import os
 import re
-from math import radians, sin, cos, sqrt, asin
+from dataclasses import dataclass
+from functools import lru_cache
+from math import asin, cos, isfinite, radians, sin, sqrt
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
-from database.constants import COUNTRY_LOOKUP
+import pandas as pd
+import reverse_geocode as rg
 
 logger = logging.getLogger(__name__)
 
+BOUNDARY_ENV = "VBD_ADMIN_BOUNDARIES"
 
 ISO_COUNTRY_CODES = {
     'KE': 'KEN', 'GH': 'GHA', 'NG': 'NGA', 'ZA': 'ZAF', 'TZ': 'TZA',
@@ -28,12 +33,11 @@ ISO_COUNTRY_CODES = {
     'TN': 'TUN', 'ZM': 'ZMB', 'ZW': 'ZWE'
 }
 
-
 COUNTRY_NAME_TO_ISO = {
     'Kenya': 'KE', 'Ghana': 'GH', 'Nigeria': 'NG', 'South Africa': 'ZA',
     'Tanzania': 'TZ', 'Uganda': 'UG', 'Ethiopia': 'ET', 'Algeria': 'DZ',
     'Angola': 'AO', 'Benin': 'BJ', 'Botswana': 'BW', 'Burkina Faso': 'BF',
-    'Burundi': 'BI', 'Cabo Verde': 'CV', 'Cameroon': 'CM', 
+    'Burundi': 'BI', 'Cabo Verde': 'CV', 'Cameroon': 'CM',
     'Central African Republic': 'CF', 'Chad': 'TD', 'Comoros': 'KM',
     'Congo': 'CG', "Côte d'Ivoire": 'CI', 'Djibouti': 'DJ', 'Egypt': 'EG',
     'Equatorial Guinea': 'GQ', 'Eritrea': 'ER', 'Eswatini': 'SZ',
@@ -66,20 +70,19 @@ COUNTRY_ALIASES: Dict[str, str] = {
     "CONGO BRAZZAVILLE": "CG",
 }
 
+_ISO3_TO_ISO2: Dict[str, str] = {iso3: iso2 for iso2, iso3 in ISO_COUNTRY_CODES.items()}
+
+_BOUNDARY_PATH: Optional[Path] = None
+_BOUNDARY_WARNED: set = set()
+_POLYGON_INDEX_CACHE: Dict[str, Optional["_CountryPolygonIndex"]] = {}
+_POLYGON_LOOKUP_CACHE: Dict[Tuple[float, float, str], Optional[Tuple[str, str]]] = {}
+_POLYGON_LOOKUP_LIMIT = 50_000
+
+_ISO3_RE = re.compile(r"^[A-Z]{3}$")
+
 
 def _fold_country(value: Any) -> str:
-    """Fold a country name or code to its comparison form.
-
-    Upper-case, punctuation (commas and full stops) turned into spaces, runs of
-    whitespace collapsed. Accents are preserved rather than stripped: the source
-    table spells two names with them, and stripping here would make
-    ``'Côte d'Ivoire'`` and a mangled ``'Cote d Ivoire'`` compare equal only in
-    one direction, which is exactly the kind of half-match this function exists
-    to remove. The unaccented spelling is in ``COUNTRY_ALIASES`` instead, where
-    it is visible.
-
-    ``None`` folds to ``''``. Never raises.
-    """
+    """Fold a country name or code to its comparison form."""
     if value is None:
         return ""
     text_value = str(value).upper()
@@ -91,195 +94,252 @@ _FOLDED_COUNTRY_NAMES: Dict[str, str] = {
     _fold_country(name): code for name, code in COUNTRY_NAME_TO_ISO.items()
 }
 
-
 ISO_TO_COUNTRY_NAME = {v: k for k, v in COUNTRY_NAME_TO_ISO.items()}
 
 
+def _warn_once(marker: str, message: str, *args: Any) -> None:
+    """Emit a warning the first time ``marker`` is seen."""
+    if marker in _BOUNDARY_WARNED:
+        return
+    _BOUNDARY_WARNED.add(marker)
+    logger.warning(message, *args)
+
+
+def set_boundary_path(path: Any) -> Optional[Path]:
+    """Set the GADM file country resolution reads, and drop cached lookups."""
+    global _BOUNDARY_PATH
+    _BOUNDARY_PATH = None if path is None else Path(str(path))
+    get_country_from_coords.cache_clear()
+    _POLYGON_LOOKUP_CACHE.clear()
+    if _BOUNDARY_PATH is not None:
+        logger.info("country resolution boundary: %s", _BOUNDARY_PATH)
+    return _BOUNDARY_PATH
+
+
+def boundary_path() -> Optional[Path]:
+    """The configured GADM file, from a setter call or ``VBD_ADMIN_BOUNDARIES``."""
+    if _BOUNDARY_PATH is not None:
+        return _BOUNDARY_PATH
+    env_value = os.getenv(BOUNDARY_ENV)
+    return Path(env_value) if env_value else None
+
+
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculate the great circle distance between two points in kilometers.
-    
-    Args:
-        lat1, lon1: First point in decimal degrees
-        lat2, lon2: Second point in decimal degrees
-        
-    Returns:
-        Distance in kilometers
-    """
-    R = 6371  # Earth's radius in kilometers
-    
+    """Great-circle distance between two points, in kilometres."""
+    radius = 6371
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * asin(sqrt(a))
-    
-    return R * c
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return radius * 2 * asin(sqrt(a))
+
+
+@dataclass(frozen=True)
+class _CountryPolygon:
+    """One level-0 boundary unit: its ISO2 code, its label and its geometry."""
+
+    iso2: str
+    name: str
+    geometry: Any
+
+
+class _CountryPolygonIndex:
+    """Point-in-polygon over country boundaries; STRtree when available."""
+
+    def __init__(self, polygons: list) -> None:
+        self.polygons = [p for p in polygons if p.geometry is not None]
+        self._tree = None
+        self._positions: Dict[int, int] = {}
+        if not self.polygons:
+            return
+        try:
+            from shapely.strtree import STRtree
+            geometries = [p.geometry for p in self.polygons]
+            self._tree = STRtree(geometries)
+            self._positions = {id(g): i for i, g in enumerate(geometries)}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("no STRtree for country polygons (%s); scanning boxes",
+                         type(exc).__name__)
+
+    def _candidates(self, point) -> list:
+        """Polygons whose bounding box could hold ``point``."""
+        if self._tree is not None:
+            try:
+                found = self._tree.query(point)
+            except Exception:  # noqa: BLE001
+                return list(range(len(self.polygons)))
+            positions = []
+            for item in found:
+                if isinstance(item, int):
+                    positions.append(item)
+                    continue
+                position = self._positions.get(id(item))
+                if position is not None:
+                    positions.append(position)
+            return positions
+        return [
+            index for index, polygon in enumerate(self.polygons)
+            if polygon.geometry.bounds[0] <= point.x <= polygon.geometry.bounds[2]
+            and polygon.geometry.bounds[1] <= point.y <= polygon.geometry.bounds[3]
+        ]
+
+    def at(self, lat: float, lon: float) -> Optional[_CountryPolygon]:
+        """The country holding the point, or None. Touching a border counts."""
+        if not self.polygons:
+            return None
+        try:
+            from shapely.geometry import Point
+            point = Point(float(lon), float(lat))
+        except Exception:  # noqa: BLE001
+            return None
+        if not (isfinite(point.x) and isfinite(point.y)):
+            return None
+        for position in self._candidates(point):
+            if position >= len(self.polygons):
+                continue
+            polygon = self.polygons[position]
+            try:
+                if polygon.geometry.contains(point) or polygon.geometry.touches(point):
+                    return polygon
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+
+def _polygon_index(path: Path) -> Optional[_CountryPolygonIndex]:
+    """The cached level-0 polygon index for ``path``, or None when unreadable."""
+    key = str(path)
+    if key in _POLYGON_INDEX_CACHE:
+        return _POLYGON_INDEX_CACHE[key]
+
+    index: Optional[_CountryPolygonIndex] = None
+    if not path.exists():
+        _warn_once(f"beoutils:missing:{key}",
+                   "no boundary file at %s, so country resolution returns nothing "
+                   "for a coordinate the reverse geocoder does not know. Set "
+                   "core.admin_boundaries.path or %s.", path, BOUNDARY_ENV)
+        _POLYGON_INDEX_CACHE[key] = None
+        return None
+
+    try:
+        from utilities.admin_alignment import (_active_location_pack, _layer_specs,
+                                               _gid_country, load_admin_hierarchy)
+        pack = _active_location_pack(None)
+        specs = _layer_specs(pack, levels=[0])
+        hierarchy = load_admin_hierarchy(path, pack_id=pack.pack_id, levels=[0],
+                                         registry=None)
+    except Exception as exc:  # noqa: BLE001
+        _warn_once(f"geoutils:load:{key}",
+                   "cannot read level-0 boundaries from %s (%s: %s); country "
+                   "resolution falls back to the reverse geocoder alone.", path,
+                   type(exc).__name__, exc)
+        _POLYGON_INDEX_CACHE[key] = None
+        return None
+
+    frame = hierarchy.get(0)
+    if frame is None or frame.empty:
+        _warn_once(f"geoutils:empty:{key}",
+                   "%s has no level-0 layer with rows; country resolution falls "
+                   "back to the reverse geocoder alone.", path)
+        _POLYGON_INDEX_CACHE[key] = None
+        return None
+
+    spec = specs[0]
+    gid_column = spec["gid_column"]
+    geometry_column = getattr(frame.geometry, "name", "geometry")
+    name_columns = list(spec["name_columns"]) + ["COUNTRY", "NAME_0", "NAME"]
+
+    polygons = []
+    for record in frame.to_dict("records"):
+        iso2 = _ISO3_TO_ISO2.get(_gid_country(record.get(gid_column)))
+        if not iso2:
+            continue
+        geometry = record.get(geometry_column)
+        if geometry is None:
+            continue
+        label = next((str(record[c]).strip() for c in name_columns
+                      if c in record and str(record.get(c) or "").strip()),
+                     ISO_TO_COUNTRY_NAME.get(iso2, iso2))
+        polygons.append(_CountryPolygon(iso2=iso2, name=label, geometry=geometry))
+
+    if not polygons:
+        _warn_once(f"geoutils:noiso:{key}",
+                   "%s yielded no level-0 polygon with a recognised ISO-3 code; "
+                   "country resolution falls back to the reverse geocoder alone.",
+                   path)
+        _POLYGON_INDEX_CACHE[key] = None
+        return None
+
+    index = _CountryPolygonIndex(polygons)
+    logger.info("country resolution: %d level-0 polygon(s) indexed from %s",
+                len(index.polygons), path)
+    _POLYGON_INDEX_CACHE[key] = index
+    return index
+
+
+def _country_from_polygon(lat: float, lon: float) -> Optional[Tuple[str, str]]:
+    """``(name, iso2)`` from the configured boundaries, or None."""
+    path = boundary_path()
+    if path is None:
+        _warn_once("geoutils:nopath",
+                   "no boundary file configured (core.admin_boundaries.path or "
+                   "%s), so a coordinate outside the reverse geocoder's knowledge "
+                   "resolves to no country rather than to a guessed one.",
+                   BOUNDARY_ENV)
+        return None
+
+    cache_key = (round(float(lat), 6), round(float(lon), 6), str(path))
+    if cache_key in _POLYGON_LOOKUP_CACHE:
+        return _POLYGON_LOOKUP_CACHE[cache_key]
+
+    index = _polygon_index(path)
+    hit = None if index is None else index.at(lat, lon)
+    result = None if hit is None else (hit.name, hit.iso2)
+
+    if len(_POLYGON_LOOKUP_CACHE) >= _POLYGON_LOOKUP_LIMIT:
+        _POLYGON_LOOKUP_CACHE.clear()
+    _POLYGON_LOOKUP_CACHE[cache_key] = result
+    return result
 
 
 @lru_cache(maxsize=10000)
 def get_country_from_coords(lat: float, lon: float) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Get ISO country name and code from latitude and longitude coordinates.
-    
-    Uses multiple methods in order of reliability:
-    1. reverse_geocode library (requires internet)
-    2. Nearest coordinate in COUNTRY_LOOKUP
-    3. Bounding box estimation for fallback
-    
-    Args:
-        lat: Latitude in decimal degrees
-        lon: Longitude in decimal degrees
-        
-    Returns:
-        Tuple of (country_name, country_code) or (None, None) if not found
+    """Country name and ISO2 for a coordinate, or ``(None, None)``.
+
+    Point-in-polygon against the configured level-0 boundaries first; the reverse
+    geocoder only when no boundary index is loadable.
     """
     if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
         return None, None
-    
+
     if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
-        logger.warning(f"Invalid coordinates: ({lat}, {lon})")
+        logger.warning("Invalid coordinates: (%s, %s)", lat, lon)
         return None, None
-    
-    try:
-        result = rg.search([(lat, lon)])
-        if result and len(result) > 0:
-            country_name = result[0].get('country')
-            country_code_raw = result[0].get('country_code')
-            
-            if country_code_raw:
-                country_code = country_code_raw.upper()
-                if len(country_code) == 3:
-                    for iso2, iso3 in ISO_COUNTRY_CODES.items():
-                        if iso3 == country_code:
-                            country_code = iso2
-                            break
-                elif len(country_code) == 2:
-                    pass
-                else:
-                    country_code = None
-            
-            if country_code and country_name:
-                # Verify the mapping
-                if country_code in COUNTRY_NAME_TO_ISO.values():
-                    # Get the correct country name for this ISO code
-                    correct_name = ISO_TO_COUNTRY_NAME.get(country_code)
-                    if correct_name:
-                        country_name = correct_name
-                return country_name, country_code
-                
-    except Exception as e:
-        logger.debug(f"Reverse geocode failed for ({lat}, {lon}): {e}")
-    
-    country_name, country_code = _get_country_from_nearest(lat, lon)
-    if country_code:
-        return country_name, country_code
-    
-    country_name, country_code = _get_country_from_bounding_box(lat, lon)
-    if country_code:
-        return country_name, country_code
-    
-    logger.warning(f"No country found for coordinates ({lat}, {lon})")
-    return None, None
 
+    from_polygon = _country_from_polygon(lat, lon)
+    if from_polygon is not None:
+        return from_polygon
 
-def _get_country_from_nearest(lat: float, lon: float, max_distance_km: float = 200.0) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Find nearest country using the COUNTRY_LOOKUP table with Haversine distance.
-    
-    Args:
-        lat: Latitude in decimal degrees
-        lon: Longitude in decimal degrees
-        max_distance_km: Maximum distance in kilometers to consider a match
-        
-    Returns:
-        Tuple of (country_name, country_code) or (None, None) if not found
-    """
-    if not COUNTRY_LOOKUP:
-        return None, None
-    
-    min_dist = float('inf')
-    best_match = None
-    
-    for (ref_lat, ref_lon), country_info in COUNTRY_LOOKUP.items():
+    if boundary_path() is None or _polygon_index(boundary_path()) is None:
         try:
-            dist = haversine_distance(lat, lon, ref_lat, ref_lon)
-            if dist < min_dist and dist < max_distance_km:
-                min_dist = dist
-                best_match = country_info
-        except Exception as e:
-            logger.debug(f"Error calculating distance for ({lat}, {lon}) to ({ref_lat}, {ref_lon}): {e}")
-            continue
-    
-    if best_match:
-        country_name, country_code_raw = best_match
-        # Normalize code
-        country_code = country_code_raw.upper()
-        return country_name, country_code
-    
-    return None, None
+            result = rg.search([(lat, lon)])
+            if result:
+                country_code = str(result[0].get("country_code") or "").upper()
+                if len(country_code) == 3:
+                    country_code = _ISO3_TO_ISO2.get(country_code, "")
+                if len(country_code) == 2 and country_code in COUNTRY_NAME_TO_ISO.values():
+                    return ISO_TO_COUNTRY_NAME.get(country_code), country_code
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Reverse geocode failed for (%s, %s): %s", lat, lon, exc)
 
-
-def _get_country_from_bounding_box(lat: float, lon: float) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Fallback: Use simple bounding box for African countries.
-    """
-    # African continent bounding box (rough)
-    if -35 <= lat <= 37 and -20 <= lon <= 55:
-        # More specific checks for large countries
-        if 4 <= lat <= 14 and 0 <= lon <= 15:  # West Africa
-            return "Nigeria", "NG"
-        elif 4 <= lat <= 12 and 34 <= lon <= 42:  # East Africa
-            return "Kenya", "KE"
-        elif -12 <= lat <= -4 and 28 <= lon <= 36:  # Southern Africa
-            return "Zambia", "ZM"
-        elif 24 <= lat <= 33 and 25 <= lon <= 35:  # North Africa
-            return "Egypt", "EG"
-        elif -27 <= lat <= -22 and 15 <= lon <= 30:  # South Africa
-            return "South Africa", "ZA"
-        elif 8 <= lat <= 12 and -2 <= lon <= 6:  # Ghana
-            return "Ghana", "GH"
-        elif -6 <= lat <= -1 and 29 <= lon <= 34:  # Tanzania
-            return "Tanzania", "TZ"
-        elif 0 <= lat <= 4 and 32 <= lon <= 35:  # Uganda
-            return "Uganda", "UG"
-        elif 4 <= lat <= 15 and 35 <= lon <= 48:  # Ethiopia
-            return "Ethiopia", "ET"
-        elif 0 <= lat <= 6 and 8 <= lon <= 12:  # Cameroon
-            return "Cameroon", "CM"
-        elif 24 <= lat <= 37 and -10 <= lon <= -1:  # Morocco
-            return "Morocco", "MA"
-        elif 11 <= lat <= 20 and -17 <= lon <= -13:  # Senegal
-            return "Senegal", "SN"
-        elif 4 <= lat <= 10 and 38 <= lon <= 48:  # Somalia
-            return "Somalia", "SO"
-        elif 8 <= lat <= 22 and 0 <= lon <= 10:  # Togo/Benin/Burkina
-            return "Burkina Faso", "BF"
-        elif 15 <= lat <= 23 and 1 <= lon <= 11:  # Mali/Niger
-            return "Mali", "ML"
-    
+    logger.warning("No country found for coordinates (%s, %s)", lat, lon)
     return None, None
 
 
 def get_iso_country_code(country: str) -> Optional[str]:
-    """Get the ISO 3166-1 alpha-2 country code from a name, alias or code.
+    """ISO 3166-1 alpha-2 code for a name, alias, or alpha-2/alpha-3 code.
 
-    Parameters
-    ----------
-    country : str
-        A country name, an alias, or an alpha-2 / alpha-3 code. ``None`` and
-        blank return ``None``.
-
-    Returns
-    -------
-    str or None
-        The ISO alpha-2 code, or ``None`` when nothing matched.
-
-    Examples
-    --------
-    ``'Kenya'``, ``'KEN'``, ``'ke'``, ``'Kenya (Siaya)'`` all give ``'KE'``;
-    ``'Ivory Coast'`` gives ``'CI'``; ``'Ruritania'`` gives ``None``.
+    ``'Kenya'``, ``'KEN'``, ``'ke'`` and ``'Kenya (Siaya)'`` all give ``'KE'``.
     """
     if country is None:
         return None
@@ -291,9 +351,9 @@ def get_iso_country_code(country: str) -> Optional[str]:
     if folded in ISO_COUNTRY_CODES:
         return folded
 
-    for iso2, iso3 in ISO_COUNTRY_CODES.items():
-        if iso3 == folded:
-            return iso2
+    iso2 = _ISO3_TO_ISO2.get(folded)
+    if iso2:
+        return iso2
 
     alias = COUNTRY_ALIASES.get(folded)
     if alias:
@@ -312,20 +372,25 @@ def get_iso_country_code(country: str) -> Optional[str]:
     if best is None:
         return None
     return _FOLDED_COUNTRY_NAMES[best]
-    
+
 
 def get_country_name(code: str) -> Optional[str]:
-    """
-    Get country name from ISO alpha-2 code.
-    
-    Args:
-        code: ISO alpha-2 country code
-        
-    Returns:
-        Country name or None if not found
-    """
+    """Country name for an ISO alpha-2 code, or None."""
     if not code:
         return None
-    
-    code = code.upper()
-    return ISO_TO_COUNTRY_NAME.get(code)
+    return ISO_TO_COUNTRY_NAME.get(str(code).upper())
+
+
+__all__ = [
+    "BOUNDARY_ENV",
+    "COUNTRY_ALIASES",
+    "COUNTRY_NAME_TO_ISO",
+    "ISO_COUNTRY_CODES",
+    "ISO_TO_COUNTRY_NAME",
+    "boundary_path",
+    "get_country_from_coords",
+    "get_country_name",
+    "get_iso_country_code",
+    "haversine_distance",
+    "set_boundary_path",
+]

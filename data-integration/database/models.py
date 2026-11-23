@@ -3,13 +3,11 @@
 import datetime
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer,
-    String, Text, UniqueConstraint,
+    String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.orm import relationship
 from database.session import Base
 
-
-# ========================= DIMENSIONS =========================
 
 class DimVocabulary(Base):
     """Registry of external vocabularies used for standardization."""
@@ -240,8 +238,6 @@ class DimSource(Base):
     concept_id    = Column(Integer, ForeignKey("dim_concept.concept_id"))
 
 
-# ========================= FACT TABLES =========================
-
 class FactConceptMap(Base):
     """The **current** decision for one raw value, keyed on the source triple."""
     __tablename__ = "fact_concept_map"
@@ -397,6 +393,16 @@ class FactInsecticideResistance(Base):
             "test_type_code", "source_code", "concentration",
             name="uq_fact_ir_natural",
         ),
+        # A NULL concentration is its own key; a unique constraint cannot say so
+        # because both backends treat NULLs as distinct.
+        Index(
+            "uq_fact_ir_null_concentration",
+            "location_id", "date_id", "vector_code", "insecticide_code",
+            "test_type_code", "source_code",
+            unique=True,
+            sqlite_where=text("concentration IS NULL"),
+            postgresql_where=text("concentration IS NULL"),
+        ),
         Index("idx_fact_resistance_insecticide", "insecticide_code"),
         Index("idx_fact_resistance_source", "source_code"),
         Index("idx_fact_resistance_date", "date_id"),
@@ -483,8 +489,9 @@ class FactSocioeconomicCondition(Base):
     indicator_value = Column(Float)
     
     __table_args__ = (
+        # source_code: two products can publish one indicator for one cell-year.
         UniqueConstraint(
-            "location_id", "year", "indicator_code",
+            "location_id", "year", "indicator_code", "source_code",
             name="uq_socio_loc_year_indicator",
         ),
         Index("idx_fact_socio_location", "location_id"),
@@ -559,7 +566,11 @@ class FactEnvironment(Base):
     source = relationship("DimSource")
 
     __table_args__ = (
-        UniqueConstraint("location_id", "date_id", "variable", name="uq_env_loc_date_var"),
+        # source_code: a second climate product must not overwrite the first.
+        UniqueConstraint(
+            "location_id", "date_id", "variable", "source_code",
+            name="uq_env_loc_date_var",
+        ),
         Index("idx_fact_env_location", "location_id"),
         Index("idx_fact_env_date", "date_id"),
         Index("idx_fact_env_variable", "variable"),

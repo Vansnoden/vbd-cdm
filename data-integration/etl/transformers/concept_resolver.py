@@ -24,9 +24,10 @@ from utilities.vocabulary.loader import (
 )
 
 logger = logging.getLogger(__name__)
+from utilities.constants import DECISION_AUTO_ACCEPTED
 
+AUTO_ACCEPTED = DECISION_AUTO_ACCEPTED
 
-AUTO_ACCEPTED = "auto_accepted"
 NEEDS_REVIEW = "needs_review"
 REJECTED = "rejected"
 UNRESOLVED = "unresolved"

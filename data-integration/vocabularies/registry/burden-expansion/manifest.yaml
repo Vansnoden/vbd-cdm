@@ -1,82 +1,55 @@
-# Allocation policy for expanding annual malaria burden into daily case series.
-#
-# This file exists because the daily series it governs is *modelled*, and a
-# modelled number has to be attributable. When these factors lived as literals in
-# consolidation.py, a seasonal pattern recovered from fact_disease_case was a
-# recovery of the pipeline's own constants, which cannot be published as a
-# finding about malaria transmission.
-#
-# Declaring them here changes three things:
-#   * the pattern is data, with a version and a citation, not code;
-#   * its use is recorded in run_manifest.parameters.expansion, so a stored
-#     database names the policy that produced it;
-#   * its ABSENCE is a defined state. With no pack, or with this pack removed,
-#     the expansion allocates uniformly and says so, which is the defensible
-#     null model rather than an implicit default.
-
 pack_id: burden-expansion
-version: "2024-01"
-released_with: "1.1.0"
+version: "1.0.0"
+released_with: "1.2"
 
-description: >-
-  Monthly, weekday and holiday weights for distributing an annual case total
-  across the days of a year, plus the shape of the multiplicative deviation
-  applied within a year. Weights are relative: the generator normalises them
-  and then corrects by largest remainder, so the daily counts sum to the
-  rounded annual total regardless of the values used here.
+burden_expansion:
+  description: >-
+    Allocation and selection policy for the modelled daily case series. Every key
+    here changes a stored number, so every key is read from this one block and
+    nothing outside it.
 
-#: Where these numbers come from, in a form a reader can check. Reporting a
-#: seasonal pattern from an expanded series is only legitimate when the pattern
-#: is attributed to a source outside the pipeline.
-source: >-
-  Seasonality approximates the bimodal long-rains / short-rains transmission
-  profile of the Lake Victoria basin (Kenya DHS and WHO World Malaria Report
-  national monthly profiles, 2015-2023), expressed as relative monthly weights
-  and normalised at allocation time. Values are policy inputs, not fitted
-  parameters, and are not estimates of western Kenyan transmission intensity.
+  source: >-
+    TODO: cite the source of these weights, or delete `seasonality` to allocate
+    uniformly. A seasonal claim drawn from a series generated under this pack is
+    unsupported until this names a citation.
 
-#: Relative weight per calendar month. Higher = more cases allocated.
-seasonality:
-  1: 0.55
-  2: 0.50
-  3: 0.65
-  4: 1.35
-  5: 1.50
-  6: 1.40
-  7: 1.30
-  8: 1.10
-  9: 0.85
-  10: 0.65
-  11: 0.55
-  12: 0.50
+  seasonality:
+    "1": 1.35
+    "2": 1.25
+    "3": 1.20
+    "4": 1.05
+    "5": 0.95
+    "6": 0.80
+    "7": 0.70
+    "8": 0.75
+    "9": 0.85
+    "10": 1.00
+    "11": 1.20
+    "12": 1.30
 
-#: Relative weight per ISO weekday, Monday = 1. Within-week variation is
-#: reporting artefact (weekend clinic attendance), not transmission.
-weekly_pattern:
-  1: 0.95
-  2: 1.00
-  3: 1.05
-  4: 1.10
-  5: 1.10
-  6: 0.90
-  7: 0.85
+  weekly_pattern:
+    "6": 1.10
+    "7": 1.15
 
-#: Named holiday dips, keyed MM-DD. Names are documentation only.
-holiday_factors:
-  "12-25": 0.80
-  "12-26": 0.80
-  "01-01": 0.75
-  "05-01": 0.85
+  intra_month_amplitude: 0.15
+  base_variation: 0.0
+  spike_probability: 0.0
+  spike_mean_excess: 0.5
 
-#: Amplitude of the within-month sinusoid. Zero disables it.
-intra_month_amplitude: 0.08
+  measure:
+    prefer: cases_mean
+    rate_scale: per_100k
 
-#: Sigma of the log-normal multiplicative deviation applied per day. This is the
-#: parameter that makes two runs differ, so it is recorded with the run. Zero
-#: disables the deviation and yields a smooth, fully deterministic series.
-base_variation: 0.25
+  denominator:
+    indicator: SP.POP.TOTL
+    national_allocation: true
 
-#: Probability of an outbreak spike on any given day, and the mean of its
-#: exponential excess. Zero disables spikes.
-spike_probability: 0.005
-spike_mean_excess: 0.50
+  write:
+    grain: admin2
+    seed: 42
+    force: false
+
+  selection:
+    years: null
+    locations: null
+    limit: null

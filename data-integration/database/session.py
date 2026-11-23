@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Engine and session construction, and the single database-URL resolver.
-"""
+"""Engine and session construction, and the single database-URL resolver."""
 
 import os
 import re
@@ -93,6 +91,9 @@ if _IS_SQLITE:
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=30000")
+            # WAL + NORMAL: a rebuildable ETL database, not a system of record.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
         finally:
             cursor.close()
 

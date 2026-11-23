@@ -1,82 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fix_cases.py - CLI wrapper for burden expansion.
-
-The implementation lives in
-``utilities.consolidation.DataConsolidator.expand_burden_to_daily()``. This file
-contains no counting logic, no seasonal curve and no distribution of any kind:
-it opens a session, calls that method, reports the returned stats and translates
-them into an exit status.
-
-Safe to call, and safe to call twice:
-
-    - Without --force, burden records that already have ESTIMATE rows are skipped.
-    - With --force, those ESTIMATE rows are deleted and re-inserted.
-
-    The random seed is combined with (location_id, year), so the same
-    (location, year) produces the same daily series across runs regardless of
-    how many other locations were processed in between.
-
-The two measures
-----------------
-A burden record carries ``cases_mean`` (an absolute case count for the cell-year)
-or ``incidence_rate`` (a rate that needs a population denominator), or both.
-
-``--prefer cases-mean`` is the default, because a measured count needs no
-population, no allocation and no assumption about the rate's unit. ``--check``
-reports which measure each record uses, and what the rate reading would be under
-both plausible scales, so the choice is made on evidence rather than by default.
-
-Why --check exists
-------------------
-The expansion used to report its problems only in INFO log lines, so "inserted 0"
-and "inserted 240,000" looked the same from a shell. ``--check`` resolves every
-selected record exactly as a run would - it imports ``_PopulationIndex`` and
-``_RATE_SCALES`` rather than re-deriving them - and prints the summary, the write
-grain, the projected row count and a per-group verdict.
-
-Usage::
-
-    python scripts/fix_cases.py --check
-    python scripts/fix_cases.py --group-by-level admin3 --check
-    python scripts/fix_cases.py --group-by-level admin3 --years 2022 --force
-    python scripts/fix_cases.py --prefer incidence-rate --national-allocation \\
-        --rate-scale per_person --years 2022
-    python scripts/fix_cases.py --population 54000000
-
-Exit status
------------
-0   rows were inserted, or every group was already present (idempotent no-op)
-1   the session or the expansion raised; the message is on stderr
-2   usage error (argparse)
-3   nothing to expand, or every group rounds to 0 cases
-4   nothing would be inserted because no denominator is reachable
-5   the pass ran but reported one or more record-level errors
-"""
+"""fix_cases.py - CLI wrapper for burden expansion."""
 
 from __future__ import annotations
 
 import argparse
-import calendar
 import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-# ---------------------------------------------------------------------------
-# Project root
-#
-# `scripts/fix_cases.py` -> <repo>. NOT Path(__file__).parent: that is the
-# scripts/ directory, and inserting it puts `utilities` out of reach.
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Loaded before anything that touches `database`: database.session resolves its
-# URL once, at import time, from DATABASE_URL / the DB_* tuple / the SQLite
-# fallback. A later load_dotenv() is a no-op for this process, so an operator
-# with a working .env would otherwise silently get an empty SQLite file.
 try:
     from dotenv import load_dotenv
 
@@ -86,6 +23,7 @@ try:
 except Exception:  # noqa: BLE001 - python-dotenv is optional
     pass
 
+from utilities.constants import ESTIMATE_METHOD, POPULATION_INDICATOR
 from sqlalchemy import text  # noqa: E402
 
 from database.session import DATABASE_URL, engine  # noqa: E402
@@ -95,15 +33,13 @@ from utilities.consolidation import (  # noqa: E402
     _RATE_SCALES,
     DataConsolidator,
     _PopulationIndex,
+    _days_in_year,
     _positive,
+    project_case_rows,
 )
 
 logger = logging.getLogger("fix_cases")
 
-
-# ---------------------------------------------------------------------------
-# Exit status
-# ---------------------------------------------------------------------------
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -111,30 +47,19 @@ EXIT_NOTHING_TO_DO = 3
 EXIT_NO_POPULATION = 4
 EXIT_RUN_ERRORS = 5
 
-#: The socioeconomic indicator the expansion reads a denominator from.
-POPULATION_INDICATOR = "SP.POP.TOTL"
 
-#: The identification method the expansion tags its rows with.
-ESTIMATE_METHOD = "ESTIMATE"
-
-#: Above this many projected case rows, the operator is told what it will cost.
 _VOLUME_WARNING = 5_000_000
 
-#: Sample rows shown in the projection sections.
 _SAMPLE_LIMIT = 10
 
-#: argparse names for the two measures.
 _PREFER_CHOICES = {
     "cases-mean": _BURDEN_MEASURE_CASES_MEAN,
     "incidence-rate": _BURDEN_MEASURE_INCIDENCE_RATE,
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _scalar(session, sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[int]:
+def _scalar(session, sql: str,
+            params: Optional[Dict[str, Any]] = None) -> Optional[int]:
     """``COUNT(*)``-style scalar, or None when the query cannot run."""
     try:
         value = session.execute(text(sql), params or {}).scalar()
@@ -145,6 +70,7 @@ def _scalar(session, sql: str, params: Optional[Dict[str, Any]] = None) -> Optio
 
 
 def _rows(session, sql: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:
+    """A diagnostic query's rows, or ``[]`` when it cannot run."""
     try:
         return session.execute(text(sql), params or {}).fetchall()
     except Exception as exc:  # noqa: BLE001
@@ -171,6 +97,7 @@ def _print_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> None:
 
 
 def _fmt(value: Any) -> str:
+    """Thousands-separated integer, or a readable stand-in."""
     if value is None:
         return "unavailable"
     try:
@@ -180,8 +107,9 @@ def _fmt(value: Any) -> str:
 
 
 def _days(year: Any) -> int:
+    """Leap-adjusted year length, from the one implementation of it."""
     try:
-        return 366 if calendar.isleap(int(year)) else 365
+        return _days_in_year(int(year))
     except (TypeError, ValueError):
         return 365
 
@@ -201,10 +129,6 @@ def _int_list(raw: Optional[str], label: str) -> Optional[List[int]]:
             raise SystemExit(f"{label}: {piece!r} is not an integer") from None
     return sorted(set(values)) or None
 
-
-# ---------------------------------------------------------------------------
-# Projection - the same resolution a run performs
-# ---------------------------------------------------------------------------
 
 def _record_where(locations: Optional[Sequence[int]],
                   years: Optional[Sequence[int]]) -> Tuple[str, Dict[str, Any]]:
@@ -228,12 +152,7 @@ def _record_where(locations: Optional[Sequence[int]],
 def _project(consolidator, *, locations, years, limit, indicator,
              default_population, national_allocation, prefer, rate_scale,
              group_by_level, sample_limit=_SAMPLE_LIMIT) -> Dict[str, Any]:
-    """Resolve every selected record exactly as the run would, and project it.
-
-    One streamed pass. Produces the measure each record uses, the denominator tier
-    behind it, the write grain, and a per-group rounding projection - so the
-    verdict here is the run's own arithmetic, not a second implementation of it.
-    """
+    """Resolve every selected record exactly as the run would, and project it."""
     session = consolidator.session
     where, params = _record_where(locations, years)
     sql = (
@@ -348,8 +267,6 @@ def _project(consolidator, *, locations, years, limit, indicator,
                 continue
 
             annual = (rate_value / scale) * float(population)
-            # The same record under the other plausible reading, so the operator
-            # can see which one produces a sane national total.
             rate_sum_per_100k += (rate_value / _RATE_SCALES["per_100k"]) * float(population)
             rate_sum_per_person += (rate_value / _RATE_SCALES["per_person"]) * float(population)
             basis = _BURDEN_MEASURE_INCIDENCE_RATE
@@ -371,10 +288,9 @@ def _project(consolidator, *, locations, years, limit, indicator,
                 "-" if population is None else f"{population:,.0f}",
                 source_note, f"{annual:,.2f}"])
 
-    # ---- rounding projection -----------------------------------------
     written_groups = 0
     zero_groups = 0
-    case_rows = 0
+    rows_by_year: Dict[int, int] = {}
     annual_written = 0.0
     largest: List[Tuple[float, Tuple[Any, Any, Any, Any]]] = []
     for key, annual in totals.items():
@@ -383,10 +299,11 @@ def _project(consolidator, *, locations, years, limit, indicator,
             zero_groups += 1
             continue
         written_groups += 1
-        case_rows += _days(key[1])
+        rows_by_year[key[1]] = rows_by_year.get(key[1], 0) + 1
         annual_written += annual
         largest.append((annual, key))
     largest.sort(reverse=True)
+    case_rows = project_case_rows(rows_by_year)
 
     return {
         "records": records,
@@ -409,10 +326,6 @@ def _project(consolidator, *, locations, years, limit, indicator,
         "population_index": index,
     }
 
-
-# ---------------------------------------------------------------------------
-# The report
-# ---------------------------------------------------------------------------
 
 def report(consolidator, *, locations: Optional[Sequence[int]] = None,
            years: Optional[Sequence[int]] = None, limit: Optional[int] = None,
@@ -647,10 +560,6 @@ def report(consolidator, *, locations: Optional[Sequence[int]] = None,
     return EXIT_OK
 
 
-# ---------------------------------------------------------------------------
-# Reporting a real run
-# ---------------------------------------------------------------------------
-
 def summarise(stats: Dict[str, Any]) -> int:
     """Print the expansion's stats dict and translate it into an exit status."""
     inserted = int(stats.get("inserted") or 0)
@@ -719,11 +628,8 @@ def summarise(stats: Dict[str, Any]) -> int:
     return EXIT_NOTHING_TO_DO
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, with the four exit-status conventions documented."""
     parser = argparse.ArgumentParser(
         prog="fix_cases.py",
         description=(
@@ -783,8 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="comma-separated location_id values to expand")
     parser.add_argument("--seed", type=int, default=42,
                         help="random seed; combined with (location_id, year)")
-    parser.add_argument("--variation", type=float, default=0.25,
-                        help="base log-normal variation, 0 to 1 (default: 0.25)")
+    parser.add_argument("--variation", type=float, default=None, metavar="SIGMA",
+                        help=("base log-normal variation, 0 to 1. Omitted means "
+                              "'from the kernel pack' (burden_expansion."
+                              "base_variation), which is what the pipeline uses; "
+                              "an explicit value overrides it for this call only."))
     parser.add_argument("--log-level", default="WARNING",
                         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
                         help=("logging verbosity (default: WARNING: a full run over "
@@ -806,10 +715,11 @@ def _known_admin_levels() -> Set[str]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Parse the CLI, run either the preflight or the write pass."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not (0.0 <= args.variation <= 1.0):
+    if args.variation is not None and not (0.0 <= args.variation <= 1.0):
         parser.error("--variation must be between 0 and 1 (it is a log-normal sigma)")
     if args.default_population is not None and args.default_population <= 0:
         parser.error("--population must be a positive number")

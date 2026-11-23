@@ -31,10 +31,10 @@ from sqlalchemy import bindparam, text
 from database.geoutils import haversine_distance
 from database.session import require_identifier
 from utilities.vocabulary.registry import ConceptPack, VocabularyRegistry
+from utilities.constants import GRID_NAME_RE, MAX_IN_VARS
 
 logger = logging.getLogger(__name__)
 
-MAX_IN_VARS = 900
 
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "vocabularies" / "registry"
 
@@ -42,8 +42,6 @@ _REGISTRY_CACHE: dict = {}
 _WARNED: set = set()
 
 _SAFE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-_GRID_CODE_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*/\s*-?\d+(?:\.\d+)?\s*$")
 
 
 def _text(value: Any) -> str:
@@ -475,7 +473,7 @@ def resolve_parent_locations(session, *,
         label = _text(record.get("admin_level"))
         if grid_level and label == grid_level:
             return True
-        return bool(_GRID_CODE_RE.match(_text(record.get("name"))))
+        return bool(GRID_NAME_RE.match(_text(record.get("name"))))
 
     frame["_is_grid"] = frame.apply(_is_grid, axis=1)
     existing_parent = dict(zip(frame["location_id"].astype(int),

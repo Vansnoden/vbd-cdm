@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
-"""
-MappingTransformer - Interprets CSV mapping files (or inline column specs) to
-transform source DataFrames into CDM table-specific DataFrames.
-"""
+"""MappingTransformer - CSV mapping rows or inline column specs to CDM frames."""
 
 from __future__ import annotations
 
 import calendar
 import json
 import logging
-import warnings
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING, Union
 
 import pandas as pd
 from sqlalchemy import Integer
@@ -74,13 +70,8 @@ class MappingTransformer:
         self._validate_mapping()
         self._group_by_target_table()
 
-    # -------------------------------------------------------------------------
-    # Construction hygiene
-    # -------------------------------------------------------------------------
-
     def _normalise_mapping_frame(self) -> None:
         """Coerce the mapping frame into the dtypes the transform loop expects."""
-
         nullable_columns = (
             "source_column", "transform_params", "static_value",
             "default_value", "source_data_type",
@@ -104,10 +95,8 @@ class MappingTransformer:
 
             self.mapping["required"] = self.mapping["required"].map(_as_bool)
 
-
     def _validate_mapping(self) -> None:
         """Validate the mapping table for whichever input shape produced it."""
-        
         required_cols = {
             "source_column", "target_table", "target_column", "transform", "required",
         }
@@ -175,14 +164,12 @@ class MappingTransformer:
                 f"write NULL for every record."
             )
 
-
     def _group_by_target_table(self) -> None:
         """Group mapping rows by target table name."""
         self.table_mappings = defaultdict(list)
         for _, row in self.mapping.iterrows():
             self.table_mappings[row["target_table"]].append(row.to_dict())
 
-    
     def _apply_map_transform(
         self,
         value: Any,
@@ -191,7 +178,6 @@ class MappingTransformer:
         target_field: Optional[str] = None,
     ) -> Any:
         """Apply a ``map`` transform: a dimension lookup, or a literal table."""
-
         ref = params.get("ref") if isinstance(params, dict) else None
 
         if ref:
@@ -250,7 +236,6 @@ class MappingTransformer:
 
         return lookup.get(str(value), default)
 
-    
     def _apply_resolve_transform(
         self,
         value: Any,
@@ -258,7 +243,6 @@ class MappingTransformer:
         params: Optional[dict] = None,
     ) -> Optional[str]:
         """Resolve one raw value against the pack that governs ``field``."""
-
         if self.registry is None:
             raise ValueError(
                 "the `resolve` transform needs a VocabularyRegistry "
@@ -312,7 +296,6 @@ class MappingTransformer:
 
     def _partition_field(self, target_field: str) -> tuple[str, str]:
         """Split ``'dim_vector.species_name'`` into its two halves."""
-
         table, separator, column = str(target_field).partition(".")
         table = table.strip()
         column = column.strip()
@@ -331,7 +314,6 @@ class MappingTransformer:
             return marker
         return table, column
 
-    
     def _apply_date_parse_transform(self, value: Any,
                                     params: Optional[Union[str, dict]]) -> Any:
         """Parse a date value and return it as a ``YYYY-MM-DD`` string."""
@@ -349,7 +331,6 @@ class MappingTransformer:
                 "Date parse failed for %r with format %r: %s", value, fmt, exc
             )
             return None
-
 
     def _apply_derive_category_transform(self, value, params,
                                          extra_context=None) -> Any:
@@ -417,6 +398,7 @@ class MappingTransformer:
         return params.get("default")
 
     def _apply_cast_transform(self, value, params):
+        """Cast a value to ``params['type']``, honouring the null tokens."""
         target_type = params.get("type", "str")
         null_tokens = {"NR", "NF", "ND", "-", "NA", "N/A", "NONE", "NULL", "NAN"}
         if isinstance(value, str) and value.strip().upper() in null_tokens:
@@ -435,6 +417,7 @@ class MappingTransformer:
 
     def _apply_split_transform(self, value: Any,
                                params: Optional[Union[str, dict]]) -> Any:
+        """Take one field out of a delimited value."""
         delimiter = params.get("delimiter", ",")
         index = int(params.get("index", 0))
         parts = str(value).split(delimiter)
@@ -443,11 +426,9 @@ class MappingTransformer:
         logger.warning("Split index %s out of range for value %r", index, value)
         return None
 
-
     def _apply_unit_convert_transform(self, value: Any,
                                       params: Optional[Union[str, dict]]) -> Any:
         """Affine unit conversion."""
-
         params = params or {}
         factor = float(params.get("factor", 1.0))
         offset = float(params.get("offset", 0.0))
@@ -508,12 +489,10 @@ class MappingTransformer:
             number = round(number, int(round_to))
         return number
 
-
     def _apply_coalesce_transform(self, value: Any,
                                   params: Optional[Union[str, dict]],
                                   extra_context: Optional[dict] = None) -> Any:
         """Return the first non-null value among ``params['columns']``."""
-
         params = params or {}
         cols = params.get("columns", [])
         default = params.get("default")
@@ -548,12 +527,10 @@ class MappingTransformer:
 
         return default
 
-
     def _apply_format_date_transform(self, value: Any,
                                      params: Optional[Union[str, dict]],
                                      extra_context: Optional[dict] = None) -> Any:
         """Build a ``YYYY-MM-DD`` date_id from one to three source columns."""
-
         params = params or {}
         cols = params.get("columns", [])
         if not isinstance(cols, list) or not (1 <= len(cols) <= 3):
@@ -613,13 +590,11 @@ class MappingTransformer:
             last_day = calendar.monthrange(year, month)[1]
             return datetime(year, month, last_day).strftime("%Y-%m-%d")
 
-
     def _apply_transform(self, value: Any, transform: str,
                          params: Optional[Union[str, dict]],
                          extra_context: Optional[dict] = None,
                          target_field: Optional[str] = None) -> Any:
         """Apply one transformation to one value."""
-
         if isinstance(params, str):
             if not params.strip():
                 params = {}
@@ -666,23 +641,16 @@ class MappingTransformer:
         logger.warning("Unknown transform type: %r", transform)
         return value
 
-    # -------------------------------------------------------------------------
-    # Model / key discovery
-    # -------------------------------------------------------------------------
-
     def _model_for_table(self, table_name: str):
         """The model class for ``table_name``, derived rather than listed."""
-
         for attribute in sorted(vars(models)):
             candidate = getattr(models, attribute)
             if getattr(candidate, "__tablename__", None) == table_name:
                 return candidate
         return None
 
-
     def _natural_key(self, table_name: str) -> Optional[str]:
         """The column a dimension row is identified by."""
-
         try:
             from etl.loaders.db_loader import NATURAL_KEY_CONFIG
         except Exception as exc:  # noqa: BLE001
@@ -693,11 +661,9 @@ class MappingTransformer:
         columns = config.get("columns") or []
         return columns[0] if columns else None
 
-
     def _index_for(self, table_name: str,
                    field_name: str) -> Optional["DimensionKeyIndex"]:
         """A ``DimensionKeyIndex`` for ``table_name`` matched on ``field_name``."""
-
         cache_key = (table_name, field_name)
         if cache_key in self._index_cache:
             return self._index_cache[cache_key]
@@ -751,10 +717,28 @@ class MappingTransformer:
         self._index_cache[cache_key] = index
         return index
 
+    def refresh_indexes(self, tables: Optional[Iterable[str]] = None) -> int:
+        """Re-seed cached dimension indexes so a fact row sees this chunk's rows.
+
+        Refreshes, never rebuilds: (table, field) is a cache key, not the identity
+        of the index.
+        """
+        wanted = None if tables is None else {str(name) for name in tables}
+        seen: set = set()
+        refreshed = 0
+        with SessionLocal() as session:
+            for (table_name, _field), index in sorted(self._index_cache.items()):
+                if index is None or table_name in seen:
+                    continue
+                if wanted is not None and table_name not in wanted:
+                    continue
+                seen.add(table_name)
+                index.refresh(session)
+                refreshed += 1
+        return refreshed
 
     def _governing_pack(self, target_field: Optional[str]):
         """The pack that governs ``target_field``, or None."""
-
         if self.registry is None or not target_field:
             return None
         try:
@@ -763,19 +747,13 @@ class MappingTransformer:
             logger.debug("no governing pack for %r: %s", target_field, exc)
             return None
 
-
     def _ensure_resolver(self) -> ConceptResolver:
         """The per-transformer ``ConceptResolver``, created on first use."""
-
         if self._resolver is None:
             if self._resolver_session is None:
                 self._resolver_session = SessionLocal()
             self._resolver = ConceptResolver(self.registry, self._resolver_session)
         return self._resolver
-
-    # -------------------------------------------------------------------------
-    # Row loop
-    # -------------------------------------------------------------------------
 
     def _build_lookup_value(self, original_value: Any, params: dict,
                             extra_context: Optional[dict]) -> Any:
@@ -791,51 +769,8 @@ class MappingTransformer:
                 return separator.join(parts)
         return original_value
 
-
-    def _legacy_lookup_dimension_id(self, model_class, field_name: str,
-                                    lookup_value: Any) -> Optional[int]:
-        """Deprecated. Per-value ``SELECT ... WHERE field == value`` lookup."""
-
-        warnings.warn(
-            "MappingTransformer._lookup_dimension_id is deprecated; use "
-            "_index_for() + DimensionKeyIndex.lookup_raw(), which keys values "
-            "consistently and returns the concept alongside the surrogate key.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        if lookup_value is None or (
-            isinstance(lookup_value, float) and pd.isna(lookup_value)
-        ):
-            return None
-
-        cache = self.__dict__.setdefault("_dimension_cache", {})
-        cache_key = f"{model_class.__tablename__}_{field_name}_{lookup_value}"
-        if cache_key in cache:
-            return cache[cache_key]
-
-        try:
-            with SessionLocal() as session:
-                query = session.query(model_class).filter(
-                    getattr(model_class, field_name) == lookup_value
-                )
-                result = query.first()
-                if result:
-                    pk_column = model_class.__table__.primary_key.columns.values()[0]
-                    pk_value = getattr(result, pk_column.name)
-                    cache[cache_key] = pk_value
-                    return pk_value
-                logger.warning(
-                    "No match found for %s.%s = %r",
-                    model_class.__tablename__, field_name, lookup_value,
-                )
-                return None
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Error during dimension lookup: %s", exc)
-            return None
-
-
     def _determine_raw_value(self, source_row, target_table, mapping) -> Any:
+        """The source value a mapping row reads, before any transform."""
         value = None
 
         if pd.notna(mapping.get("static_value")):
@@ -866,7 +801,6 @@ class MappingTransformer:
                 except (ValueError, TypeError):
                     value = None
         return value
-
 
     def _apply_transformation(self, idx, raw_value, source_row, mapping,
                               row_context) -> Any:
@@ -908,8 +842,8 @@ class MappingTransformer:
             target_field=target_field,
         )
 
-
     def _apply_default_transform(self, value, mapping, target_table):
+        """Substitute the default for a null value, raising when required."""
         if value is None or (isinstance(value, float) and pd.isna(value)):
             if mapping.get("required", False):
                 raise ValueError(
@@ -919,9 +853,9 @@ class MappingTransformer:
             value = mapping.get("default_value")
         return value
 
-
     def _build_table_df(self, source_df: pd.DataFrame,
                         target_table: str) -> pd.DataFrame:
+        """One target table's frame, built row by row from the mapping."""
         rows = []
         mappings = self.table_mappings[target_table]
         records = source_df.to_dict(orient="records")
@@ -940,11 +874,9 @@ class MappingTransformer:
             rows.append(record)
         return pd.DataFrame(rows)
 
-
     def transform(self, source_df: pd.DataFrame,
                   target_filter: Optional[set] = None) -> Dict[str, pd.DataFrame]:
         """Transform a source DataFrame into ``{table: DataFrame}``."""
-
         if len(source_df) > self.large_df_threshold:
             logger.warning(
                 "Source DataFrame has %s row(s) (> %s). Row-wise transformation "
@@ -965,10 +897,6 @@ class MappingTransformer:
                 )
         return result
 
-    # -------------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------------
-
     def pending_resolutions(self) -> List[Any]:
         """Resolutions produced by ``resolve`` transforms, sorted, de-duplicated."""
         return [
@@ -976,10 +904,8 @@ class MappingTransformer:
             for key in sorted(self._pending_resolutions)
         ]
 
-
     def close(self) -> None:
         """Release the resolver's session. Safe to call twice."""
-
         if self._resolver_session is not None:
             try:
                 self._resolver_session.close()
@@ -987,10 +913,8 @@ class MappingTransformer:
                 self._resolver_session = None
                 self._resolver = None
 
-
     def __enter__(self) -> "MappingTransformer":
         return self
-
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()

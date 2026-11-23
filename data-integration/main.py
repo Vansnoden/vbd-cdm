@@ -1,24 +1,20 @@
 # -*- coding: utf-8 -*-
-"""CDM Integration Framework - orchestrator.
-
-Reads ``base_config.yaml``, runs the ETL for every configured source, then the
-consolidation step, then the summary.
-"""
+"""CDM Integration Framework - orchestrator."""
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import os
 import re
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import text
 
 PROJECT_ROOT = Path(__file__).parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -33,21 +29,25 @@ try:
 except Exception:  
     pass
 
-from database import models                                    
-from database.geoutils import get_iso_country_code              
+from database.geoutils import (                                
+    boundary_path, get_iso_country_code, set_boundary_path,
+)
 from database.session import (                                  
     DATABASE_URL, SessionLocal, engine,
 )
 from etl.extractors.file_extractor import FileExtractor         
 from etl.loaders.db_loader import DBLoader                      
 from etl.transformers.mapping_transformer import MappingTransformer  
+from utilities.burden_expansion import ensure_dim_time          
 from utilities.consolidation import (                           
     DataConsolidator, enrich_location_dataframe, run_consolidation,
 )
+from utilities.constants import ESTIMATE_METHOD                 
 from utilities.data_transform_library import load_yaml_config    
 from utilities.database_summary import (                         
     export_all_table_samples, schema_summary_to_csv,
 )
+from utilities.run_manifest import record_row_counts, record_run  
 from utilities.vocabulary.registry import VocabularyRegistry     
 
 (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
@@ -68,16 +68,8 @@ DIM_TIME_START = "1900-01-01"
 DIM_TIME_END = "2026-12-31"
 
 
-# ---------------------------------------------------------------------------
-# Run context
-# ---------------------------------------------------------------------------
-
 class RunContext:
-    """One run's identity: run id, registry, digest, countries.
-
-    Threaded through ingestion, consolidation and the concept pass so every
-    ``Resolution`` names the same run and the same vocabulary release.
-    """
+    """One run's identity: run id, registry, digest, countries."""
 
     def __init__(self, registry: Optional[VocabularyRegistry] = None,
                  run_id: Optional[str] = None,
@@ -91,15 +83,77 @@ class RunContext:
         self.started_at = datetime.utcnow()
 
     def describe(self) -> Dict[str, Any]:
+        """A JSON-serialisable summary for a log line."""
         return {"run_id": self.run_id, "registry_digest": self.registry_digest,
                 "countries": list(self.countries),
                 "packs": (len(self.registry.packs())
                           if self.registry is not None else 0)}
 
 
+def _call_manifest(function: Any, **kwargs: Any) -> Any:
+    """Call a run_manifest helper, passing only the keywords it declares.
+
+    The manifest module's signature is the authority: a keyword it does not take is
+    dropped rather than raised, so a helper gaining or losing a parameter cannot
+    break the run it exists to describe.
+    """
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return function(**kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD
+           for p in parameters.values()):
+        return function(**kwargs)
+    return function(**{k: v for k, v in kwargs.items() if k in parameters})
+
+
+def record_run_manifest(context: RunContext, config_path: Any) -> None:
+    """Record this run's identity and inputs in ``run_manifest``. Never raises."""
+    if not context.run_id:
+        logger.error("no run id: run_manifest cannot say what produced this "
+                     "database.")
+        return
+    try:
+        with SessionLocal() as session:
+            _call_manifest(
+                record_run,
+                session=session,
+                run_id=context.run_id,
+                registry=context.registry,
+                countries=list(context.countries),
+                config_path=str(config_path),
+                project_root=str(PROJECT_ROOT),
+            )
+    except Exception as exc:  # noqa: BLE001 - provenance must not abort a run
+        logger.error("could not record this run in run_manifest: %s: %s",
+                     type(exc).__name__, exc)
+        logger.error("the database this run produces therefore carries no git "
+                     "SHA, config SHA-256 or registry digest for it.")
+        return
+    logger.info("run_manifest: recorded run %s", context.run_id)
+
+
+def record_run_counts(context: RunContext) -> None:
+    """Record this run's table row counts in ``run_manifest``. Never raises."""
+    if not context.run_id:
+        return
+    try:
+        with SessionLocal() as session:
+            _call_manifest(
+                record_row_counts,
+                session=session,
+                run_id=context.run_id,
+                project_root=str(PROJECT_ROOT),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("could not record row counts for run %s: %s: %s",
+                     context.run_id, type(exc).__name__, exc)
+        return
+    logger.info("run_manifest: recorded row counts for run %s", context.run_id)
+
+
 def load_run_registry(path: Optional[Path] = None) -> Optional[VocabularyRegistry]:
-    """Load the shipped packs once. A missing directory is a warning, not a
-    failure; a malformed manifest raises."""
+    """Load the shipped packs once; a missing directory is a warning, not a failure."""
     target = Path(path or DEFAULT_REGISTRY_PATH)
     if not target.is_dir():
         logger.warning(
@@ -113,17 +167,8 @@ def load_run_registry(path: Optional[Path] = None) -> Optional[VocabularyRegistr
     return registry
 
 
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-
-def setup_environment() -> None:
-    """Seed ``dim_time`` and make sure the output directories exist.
-
-    ``load_dotenv()`` already ran at import time, before ``database.session``
-    resolved its URL; calling it again here is a harmless no-op kept so a caller
-    that imports this module for its helpers gets the same environment.
-    """
+def setup_environment(dry_run: bool = False) -> None:
+    """Create the output directories, and seed ``dim_time`` unless dry-running."""
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -131,11 +176,18 @@ def setup_environment() -> None:
         pass
     (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
     (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
+    if dry_run:
+        logger.info("dry run: dim_time seeding skipped")
+        return
     init_dim_time(DIM_TIME_START, DIM_TIME_END)
 
 
 def init_dim_time(start_date: str, end_date: str) -> None:
-    """Seed ``dim_time`` over a date range. Idempotent."""
+    """Seed ``dim_time`` over a date range, whole years only. Idempotent.
+
+    Delegates to ``ensure_dim_time``, the single writer of ``dim_time`` rows, so
+    ``season`` is NULL here too.
+    """
     logger.info("Initializing dim_time from %s to %s", start_date, end_date)
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -143,35 +195,16 @@ def init_dim_time(start_date: str, end_date: str) -> None:
         raise ValueError(
             f"start_date ({start_date}) must be before end_date ({end_date})")
 
+    created = 0
     with SessionLocal() as session:
-        existing = {row[0] for row in session.execute(
-            text("SELECT date_id FROM dim_time"))}
-        current = start
-        pending = []
-        while current <= end:
-            date_id = current.strftime("%Y-%m-%d")
-            if date_id not in existing:
-                pending.append(models.DimTime(
-                    date_id=date_id, date=current.date(), year=current.year,
-                    month=current.month, week=current.isocalendar()[1],
-                    day_of_year=current.timetuple().tm_yday,
-                    season=("dry" if current.month in (11, 12, 1, 2, 3)
-                            else "wet"),
-                    is_holiday=False))
-            current += timedelta(days=1)
+        for year in range(start.year, end.year + 1):
+            created += ensure_dim_time(session, year)
+    logger.info("  dim_time: created %d row(s) across %d year(s)",
+                created, end.year - start.year + 1)
 
-        if pending:
-            session.bulk_save_objects(pending)
-            session.commit()
-        logger.info("  created %d new time record(s), %d already existed",
-                    len(pending), len(existing))
-
-
-# ---------------------------------------------------------------------------
-# Source discovery
-# ---------------------------------------------------------------------------
 
 def get_all_files_from_folder(folder_path: str, extension: str) -> List[str]:
+    """Every file under ``folder_path`` with ``extension``, sorted."""
     ext = extension.lower()
     return [
         os.path.join(root, name)
@@ -181,6 +214,7 @@ def get_all_files_from_folder(folder_path: str, extension: str) -> List[str]:
 
 
 def get_file_paths(source_config: Dict[str, Any]) -> List[str]:
+    """Resolve a source's configured path into the files to read."""
     extension = str(source_config.get("extension") or "").lower()
     source_path = source_config.get("path")
     if not extension:
@@ -202,6 +236,7 @@ def get_file_paths(source_config: Dict[str, Any]) -> List[str]:
 
 
 def get_mapping_path(source_config: Dict[str, Any]) -> Optional[str]:
+    """The absolute mapping CSV path, or None for an inline ``columns:`` source."""
     mapping_path = source_config.get("matching")
     if not mapping_path:
         return None
@@ -209,10 +244,6 @@ def get_mapping_path(source_config: Dict[str, Any]) -> Optional[str]:
         mapping_path = str(PROJECT_ROOT / mapping_path)
     return mapping_path
 
-
-# ---------------------------------------------------------------------------
-# Transform / load
-# ---------------------------------------------------------------------------
 
 DIMENSION_TABLES = [
     "dim_source", "dim_vector", "dim_location", "dim_disease",
@@ -230,11 +261,10 @@ FACT_TABLES = [
 
 def _transformer_for(source_config: Dict[str, Any], context: RunContext,
                      mapping_path: Optional[str]) -> MappingTransformer:
-    """One transformer per pass, with the registry and run id attached.
+    """A transformer with the registry and run id attached, one per pass.
 
-    Per pass, not per source: a chunk's fact mappings must see the dimension rows
-    that same chunk loaded, and the transformer's ``DimensionKeyIndex`` cache is
-    seeded once per (table, field).
+    Per pass, not per source: a per-chunk refresh is what keeps fact mappings seeing
+    the dimension rows that same chunk loaded.
     """
     if mapping_path:
         return MappingTransformer(mapping_path, registry=context.registry,
@@ -243,28 +273,72 @@ def _transformer_for(source_config: Dict[str, Any], context: RunContext,
                               registry=context.registry, run_id=context.run_id)
 
 
+def _keep_tables(built: Dict[str, pd.DataFrame],
+                 order: List[str]) -> Dict[str, pd.DataFrame]:
+    """The non-empty frames among ``order``, in that order."""
+    return {name: built[name] for name in order
+            if name in built and not built[name].empty}
+
+
+class _SourceTransformers:
+    """One dimension and one fact transformer per source, reused across chunks."""
+
+    def __init__(self, source_config: Dict[str, Any], context: RunContext,
+                 mapping_path: Optional[str]) -> None:
+        self._dimensions = _transformer_for(source_config, context, mapping_path)
+        self._facts = _transformer_for(source_config, context, mapping_path)
+
+    def dimensions(self, chunk_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """Dimension frames for one chunk."""
+        return _keep_tables(
+            self._dimensions.transform(chunk_df,
+                                       target_filter=set(DIMENSION_TABLES)),
+            DIMENSION_TABLES)
+
+    def facts(self, chunk_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        """Fact frames for one chunk."""
+        return _keep_tables(
+            self._facts.transform(chunk_df, target_filter=set(FACT_TABLES)),
+            FACT_TABLES)
+
+    def refresh(self, loaded_tables: Any) -> None:
+        """Re-seed the cached dimension indexes after a chunk's dimension load."""
+        names = [str(name) for name in loaded_tables]
+        if not names:
+            return
+        self._dimensions.refresh_indexes(names)
+        self._facts.refresh_indexes(names)
+
+    def close(self) -> None:
+        """Release both transformers' resolver sessions."""
+        self._dimensions.close()
+        self._facts.close()
+
+
 def transform_dimensions(df: pd.DataFrame, source_config: Dict[str, Any],
                          mapping_path: Optional[str],
                          context: RunContext) -> Dict[str, pd.DataFrame]:
+    """Dimension frames for one whole frame, with a throwaway transformer."""
     transformer = _transformer_for(source_config, context, mapping_path)
     try:
-        built = transformer.transform(df, target_filter=set(DIMENSION_TABLES))
+        return _keep_tables(
+            transformer.transform(df, target_filter=set(DIMENSION_TABLES)),
+            DIMENSION_TABLES)
     finally:
         transformer.close()
-    return {t: built[t] for t in DIMENSION_TABLES
-            if t in built and not built[t].empty}
 
 
 def transform_facts(df: pd.DataFrame, source_config: Dict[str, Any],
                     mapping_path: Optional[str],
                     context: RunContext) -> Dict[str, pd.DataFrame]:
+    """Fact frames for one whole frame, with a throwaway transformer."""
     transformer = _transformer_for(source_config, context, mapping_path)
     try:
-        built = transformer.transform(df, target_filter=set(FACT_TABLES))
+        return _keep_tables(
+            transformer.transform(df, target_filter=set(FACT_TABLES)),
+            FACT_TABLES)
     finally:
         transformer.close()
-    return {t: built[t] for t in FACT_TABLES
-            if t in built and not built[t].empty}
 
 
 def load_dimensions(dim_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
@@ -311,16 +385,11 @@ def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
     return total
 
 
-# ---------------------------------------------------------------------------
-# Ingestion
-# ---------------------------------------------------------------------------
-
 def _filename_year(file_path: str) -> Optional[int]:
-    """A 4-digit year from the file stem, if one is present.
+    """The last 4-digit year in the file stem, if any.
 
-    Read for one purpose only: to add a ``year`` column when the mapping expects
-    one and the source does not carry it. If the source already has a ``year``
-    column this value is ignored — see ``run_ingestion_for_source``.
+    Read for one purpose: to supply ``year`` when the mapping expects one and the
+    source does not carry it.
     """
     stem = os.path.splitext(os.path.basename(file_path))[0]
     candidates = re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", stem)
@@ -328,10 +397,14 @@ def _filename_year(file_path: str) -> Optional[int]:
 
 
 def run_ingestion_for_source(source_config: Dict[str, Any],
-                             context: RunContext) -> bool:
+                             context: RunContext,
+                             dry_run: bool = False) -> bool:
     """Run the complete ETL pipeline for one source."""
     source_name = source_config.get("source_name", "unknown")
     logger.info("===== Processing source: %s =====", source_name)
+    if dry_run:
+        logger.info("  dry run: source %r read and transformed, nothing written",
+                    source_name)
     try:
         file_paths = get_file_paths(source_config)
         if not file_paths:
@@ -345,46 +418,57 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                 f"`columns:`; one is required to say which source column becomes "
                 f"which CDM column.")
 
-        loader = DBLoader(batch_size=10000, upsert=True, use_copy=True)
+        loader = None if dry_run else DBLoader(
+            batch_size=10000, upsert=True, use_copy=True)
         extract_mode = source_config.get("extract_mode", "single")
         reader_args = dict(source_config.get("extension_options") or {})
 
         dim_rows = fact_rows = 0
-        for file_path in file_paths:
-            logger.info("Processing file: %s", file_path)
-            year = _filename_year(file_path)
+        transformers = _SourceTransformers(source_config, context, mapping_path)
+        try:
+            for file_path in file_paths:
+                logger.info("Processing file: %s", file_path)
+                year = _filename_year(file_path)
 
-            extractor = FileExtractor(extract_mode=extract_mode,
-                                      large_df_threshold=10_000_000)
-            result = extractor.extract(file_path, **reader_args)
+                extractor = FileExtractor(extract_mode=extract_mode,
+                                          large_df_threshold=10_000_000)
+                result = extractor.extract(file_path, **reader_args)
 
-            chunks = result if extract_mode == "chunked" else [result]
-            for chunk_index, chunk_df in enumerate(chunks, start=1):
-                if chunk_df is None or chunk_df.empty:
-                    continue
-                if extract_mode == "chunked" and chunk_index % 10 == 0:
-                    logger.info("  processed %d chunk(s) so far", chunk_index)
+                chunks = result if extract_mode == "chunked" else [result]
+                for chunk_index, chunk_df in enumerate(chunks, start=1):
+                    if chunk_df is None or chunk_df.empty:
+                        continue
+                    if extract_mode == "chunked" and chunk_index % 10 == 0:
+                        logger.info("  processed %d chunk(s) so far", chunk_index)
 
-                if year is not None and "year" not in chunk_df.columns:
-                    chunk_df = chunk_df.copy()
-                    chunk_df["year"] = year
-                elif year is not None:
-                    logger.debug(
-                        "  source already carries a `year` column; not overwriting "
-                        "it with %s from the filename", year)
+                    if year is not None and "year" not in chunk_df.columns:
+                        chunk_df = chunk_df.copy()
+                        chunk_df["year"] = year
+                    elif year is not None:
+                        logger.debug(
+                            "  source already carries a `year` column; not overwriting "
+                            "it with %s from the filename", year)
 
-                dim_dfs = transform_dimensions(chunk_df, source_config,
-                                               mapping_path, context)
-                if dim_dfs:
-                    dim_rows += load_dimensions(dim_dfs, loader)
+                    dim_dfs = transformers.dimensions(chunk_df)
+                    if dim_dfs:
+                        if loader is not None:
+                            dim_rows += load_dimensions(dim_dfs, loader)
+                        else:
+                            dim_rows += sum(len(f) for f in dim_dfs.values())
+                        transformers.refresh(dim_dfs.keys())
 
-                fact_dfs = transform_facts(chunk_df, source_config,
-                                           mapping_path, context)
-                if fact_dfs:
-                    fact_rows += load_facts(fact_dfs, loader)
+                    fact_dfs = transformers.facts(chunk_df)
+                    if fact_dfs:
+                        if loader is not None:
+                            fact_rows += load_facts(fact_dfs, loader)
+                        else:
+                            fact_rows += sum(len(f) for f in fact_dfs.values())
+        finally:
+            transformers.close()
 
-        logger.info("Source %r completed: %d dimension row(s), %d fact row(s)",
-                    source_name, dim_rows, fact_rows)
+        logger.info("Source %r completed: %d dimension row(s), %d fact row(s)%s",
+                    source_name, dim_rows, fact_rows,
+                    " (dry run, not written)" if dry_run else "")
         return True
     except Exception as exc:
         logger.error("Failed to process source %r: %s", source_name, exc,
@@ -392,19 +476,17 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
         return False
 
 
-# ---------------------------------------------------------------------------
-# Consolidation
-# ---------------------------------------------------------------------------
-
 def run_consolidation_step(core_cfg: Dict[str, Any],
-                           context: RunContext) -> Dict[str, Any]:
+                           context: RunContext,
+                           dry_run: bool = False) -> Dict[str, Any]:
     """Run the full consolidation step for this run."""
     logger.info("=" * 60)
-    logger.info("RUNNING DATA CONSOLIDATION")
+    logger.info("RUNNING DATA CONSOLIDATION%s", " (dry run)" if dry_run else "")
     logger.info("=" * 60)
 
     result = run_consolidation(
-        core_cfg, registry=context.registry, run_id=context.run_id, close=True)
+        core_cfg, registry=context.registry, run_id=context.run_id, close=True,
+        dry_run=dry_run)
 
     if isinstance(result, dict) and result.get("error"):
         logger.error("Consolidation failed; summary generation is skipped.")
@@ -414,12 +496,7 @@ def run_consolidation_step(core_cfg: Dict[str, Any],
 
 
 def _log_consolidation_summary(results: Dict[str, Any]) -> None:
-    """Emit a human-readable summary of a ``consolidate_all()`` result dict.
-
-    Every key read here is one ``consolidate_all`` actually returns. An earlier
-    revision read six keys that were never produced and printed zeros while the
-    run reported success.
-    """
+    """Emit a human-readable summary of a ``consolidate_all()`` result dict."""
     if not isinstance(results, dict):
         return
 
@@ -474,6 +551,15 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
                         "places, e.g. %s", len(same_name),
                         ", ".join(f"{g['name']}×{g['count']}"
                                   for g in same_name[:4]))
+
+        country_standard = loc.get("country_standard") or {}
+        if isinstance(country_standard, dict) and country_standard.get("examined"):
+            logger.info(
+                "                 country: %d row(s) examined, %d rewritten, %d "
+                "geometry conflict(s) reported and NOT written",
+                country_standard.get("examined", 0),
+                country_standard.get("rewritten", 0),
+                country_standard.get("geometry_conflicts", 0))
 
     vload = results.get("vocabulary_load") or {}
     if isinstance(vload, dict) and vload.get("packs"):
@@ -593,21 +679,29 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
     logger.info("-" * 60)
 
 
-def run_burden_expansion(force: bool = True) -> bool:
-    """Expand yearly burden rows into daily case records."""
+def run_burden_expansion(force: bool = True, run_id: Optional[str] = None,
+                         dry_run: bool = False) -> bool:
+    """Expand yearly burden rows into daily case records.
+
+    False when the pass raised or reported a record-level error, so the caller's
+    exit status reflects it.
+    """
     logger.info("=" * 60)
-    logger.info("RUNNING BURDEN EXPANSION")
+    logger.info("RUNNING BURDEN EXPANSION%s", " (dry run)" if dry_run else "")
     logger.info("=" * 60)
 
     consolidator = None
     try:
         consolidator = DataConsolidator()
-        stats = consolidator.expand_burden_to_daily(force=force)
+        stats = consolidator.expand_burden_to_daily(
+            force=force, run_id=run_id, dry_run=dry_run)
         logger.info("Burden expansion: %d inserted, %d present, %d skipped, "
-                    "%d no-population, %d error(s)", stats["inserted"],
+                    "%d no-population, %d error(s)%s", stats["inserted"],
                     stats["already_present"], stats["skipped"],
-                    stats["no_population"], stats["errors"])
-        return True
+                    stats["no_population"], stats["errors"],
+                    (" (dry run: %d row(s) projected)" % stats["case_rows"]
+                     if dry_run else ""))
+        return int(stats.get("errors") or 0) == 0
     except Exception as exc:  
         logger.error("Burden expansion failed: %s", exc, exc_info=True)
         return False
@@ -616,11 +710,8 @@ def run_burden_expansion(force: bool = True) -> bool:
             consolidator.close()
 
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
 def generate_summary(output_dir: str = "outputs") -> None:
+    """Write the schema summary and a sample per table."""
     logger.info("Generating database summary...")
     output_path = PROJECT_ROOT / output_dir
     output_path.mkdir(exist_ok=True)
@@ -629,11 +720,8 @@ def generate_summary(output_dir: str = "outputs") -> None:
     logger.info("Summary generated in %s", output_path)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main() -> None:
+    """Parse the CLI, run the configured steps, and exit non-zero on failure."""
     parser = argparse.ArgumentParser(description="CDM Integration Framework")
     parser.add_argument("--config", default="base_config.yaml")
     parser.add_argument("--skip-ingest", action="store_true")
@@ -642,15 +730,15 @@ def main() -> None:
     parser.add_argument("--expand-burden", action="store_true")
     parser.add_argument("--source", help="Run only for this source key")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Consolidate without writing")
+                        help="run every step, write nothing (no rows, no manifest)")
     args = parser.parse_args()
-
-    setup_environment()
 
     config_path = PROJECT_ROOT / args.config
     if not config_path.exists():
         logger.error("Configuration file not found: %s", config_path)
         sys.exit(1)
+
+    setup_environment(dry_run=args.dry_run)
 
     config = load_yaml_config(str(config_path)) or {}
     logger.info("Loaded configuration from %s", config_path)
@@ -658,16 +746,37 @@ def main() -> None:
     core = config.get("core") or {}
     steps = (config.get("process") or {}).get("steps", [])
 
+    boundary = ((core.get("admin_boundaries") or {}).get("path"))
+    if boundary:
+        candidate = Path(str(boundary))
+        set_boundary_path(candidate if candidate.is_absolute()
+                          else PROJECT_ROOT / candidate)
+    else:
+        logger.warning(
+            "core.admin_boundaries.path is not set, so a coordinate the reverse "
+            "geocoder does not know resolves to no country rather than to a "
+            "guessed one.")
+
     context = RunContext(countries=list(core.get("countries") or []))
-    logger.info("run id %s | registry %s | %d pack(s)",
+    logger.info("run id %s | registry %s | %d pack(s)%s",
                 context.run_id, context.registry_digest[:12] or "(none)",
-                len(context.registry.packs()) if context.registry else 0)
+                len(context.registry.packs()) if context.registry else 0,
+                " | DRY RUN" if args.dry_run else "")
     logger.info("database %s (file: %s)", DATABASE_URL,
                 engine.url.database or "(in memory)")
+    logger.info("boundary %s", boundary_path() or "(none)")
+
+    if args.dry_run:
+        logger.info("dry run: run_manifest is not written")
+    else:
+        record_run_manifest(context, config_path)
 
     run_ingest = not args.skip_ingest and "ingest_data" in steps
     run_consolidate = not args.skip_consolidation and "consolidate" in steps
     run_summary = not args.skip_summary and "generate_summary" in steps
+
+    succeeded: List[str] = []
+    failed: List[str] = []
 
     if run_ingest:
         data_sources = config.get("data_sources") or {}
@@ -677,22 +786,51 @@ def main() -> None:
             for source_key, source_cfg in data_sources.items():
                 if args.source and source_key != args.source:
                     continue
-                run_ingestion_for_source(source_cfg, context)
+                if run_ingestion_for_source(source_cfg, context,
+                                            dry_run=args.dry_run):
+                    succeeded.append(source_key)
+                else:
+                    failed.append(source_key)
+            logger.info("Sources: %d succeeded, %d failed%s",
+                        len(succeeded), len(failed),
+                        f" (failed: {', '.join(failed)})" if failed else "")
+
+    exit_code = 1 if failed else 0
 
     if run_consolidate:
-        result = run_consolidation_step(core, context)
+        result = run_consolidation_step(core, context, dry_run=args.dry_run)
         if isinstance(result, dict) and result.get("error"):
             if run_summary:
                 logger.error("Skipping summary: consolidation failed.")
             sys.exit(2)
+        burden_errors = int((result.get("burden") or {}).get("errors") or 0)
+        if burden_errors:
+            logger.error(
+                "Burden expansion reported %d record-level error(s); the run exits "
+                "non-zero. Each affected series is in the log above, and every "
+                "other phase completed.", burden_errors)
+            exit_code = 1
 
     if run_summary:
-        generate_summary()
+        if args.dry_run:
+            logger.info("dry run: summary generation skipped")
+        else:
+            record_run_counts(context)
+            generate_summary()
 
     if args.expand_burden and not run_consolidate:
-        run_burden_expansion()
+        if not run_burden_expansion(force=not args.dry_run,
+                                    run_id=context.run_id,
+                                    dry_run=args.dry_run):
+            exit_code = 1
 
-    logger.info("Run %s complete.", context.run_id)
+    if exit_code:
+        logger.error("Run %s finished with failures (ingest: %d failed, exit %d).",
+                     context.run_id, len(failed), exit_code)
+        sys.exit(exit_code)
+
+    logger.info("Run %s complete%s.", context.run_id,
+                " (dry run: nothing was written)" if args.dry_run else "")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+site,date,species,count,method
+Kisumu,2020-03-01,Anopheles gambiae,12,HLC
+Kisumu,2020-03-02,Anopheles arabiensis,5,HLC
+Siaya,2020-03-01,Anopheles funestus,3,CDC-LT
