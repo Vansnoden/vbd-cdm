@@ -166,6 +166,11 @@ class AuditedLoader(DBLoader):
     """A ``DBLoader`` that records every table it touches into an ``AuditLedger``."""
 
     def __init__(self, ledger: AuditLedger, source_key: str, **kwargs: Any) -> None:
+        """Bind the loader to a ledger and to the source being ingested."""
+        if ledger is None:
+            raise ValueError(
+                "AuditedLoader needs an AuditLedger; pass ledger=None to "
+                "run_ingestion_for_source instead of building this class.")
         super().__init__(**kwargs)
         self.ledger = ledger
         self.source_key = str(source_key)
@@ -182,10 +187,6 @@ class AuditedLoader(DBLoader):
         audit.rows_written += int(written)
         return written
 
-    def drop(self, table_name: str, reason: str, count: int) -> None:
-        """Record rows dropped before they reached ``load_table``."""
-        self.ledger.note_drop(self.source_key, table_name, reason, count)
-
     @staticmethod
     def count_rows(table_name: str) -> int:
         """The current row count of one table, or 0 when it is unreadable."""
@@ -199,7 +200,7 @@ class AuditedLoader(DBLoader):
                     text(f"SELECT COUNT(*) FROM {name}")).scalar() or 0)
         except Exception:
             return 0
-
+            
 
 __all__ = [
     "REASON_DUPLICATE", "REASON_NOT_NULL", "REASON_NULL_LOCATION",

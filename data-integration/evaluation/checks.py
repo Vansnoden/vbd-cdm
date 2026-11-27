@@ -177,7 +177,7 @@ def check_natural_keys(session) -> Check:
             duplicates += count
             details.append(f"{table}: {count}")
     status = STATUS_PASS if duplicates == 0 else STATUS_FAIL
-    return Check("C02", "no duplicate natural key in any fact table", status,
+    return Check("C02", "no duplicate natural key in any table", status,
                  float(duplicates), ", ".join(details) or "no duplicate group")
 
 

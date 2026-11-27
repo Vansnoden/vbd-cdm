@@ -138,6 +138,11 @@ class DBLoader:
         if hook is not None and count:
             hook(table_name, reason, int(count))
 
+    
+    def drop(self, table_name: str, reason: str, count: int = 1) -> None:
+        """Record rows discarded before this loader saw them."""
+        self._note_drop(table_name, reason, count)
+
 
     def _get_primary_key_columns(self, table_name: str) -> List[str]:
         """The table's primary-key columns, in constraint order."""

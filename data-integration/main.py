@@ -13,7 +13,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from evaluation.audit import AuditLedger, AuditedLoader
 
 import pandas as pd
 
@@ -27,29 +26,30 @@ try:
             load_dotenv(_candidate)
             break
     load_dotenv()
-except Exception:  
+except Exception:
     pass
 
-from database.geoutils import (                                
+from database.geoutils import (
     boundary_path, get_iso_country_code, set_boundary_path,
 )
-from database.session import (                                  
+from database.session import (
     DATABASE_URL, SessionLocal, engine,
 )
-from etl.extractors.file_extractor import FileExtractor         
-from etl.loaders.db_loader import DBLoader                      
-from etl.transformers.mapping_transformer import MappingTransformer  
-from utilities.burden_expansion import ensure_dim_time          
-from utilities.consolidation import (                           
+from etl.extractors.file_extractor import FileExtractor
+from etl.loaders.db_loader import DBLoader
+from etl.transformers.mapping_transformer import MappingTransformer
+from evaluation.audit import AuditLedger, AuditedLoader
+from utilities.burden_expansion import ensure_dim_time
+from utilities.consolidation import (
     DataConsolidator, enrich_location_dataframe, run_consolidation,
 )
-from utilities.constants import ESTIMATE_METHOD                 
-from utilities.data_transform_library import load_yaml_config    
-from utilities.database_summary import (                         
+from utilities.constants import ESTIMATE_METHOD
+from utilities.data_transform_library import load_yaml_config
+from utilities.database_summary import (
     export_all_table_samples, schema_summary_to_csv,
 )
-from utilities.run_manifest import count_tables, record_row_counts, record_run  
-from utilities.vocabulary.registry import VocabularyRegistry     
+from utilities.run_manifest import count_tables, record_row_counts, record_run
+from utilities.vocabulary.registry import VocabularyRegistry
 
 (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
 (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
@@ -173,7 +173,7 @@ def setup_environment(dry_run: bool = False) -> None:
     try:
         from dotenv import load_dotenv
         load_dotenv()
-    except Exception:  
+    except Exception:
         pass
     (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
     (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
@@ -205,7 +205,12 @@ def init_dim_time(start_date: str, end_date: str) -> None:
 
 
 def get_all_files_from_folder(folder_path: str, extension: str) -> List[str]:
-    """Every file under ``folder_path`` with ``extension``, sorted."""
+    """Every file under ``folder_path`` with ``extension``, sorted.
+
+    Sorted because a folder source is read file by file, and the order the
+    filesystem hands them back is not the same on two machines. Without this the
+    same folder produces a different database on a different run.
+    """
     ext = extension.lower()
     return sorted(
         os.path.join(root, name)
@@ -355,10 +360,8 @@ def load_dimensions(dim_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
                 before = len(frame)
                 frame = frame.dropna(subset=["location_id"])
                 if len(frame) < before:
-                    logger.warning("  removed %d row(s) with NULL location_id",
-                                   before - len(frame))
-        if len(frame) < before:
-                    loader.drop("dim_location", "null_location_id", before - len(frame))
+                    loader.drop("dim_location", "null_location_id",
+                                before - len(frame))
         if frame.empty:
             continue
         total += loader.load_table(table_name, frame)
@@ -379,9 +382,6 @@ def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
                 before = len(frame)
                 frame = frame.dropna(subset=[column])
                 if len(frame) < before:
-                    logger.info("    dropped %d row(s) with null %s",
-                                before - len(frame), column)
-        if len(frame) < before:
                     loader.drop(table_name, f"null_{column}", before - len(frame))
         if frame.empty:
             logger.warning("No valid rows to load for %s", table_name)
@@ -401,6 +401,22 @@ def _filename_year(file_path: str) -> Optional[int]:
     return int(candidates[-1]) if candidates else None
 
 
+def _build_loader(dry_run: bool, ledger: Optional[AuditLedger],
+                  source_key: str) -> Optional[DBLoader]:
+    """The loader for one source: audited when a ledger is supplied, plain otherwise.
+
+    One construction site. The previous version built an ``AuditedLoader`` and
+    then overwrote it with a plain ``DBLoader``, which is why ``loader.drop``
+    did not exist at the call site.
+    """
+    if dry_run:
+        return None
+    if ledger is None:
+        return DBLoader(batch_size=10000, upsert=True, use_copy=True)
+    return AuditedLoader(ledger, source_key, batch_size=10000, upsert=True,
+                         use_copy=True)
+
+
 def run_ingestion_for_source(source_config: Dict[str, Any],
                              context: RunContext,
                              dry_run: bool = False,
@@ -409,8 +425,6 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
     """Run the complete ETL pipeline for one source."""
     source_name = source_config.get("source_name", "unknown")
     logger.info("===== Processing source: %s =====", source_name)
-    loader = None if dry_run else AuditedLoader(
-            ledger, source_key, batch_size=10000, upsert=True, use_copy=True)
     if dry_run:
         logger.info("  dry run: source %r read and transformed, nothing written",
                     source_name)
@@ -427,8 +441,7 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                 f"`columns:`; one is required to say which source column becomes "
                 f"which CDM column.")
 
-        loader = None if dry_run else DBLoader(
-            batch_size=10000, upsert=True, use_copy=True)
+        loader = _build_loader(dry_run, ledger, source_key)
         extract_mode = source_config.get("extract_mode", "single")
         reader_args = dict(source_config.get("extension_options") or {})
 
@@ -443,14 +456,12 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                                           large_df_threshold=10_000_000)
                 result = extractor.extract(file_path, **reader_args)
 
-                if ledger is not None and not dry_run:
-                    rows = len(result) if isinstance(result, pd.DataFrame) else 0
-                    ledger.file_read(source_key, file_path, rows)
-
+                file_rows = 0
                 chunks = result if extract_mode == "chunked" else [result]
                 for chunk_index, chunk_df in enumerate(chunks, start=1):
                     if chunk_df is None or chunk_df.empty:
                         continue
+                    file_rows += len(chunk_df)
                     if extract_mode == "chunked" and chunk_index % 10 == 0:
                         logger.info("  processed %d chunk(s) so far", chunk_index)
 
@@ -476,6 +487,12 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                             fact_rows += load_facts(fact_dfs, loader)
                         else:
                             fact_rows += sum(len(f) for f in fact_dfs.values())
+
+                if ledger is not None and not dry_run:
+                    ledger.file_read(source_key, file_path, file_rows,
+                                     extract_mode=extract_mode)
+                logger.info("  %s: %d row(s) parsed", os.path.basename(file_path),
+                            file_rows)
         finally:
             transformers.close()
 
@@ -562,7 +579,7 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
         if same_name:
             logger.info("                 %d same-name group(s) kept as distinct "
                         "places, e.g. %s", len(same_name),
-                        ", ".join(f"{g['name']}×{g['count']}"
+                        ", ".join(f"{g['name']} x{g['count']}"
                                   for g in same_name[:4]))
 
         country_standard = loc.get("country_standard") or {}
@@ -582,7 +599,7 @@ def _log_consolidation_summary(results: Dict[str, Any]) -> None:
                     vload.get("skipped", 0), vload.get("no_csv", 0))
         for pack_id, entry in sorted(vload["packs"].items()):
             if entry.get("status") in ("no_csv", "error"):
-                logger.warning("    %-12s %s%s — every value in domain %r stays "
+                logger.warning("    %-12s %s%s -- every value in domain %r stays "
                                "unresolved",
                                pack_id, entry.get("status"),
                                (f": {entry['reason']}" if entry.get("reason") else ""),
@@ -715,7 +732,7 @@ def run_burden_expansion(force: bool = True, run_id: Optional[str] = None,
                     (" (dry run: %d row(s) projected)" % stats["case_rows"]
                      if dry_run else ""))
         return int(stats.get("errors") or 0) == 0
-    except Exception as exc:  
+    except Exception as exc:
         logger.error("Burden expansion failed: %s", exc, exc_info=True)
         return False
     finally:
@@ -731,6 +748,34 @@ def generate_summary(output_dir: str = "outputs") -> None:
     schema_summary_to_csv(str(output_path / "schema_summary.csv"))
     export_all_table_samples(str(output_path / "table_samples"), rows_per_table=100)
     logger.info("Summary generated in %s", output_path)
+
+
+def write_ingest_ledger(ledger: AuditLedger) -> bool:
+    """Write this run's audit ledger and report any table that does not balance.
+
+    False when at least one table staged rows it neither wrote nor accounted for,
+    so the caller can make the run fail instead of shipping the database.
+    """
+    path = ledger.write(PROJECT_ROOT / "outputs" / "audit" /
+                        f"ingest_{ledger.run_id or 'unknown'}.json")
+    logger.info("ingest ledger: %s", path)
+
+    imbalanced = ledger.imbalanced()
+    for row in imbalanced:
+        logger.error(
+            "row accounting does not balance for %s.%s: staged=%d written=%d "
+            "dropped=%d unexplained=%d (reasons: %s)",
+            row["source_key"], row["table"], row["rows_staged"],
+            row["rows_written"], row["rows_dropped"], row["rows_unexplained"],
+            row.get("drop_reasons") or "none")
+
+    tables = ledger.reconciliation()
+    staged = sum(row["rows_staged"] for row in tables)
+    written = sum(row["rows_written"] for row in tables)
+    dropped = sum(row["rows_dropped"] for row in tables)
+    logger.info("ingest ledger totals: staged=%d written=%d dropped=%d over %d "
+                "source/table pair(s)", staged, written, dropped, len(tables))
+    return not imbalanced
 
 
 def main() -> None:
@@ -759,10 +804,6 @@ def main() -> None:
     core = config.get("core") or {}
     steps = (config.get("process") or {}).get("steps", [])
 
-    ledger = AuditLedger(run_id=context.run_id,
-                         config_path=str(config_path),
-                         registry_digest=context.registry_digest)
-
     boundary = ((core.get("admin_boundaries") or {}).get("path"))
     if boundary:
         candidate = Path(str(boundary))
@@ -782,6 +823,10 @@ def main() -> None:
     logger.info("database %s (file: %s)", DATABASE_URL,
                 engine.url.database or "(in memory)")
     logger.info("boundary %s", boundary_path() or "(none)")
+
+    ledger = AuditLedger(run_id=context.run_id,
+                         config_path=str(config_path),
+                         registry_digest=context.registry_digest)
 
     if args.dry_run:
         logger.info("dry run: run_manifest is not written")
@@ -816,6 +861,10 @@ def main() -> None:
 
     exit_code = 1 if failed else 0
 
+    if run_ingest and not args.dry_run:
+        if not write_ingest_ledger(ledger):
+            exit_code = 1
+
     if run_consolidate:
         result = run_consolidation_step(core, context, dry_run=args.dry_run)
         if isinstance(result, dict) and result.get("error"):
@@ -836,10 +885,6 @@ def main() -> None:
         else:
             record_run_counts(context)
             generate_summary()
-
-    if not args.dry_run and steps:
-        ledger.write(PROJECT_ROOT / "outputs" / "audit" /
-                     f"ingest_{context.run_id}.json")
 
     if args.expand_burden and not run_consolidate:
         if not run_burden_expansion(force=not args.dry_run,
