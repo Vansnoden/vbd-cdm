@@ -1,4 +1,0 @@
-location_code,year,disease,pathogen,cases_mean,incidence_rate
-loc-1,2020,MALARIA,Plasmodium falciparum,1200.0,
-loc-2,2020,MALARIA,Plasmodium falciparum,640.0,
-loc-2,2020,MALARIA,Plasmodium vivax,35.0,

@@ -23,14 +23,21 @@ from utilities.vocabulary.loader import (
     _split_synonyms,
 )
 
+
 logger = logging.getLogger(__name__)
-from utilities.constants import DECISION_AUTO_ACCEPTED
+
+
+from utilities.constants import (
+    DECISION_AUTO_ACCEPTED,
+    DECISION_NEEDS_REVIEW,
+    DECISION_REJECTED,
+    DECISION_UNRESOLVED,
+)
 
 AUTO_ACCEPTED = DECISION_AUTO_ACCEPTED
-
-NEEDS_REVIEW = "needs_review"
-REJECTED = "rejected"
-UNRESOLVED = "unresolved"
+NEEDS_REVIEW = DECISION_NEEDS_REVIEW
+REJECTED = DECISION_REJECTED
+UNRESOLVED = DECISION_UNRESOLVED
 
 DECISIONS: frozenset = frozenset(
     {AUTO_ACCEPTED, NEEDS_REVIEW, REJECTED, UNRESOLVED}

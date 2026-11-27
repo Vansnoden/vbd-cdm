@@ -192,11 +192,11 @@ class DBLoader:
                 groups.append((null_target, nulls))
         return groups or [(targets[0], list(batch))]
 
-    def _prepare_for_upsert(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
-        """Apply natural-key hygiene to a DataFrame before insert.
 
-        Sentinels fill NULLs in key columns; then in-batch duplicates are collapsed.
-        """
+    def _prepare_for_upsert(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+        """Apply natural-key hygiene to a DataFrame before insert."""
+        # Sentinels fill NULLs in key columns, then in-batch duplicates are
+        # collapsed; NULL-keyed rows are matched through a sentinel copy.
         config = NATURAL_KEY_CONFIG.get(table_name)
         if not config:
             return df
@@ -207,45 +207,44 @@ class DBLoader:
             if col in df.columns:
                 df[col] = df[col].where(df[col].notna(), sentinel)
 
-        def _usable(columns: List[str]) -> bool:
-            return bool(columns) and all(
-                col in df.columns and not df[col].isna().any() for col in columns
-            )
-
         declared = list(config.get("columns") or [])
         fallback = list(config.get("in_batch_key") or [])
 
-        natural_cols: List[str] = []
-        if _usable(declared):
-            natural_cols = declared
-        elif _usable(fallback):
-            natural_cols = fallback
+        if declared and all(c in df.columns for c in declared):
+            dedup_cols = declared
+        elif fallback and all(c in df.columns for c in fallback):
+            dedup_cols = fallback
             logger.info(
                 "  %s: collapsing in-batch duplicates on %s because the conflict "
-                "target %s contains NULLs, which the unique index cannot see. "
-                "Provide those columns, or expect duplicates across runs.",
-                table_name, fallback, declared,
-            )
-        elif any(col in df.columns for col in declared):
-            logger.warning(
-                "  %s: conflict target %s contains NULL values and no in-batch "
-                "fallback key applies; in-batch duplicates are NOT collapsed.",
-                table_name, declared,
-            )
+                "target %s is incomplete; NULL-keyed rows are matched through a "
+                "sentinel copy.", table_name, fallback, declared)
+        else:
+            dedup_cols = []
+            if any(c in df.columns for c in declared):
+                logger.warning(
+                    "  %s: conflict target %s is missing from this batch and no "
+                    "in-batch fallback applies; duplicates are NOT collapsed.",
+                    table_name, declared)
 
-        if natural_cols:
+        if dedup_cols:
+            try:
+                df = df.sort_values(by=dedup_cols, kind="mergesort")
+            except (TypeError, ValueError) as exc:
+                logger.debug("  %s: cannot sort on %s (%s); keeping source order",
+                             table_name, dedup_cols, exc)
+            comparable = df[dedup_cols].astype(object).where(
+                df[dedup_cols].notna(), "\x00NULL")
             before = len(df)
-            df = df.sort_values(by=natural_cols, kind="mergesort")
-            df = df.drop_duplicates(subset=natural_cols, keep="last")
+            df = df.loc[~comparable.duplicated(keep="last")]
             df = df.reset_index(drop=True)
             dropped = before - len(df)
             if dropped:
                 logger.info(
                     "  Collapsed %d duplicate row(s) within the batch for %s "
-                    "by %s", dropped, table_name, natural_cols,
-                )
+                    "by %s (NULLs compare equal)", dropped, table_name, dedup_cols)
 
         return df
+
 
     def _copy_upsert_postgresql(self, df: pd.DataFrame, table_name: str,
                                 model: Any) -> int:

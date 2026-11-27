@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the article and the archived release."
+title: "vbd-cdm: an auditable integration framework for heterogeneous vector-borne disease data"
+abstract: >-
+  vbd-cdm integrates heterogeneous vector-borne disease data — occurrence records,
+  insecticide-resistance bioassays, climate reanalysis, gridded disease burden,
+  socioeconomic indicators and administrative boundaries — into one normalised
+  common data model, and records the vocabulary decision behind every
+  standardised value.
+authors:
+  - family-names: Atagong
+    given-names: Salvador D.
+    affiliation: "CHANGE-ME: institution"
+version: 1.0.0
+date-released: "2026-11-23"
+license: MIT
+repository-code: "https://github.com/CHANGE-ME/vbd-cdm"
+keywords:
+  - vector-borne disease
+  - data integration
+  - common data model
+  - provenance
+  - reproducibility
+type: software

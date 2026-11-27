@@ -215,3 +215,16 @@ COUNTRY_LOOKUP = {
     (-18.0, 29.0): ("Zimbabwe", "ZW"),
     (-20.0, 31.0): ("Zimbabwe", "ZW"),
 }
+
+
+DECISION_AUTO_ACCEPTED = "auto_accepted"
+DECISION_NEEDS_REVIEW = "needs_review"
+DECISION_REJECTED = "rejected"
+DECISION_UNRESOLVED = "unresolved"
+
+DECISIONS = frozenset({
+    DECISION_AUTO_ACCEPTED,
+    DECISION_NEEDS_REVIEW,
+    DECISION_REJECTED,
+    DECISION_UNRESOLVED,
+})

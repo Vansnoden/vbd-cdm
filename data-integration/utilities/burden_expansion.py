@@ -270,8 +270,27 @@ def _kernel_holiday_map(value: Any) -> Dict[str, float]:
     return out
 
 
+def _block_mapping(block: Mapping[str, Any], key: str, allowed: Sequence[str],
+                   label: str) -> Mapping[str, Any]:
+    """The named sub-mapping of ``block``, or ``{}`` when absent."""
+    raw = block.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            f"{label}: `{key}` must be a mapping, got {type(raw).__name__}")
+    unknown = sorted(set(raw) - set(allowed))
+    if unknown:
+        raise ValueError(
+            f"{label}: `{key}` has unknown key(s) {unknown}; "
+            f"allowed: {', '.join(allowed)}")
+    return raw
+
+
 def _validate_kernel_block(block: Mapping[str, Any], label: str) -> None:
-    """Reject any key this module does not consume."""
+    """Reject any key this module does not consume, at any depth."""
+    # Policy sections are validated here too: otherwise `write: {grains: ...}`
+    # passed whenever only the allocation weights were read.
     allowed = (set(_KERNEL_KEYS) | set(_POLICY_SECTIONS)
                | set(_BLOCK_DOCUMENTATION_KEYS))
     unknown = sorted(set(block) - allowed)
@@ -281,6 +300,9 @@ def _validate_kernel_block(block: Mapping[str, Any], label: str) -> None:
             f"Shape keys: {', '.join(_KERNEL_KEYS)}. "
             f"Policy sections: {', '.join(sorted(_POLICY_SECTIONS))}. "
             f"Documentation keys: {', '.join(_BLOCK_DOCUMENTATION_KEYS)}.")
+
+    for section, allowed_keys in _POLICY_SECTIONS.items():
+        _block_mapping(block, section, allowed_keys, label)
 
 
 def _diagnose_missing_kernel_pack(loaded: Any) -> str:
@@ -450,23 +472,6 @@ class _ExpansionPolicy:
                 "limit": self.limit,
             },
         }
-
-
-def _block_mapping(block: Mapping[str, Any], key: str, allowed: Sequence[str],
-                   label: str) -> Mapping[str, Any]:
-    """The named sub-mapping of ``block``, or ``{}`` when absent."""
-    raw = block.get(key)
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ValueError(
-            f"{label}: `{key}` must be a mapping, got {type(raw).__name__}")
-    unknown = sorted(set(raw) - set(allowed))
-    if unknown:
-        raise ValueError(
-            f"{label}: `{key}` has unknown key(s) {unknown}; "
-            f"allowed: {', '.join(allowed)}")
-    return raw
 
 
 def _policy_choice(value: Any, label: str, allowed: Sequence[str]) -> str:
@@ -791,7 +796,7 @@ def _base_weights(year: int, kernel: _BurdenKernel) -> Tuple[float, ...]:
 
 def _apply_deviation(base: Tuple[float, ...], variation: float,
                      kernel: _BurdenKernel, rng: Any) -> List[float]:
-    """Multiply in the seeded deviation and any spike, in the original draw order."""
+    """Multiply in the seeded deviation and any spike, in the draw order."""
     if variation <= 0:
         if kernel.spike_probability <= 0:
             return list(base)
@@ -847,10 +852,7 @@ def generate_daily_case_counts(
     kernel: Optional[_BurdenKernel] = None,
     stable_key: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Daily series whose sum equals ``round(annual_cases)``, exactly.
-
-    Weights are cached per (year, kernel); only the seeded deviation is per call.
-    """
+    """Daily series whose sum equals ``round(annual_cases)``, exactly."""
     active = kernel or FLAT_BURDEN_KERNEL
     variation = (active.base_variation if base_variation is None
                  else float(base_variation))
@@ -1082,11 +1084,9 @@ class _PopulationIndex:
 
 
 def ensure_dim_time(session, year: int) -> int:
-    """Insert missing ``dim_time`` rows for ``year`` (``date_id`` is an FK).
-
-    ``season`` is written as NULL: a season label needs a per-country climatology,
-    and a single global dry/wet split is wrong for bimodal regimes.
-    """
+    """Insert missing ``dim_time`` rows for ``year`` (``date_id`` is an FK)."""
+    # season stays NULL: a dry/wet split needs a per-country climatology and is
+    # wrong for bimodal regimes and for either hemisphere.
     existing = {row[0] for row in session.execute(text(
         "SELECT date_id FROM dim_time WHERE year = :y"), {"y": int(year)})}
     current = datetime(int(year), 1, 1)
@@ -1213,10 +1213,24 @@ class BurdenExpander:
 
     def expected_admin_levels(self,
                               case_location_of: Mapping[int, int]) -> Set[str]:
-        """The ``admin_level`` values the requested write grain produces."""
-        if not case_location_of:
-            return {"grid"}
-        target_ids = sorted(set(case_location_of.values()))
+        """The ``admin_level`` values this run's write targets actually carry."""
+        # An empty map means each record keeps its own location_id. Returning a
+        # guessed {"grid"} made the grain guard reject a run's own re-run.
+        if case_location_of:
+            target_ids = sorted(set(case_location_of.values()))
+        else:
+            try:
+                target_ids = sorted({
+                    int(row[0]) for row in self.session.execute(text(
+                        "SELECT DISTINCT location_id FROM fact_disease_burden "
+                        "WHERE location_id IS NOT NULL")).fetchall()
+                    if row[0] is not None})
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("could not read the burden locations: %s", exc)
+                return set()
+        if not target_ids:
+            return set()
+
         levels: Set[str] = set()
         try:
             for _location_id, admin_level in _chunked_rows(
@@ -1227,7 +1241,7 @@ class BurdenExpander:
                 levels.add(str(admin_level or "").strip().lower() or "(null)")
         except Exception as exc:  # noqa: BLE001
             logger.debug("could not read the target admin levels: %s", exc)
-        return levels or {"(unknown)"}
+        return levels
 
     def guard_write_grain(self, first_year: int, last_year: int,
                           expected_levels: Set[str], grain_label: str,
@@ -1363,11 +1377,9 @@ class BurdenExpander:
         dry_run: bool = False,
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Expand yearly burden into daily cases summing to each annual total.
-
-        Records sharing one (location, year, disease, source) are summed first, since
-        uq_fact_case_natural has no pathogen column to tell them apart.
-        """
+        """Expand yearly burden into daily cases summing to each annual total."""
+        # Records sharing one case key are summed first: uq_fact_case_natural has
+        # no pathogen column, so one series per key is the only writable shape.
         policy = load_expansion_policy(self.registry)
         kernel = load_burden_kernel(self.registry)
 
@@ -1666,7 +1678,6 @@ class BurdenExpander:
                      else BURDEN_MEASURE_INCIDENCE_RATE)
             basis_counts[basis] = basis_counts.get(basis, 0) + 1
 
-        # failures counts records that reached a measure but could not be prepared.
         merged = max(0, records - skipped - no_population - failures
                      - len(annual_by_key))
         if merged > 0:
@@ -1698,9 +1709,6 @@ class BurdenExpander:
                 national_allocation, population_divisor, population_indicator,
                 default_population, seed, group_by_level)
             return stats
-
-        guard_projected_volume(groups_by_year, grain_label=grain_label,
-                               max_projected_rows=int(max_projected_rows))
 
         projected_rows = guard_projected_volume(
             groups_by_year, grain_label=grain_label,

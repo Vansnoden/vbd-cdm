@@ -6,7 +6,7 @@ import json
 from datetime import date, datetime
 from typing import Any, FrozenSet, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
+from .constants import DECISIONS as DECISION_VALUES
 
 _FROM_ATTRS = ConfigDict(from_attributes=True)
 _DECISIONS_CACHE: dict[str, FrozenSet[str]] = {}
@@ -94,9 +94,9 @@ def _require_decision(value: Optional[str]) -> Optional[str]:
     """Validate a decision value against the canonical set."""
     if value is None:
         return value
-    allowed = _canonical_decisions()
-    if value not in allowed:
-        raise ValueError(f"decision must be one of {sorted(allowed)}, got {value!r}")
+    if value not in DECISION_VALUES:
+        raise ValueError(
+            f"decision must be one of {sorted(DECISION_VALUES)}, got {value!r}")
     return value
 
 

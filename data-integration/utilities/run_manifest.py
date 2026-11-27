@@ -205,6 +205,7 @@ def _upsert(session, **fields: Any) -> bool:
                 notes                    = COALESCE(EXCLUDED.notes,
                                                     run_manifest.notes)
         """), payload)
+        session.commit()
         return True
     except Exception as exc:  # noqa: BLE001 - provenance must never break a run
         logger.warning("could not record the run manifest (%s: %s); the run "

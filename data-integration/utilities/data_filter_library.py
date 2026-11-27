@@ -298,28 +298,27 @@ def batch_clip_era5(grib_files, shapefile_path, filter_params=None, output_base_
     return results
 
 
+
 def ensure_dates_exist(start_date, end_date):
+    """Insert the ``dim_time`` rows covering ``[start_date, end_date]``.
+
+    Delegates to ``utilities.burden_expansion.ensure_dim_time`` — the single
+    writer of ``dim_time`` — so ``season`` is NULL here exactly as it is
+    everywhere else. This function previously wrote a hard-coded
+    ``'dry' if month in [11,12,1,2,3] else 'wet'``, which contradicts the
+    documented policy and is wrong for bimodal and southern-hemisphere regimes.
+    """
+    from utilities.burden_expansion import ensure_dim_time
+    from database.session import SessionLocal
+
+    sessions = pd.date_range(start_date, end_date)
+    if len(sessions) == 0:
+        return 0
+    added = 0
     session = SessionLocal()
     try:
-        date_range = pd.date_range(start_date, end_date)
-        for date in date_range:
-            date_id = date.strftime('%Y-%m-%d')
-            exists = session.query(DimTime).filter_by(date_id=date_id).first()
-            if not exists:
-                dt = DimTime(
-                    date_id=date_id,
-                    date=date,
-                    year=date.year,
-                    month=date.month,
-                    week=date.isocalendar()[1],
-                    day_of_year=date.timetuple().tm_yday,
-                    season='dry' if date.month in [11,12,1,2,3] else 'wet',  # customize for your region
-                    is_holiday=False   # was 'no' – now correct boolean
-                )
-                session.add(dt)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        raise e
+        for year in sorted({int(moment.year) for moment in sessions}):
+            added += ensure_dim_time(session, year)
     finally:
         session.close()
+    return added

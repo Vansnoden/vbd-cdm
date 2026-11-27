@@ -47,7 +47,7 @@ from utilities.data_transform_library import load_yaml_config
 from utilities.database_summary import (                         
     export_all_table_samples, schema_summary_to_csv,
 )
-from utilities.run_manifest import record_row_counts, record_run  
+from utilities.run_manifest import count_tables, record_row_counts, record_run  
 from utilities.vocabulary.registry import VocabularyRegistry     
 
 (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
@@ -143,7 +143,7 @@ def record_run_counts(context: RunContext) -> None:
                 record_row_counts,
                 session=session,
                 run_id=context.run_id,
-                project_root=str(PROJECT_ROOT),
+                counts=count_tables(session),
             )
     except Exception as exc:  # noqa: BLE001
         logger.error("could not record row counts for run %s: %s: %s",

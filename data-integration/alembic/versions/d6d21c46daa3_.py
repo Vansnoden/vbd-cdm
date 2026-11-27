@@ -1,8 +1,8 @@
-"""CDM initialization
+"""empty message
 
-Revision ID: b7bcb0e49b69
+Revision ID: d6d21c46daa3
 Revises: 
-Create Date: 2026-11-21 23:53:57.398841
+Create Date: 2026-11-23 04:58:55.986676
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'b7bcb0e49b69'
+revision: str = 'd6d21c46daa3'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -326,7 +326,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('fact_env_id'),
-    sa.UniqueConstraint('location_id', 'date_id', 'variable', name='uq_env_loc_date_var')
+    sa.UniqueConstraint('location_id', 'date_id', 'variable', 'source_code', name='uq_env_loc_date_var')
     )
     with op.batch_alter_table('fact_environment', schema=None) as batch_op:
         batch_op.create_index('idx_fact_env_date', ['date_id'], unique=False)
@@ -391,6 +391,7 @@ def upgrade() -> None:
         batch_op.create_index('idx_fact_resistance_insecticide', ['insecticide_code'], unique=False)
         batch_op.create_index('idx_fact_resistance_source', ['source_code'], unique=False)
         batch_op.create_index('idx_fact_resistance_vector', ['vector_code'], unique=False)
+        batch_op.create_index('uq_fact_ir_null_concentration', ['location_id', 'date_id', 'vector_code', 'insecticide_code', 'test_type_code', 'source_code'], unique=True, sqlite_where=sa.text('concentration IS NULL'), postgresql_where=sa.text('concentration IS NULL'))
 
     op.create_table('fact_intervention',
     sa.Column('intervention_id', sa.Integer(), autoincrement=True, nullable=False),
@@ -426,7 +427,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['location_id'], ['dim_location.location_id'], ),
     sa.ForeignKeyConstraint(['source_code'], ['dim_source.source_code'], ),
     sa.PrimaryKeyConstraint('socio_id'),
-    sa.UniqueConstraint('location_id', 'year', 'indicator_code', name='uq_socio_loc_year_indicator')
+    sa.UniqueConstraint('location_id', 'year', 'indicator_code', 'source_code', name='uq_socio_loc_year_indicator')
     )
     with op.batch_alter_table('fact_socioeconomic_condition', schema=None) as batch_op:
         batch_op.create_index('idx_fact_socio_indicator', ['indicator_code'], unique=False)
@@ -489,6 +490,7 @@ def downgrade() -> None:
 
     op.drop_table('fact_intervention')
     with op.batch_alter_table('fact_insecticide_resistance', schema=None) as batch_op:
+        batch_op.drop_index('uq_fact_ir_null_concentration', sqlite_where=sa.text('concentration IS NULL'), postgresql_where=sa.text('concentration IS NULL'))
         batch_op.drop_index('idx_fact_resistance_vector')
         batch_op.drop_index('idx_fact_resistance_source')
         batch_op.drop_index('idx_fact_resistance_insecticide')

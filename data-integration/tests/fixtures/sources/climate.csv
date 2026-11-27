@@ -1,4 +1,0 @@
-location_code,date,variable,value
-loc-1,2020-01-01,temperature_mean,24.8
-loc-1,2020-01-02,temperature_mean,25.1
-loc-1,2020-01-01,rainfall_total,0.0
