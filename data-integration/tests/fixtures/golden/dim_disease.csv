@@ -1,0 +1,3 @@
+disease_code,disease_name,description,source_standard,pathogen,icd_code,standard_code,concept_id
+MAL_PF,Malaria (P. falciparum),,WHO,Plasmodium falciparum,B54,,
+MAL_PV,Malaria (P. vivax),,WHO,Plasmodium vivax,B54,,

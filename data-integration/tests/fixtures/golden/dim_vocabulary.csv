@@ -1,0 +1,4 @@
+vocabulary_id,vocabulary_name,source_url,version,description,loaded_at,pack_id,checksum,released_with,extra
+gadm@4.1,gadm location (v4.1),,4.1,"fields: dim_location.name, dim_location.country_code",,gadm,6b953c5a49df64a214fcbb95da01ab2ba6748a5995312894d39c098bc87964b9,1.0.0,"{""checksum_artefact"":""manifest""}"
+idomal@2024-05,idomal disease (v2024-05),,2024-05,fields: dim_disease.disease_name,,idomal,acca827c95d008d6fbbd89822f0487e0ae132339a6b641aa1c231f3340026069,1.0.0,"{""checksum_artefact"":""manifest""}"
+ncbi@2024-11,ncbi vector (v2024-11),,2024-11,fields: dim_vector.species_name,,ncbi,679c12621a88c84378be0410809a82a782376f0c12af6172589f4de9eb138a22,1.0.0,"{""checksum_artefact"":""manifest""}"

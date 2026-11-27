@@ -1,0 +1,18 @@
+vector_code,species_name,subspecies,description,source_standard,genus,family,standard_code,concept_id
+Anopheles,Anopheles,,Anopheles - CDC Bottle Bioassay,IRMapper,,,44482,4509.0
+Anopheles arabiensis,Anopheles arabiensis,,"Anopheles arabiensis/Morphology/PCR (Scott, 1993)",IRMapper,,,7173,4539.0
+Anopheles coluzzii,Anopheles coluzzii,,"Anopheles coluzzii/PCR (Scott, 1993)/PCR (Favia, 2001)",IRMapper,,,1518534,3996.0
+Anopheles coluzzii/gambiae,Anopheles coluzzii/gambiae,,"Anopheles coluzzii/gambiae/Morphology/SINE-PCR (Santolamazza, 2008)",IRMapper,,,,
+Anopheles funestus,Anopheles funestus,,"Anopheles funestus/Morphology/PCR (Koekemoer, 2002)",IRMapper,,,62324,4389.0
+Anopheles gambiae,Anopheles gambiae,,"Anopheles gambiae/PCR (Scott, 1993)/PCR (Bass, 2007)",IRMapper,,,7165,4546.0
+Anopheles mascarensis,Anopheles mascarensis,,Anopheles mascarensis - Morphology - NR,IRMapper,,,2259328,3915.0
+Anopheles melas,Anopheles melas,,"Anopheles melas/Morphology/PCR-RFLP (Fanello, 2002)",IRMapper,,,34690,4532.0
+Anopheles parensis,Anopheles parensis,,"Anopheles parensis - Morphology - PCR (Koekemoer, 2002)",IRMapper,,,162637,4321.0
+Anopheles pharoensis,Anopheles pharoensis,,Anopheles pharoensis - Morphology - NR,IRMapper,,,221566,4291.0
+Anopheles quadriannulatus,Anopheles quadriannulatus,,"Anopheles quadriannulatus/PCR (Scott, 1993)",IRMapper,,,34691,4531.0
+Anopheles rivulorum,Anopheles rivulorum,,"Anopheles rivulorum/Morphology/PCR (Koekemoer, 2002)",IRMapper,,,70327,4379.0
+Gambiae Complex,Anopheles gambiae,,"Gambiae Complex/Morphology/PCR (Scott, 1993)",IRMapper,,,7165,4546.0
+funestus,funestus group,,,,,,59142,4416.0
+funestus complex,funestus group,,,,,,59142,4416.0
+gambiae_s form,Anopheles gambiae,,,,,,7165,4546.0
+gambiae_s form_m form,Anopheles gambiae,,,,,,7165,4546.0

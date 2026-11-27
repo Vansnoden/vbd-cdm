@@ -1,0 +1,7 @@
+source_code,source_name,source_description,source_standard,source_url,version,standard_code,concept_id
+ERA5,ECMWF ERA5-Land,,,https://cds.climate.copernicus.eu,,,
+GBIF,GBIF,,,https://www.gbif.org,,,
+IRMapper,IRMapper,"Abdalla H, Wilding CS, Nardini L, Pignatelli P, Koekemoer LL, Ranson H, et al. Insecticide resistance in Anopheles arabiensis in Sudan: temporal trends and underlying mechanisms. Parasites Vectors. 2014;7:213.",journal article,https://www.irmapper.com,2014,,
+MAP,Malaria Atlas Project,,,https://malariaatlas.org/,,,
+VA,Vector Atlas,,,https://vectoratlas.icipe.org,2026,,
+WB/WDI,World Bank World Development Indicators,Comprehensive development indicators database from the World Bank,World Bank,https://data.worldbank.org,2025,,
