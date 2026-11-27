@@ -110,6 +110,8 @@ class DBLoader:
         self.use_copy = use_copy
         self._table_models = self._build_model_map()
         self._db_type = self._detect_db_type()
+        self._drop_hook = None
+
 
     def _build_model_map(self) -> Dict[str, Any]:
         """Map table names to SQLAlchemy model classes, by derivation."""
@@ -128,6 +130,14 @@ class DBLoader:
         if DATABASE_URL.startswith("mysql"):
             return "mysql"
         raise ValueError(f"Unsupported database type: {DATABASE_URL}")
+
+
+    def _note_drop(self, table_name: str, reason: str, count: int = 1) -> None:
+        """Report rows this loader discards, through the optional hook."""
+        hook = self._drop_hook
+        if hook is not None and count:
+            hook(table_name, reason, int(count))
+
 
     def _get_primary_key_columns(self, table_name: str) -> List[str]:
         """The table's primary-key columns, in constraint order."""
@@ -242,6 +252,7 @@ class DBLoader:
                 logger.info(
                     "  Collapsed %d duplicate row(s) within the batch for %s "
                     "by %s (NULLs compare equal)", dropped, table_name, dedup_cols)
+                self._note_drop(table_name, "duplicate_natural_key", dropped)
 
         return df
 
@@ -556,6 +567,7 @@ class DBLoader:
                 "  %s.%s: dropped %d row(s) with NaN (column is NOT NULL and has "
                 "no default)", table_name, col, before - len(df),
             )
+            self._note_drop(table_name, f"not_null:{col}", before - len(df))
 
         for col in df.select_dtypes(include=["datetime64[ns]"]).columns:
             df[col] = df[col].dt.date
@@ -590,12 +602,14 @@ class DBLoader:
         )
         return written
 
+
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """Load multiple tables. Returns ``{table: rows written}``."""
         return {
             table_name: self.load_table(table_name, df)
             for table_name, df in table_dfs.items()
         }
+
 
     def load_resolutions(self, resolutions: "List[Any]") -> int:
         """Persist a run's resolutions: append the ledger, project the current state."""

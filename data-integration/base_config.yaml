@@ -17,7 +17,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"      # 'warn' requires engine: python
+      on_bad_lines: "error"      # 'warn' requires engine: python
       engine: "python"
     matching: "mappings/vectoratlas.mapping.csv"
     extract_mode: "single"
@@ -31,7 +31,7 @@ data_sources:
       sep: "\t"
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/gbif_occurrence.mapping.csv"
     extract_mode: "single"
@@ -46,7 +46,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_1.mapping.csv"
     extract_mode: "single"
@@ -60,7 +60,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_2.mapping.csv"
     extract_mode: "single"
@@ -74,7 +74,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_3.mapping.csv"
     extract_mode: "single"
@@ -88,7 +88,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_4.mapping.csv"
     extract_mode: "single"
@@ -102,7 +102,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_5.mapping.csv"
     extract_mode: "single"
@@ -116,7 +116,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_6.mapping.csv"
     extract_mode: "single"
@@ -130,7 +130,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_7.mapping.csv"
     extract_mode: "single"
@@ -144,7 +144,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/irmapper_8.mapping.csv"
     extract_mode: "single"
@@ -240,7 +240,7 @@ data_sources:
       sep: ","
       quotechar: '"'
       encoding: "utf-8"
-      on_bad_lines: "warn"
+      on_bad_lines: "error"
       engine: "python"
     matching: "mappings/worldbank_indicator.mapping.csv"
     extract_mode: "single"

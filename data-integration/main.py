@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from evaluation.audit import AuditLedger, AuditedLoader
 
 import pandas as pd
 
@@ -206,11 +207,11 @@ def init_dim_time(start_date: str, end_date: str) -> None:
 def get_all_files_from_folder(folder_path: str, extension: str) -> List[str]:
     """Every file under ``folder_path`` with ``extension``, sorted."""
     ext = extension.lower()
-    return [
+    return sorted(
         os.path.join(root, name)
         for root, _dirs, filenames in os.walk(folder_path)
         for name in filenames if name.lower().endswith(f".{ext}")
-    ]
+    )
 
 
 def get_file_paths(source_config: Dict[str, Any]) -> List[str]:
@@ -356,6 +357,8 @@ def load_dimensions(dim_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
                 if len(frame) < before:
                     logger.warning("  removed %d row(s) with NULL location_id",
                                    before - len(frame))
+        if len(frame) < before:
+                    loader.drop("dim_location", "null_location_id", before - len(frame))
         if frame.empty:
             continue
         total += loader.load_table(table_name, frame)
@@ -378,6 +381,8 @@ def load_facts(fact_dfs: Dict[str, pd.DataFrame], loader: DBLoader) -> int:
                 if len(frame) < before:
                     logger.info("    dropped %d row(s) with null %s",
                                 before - len(frame), column)
+        if len(frame) < before:
+                    loader.drop(table_name, f"null_{column}", before - len(frame))
         if frame.empty:
             logger.warning("No valid rows to load for %s", table_name)
             continue
@@ -398,10 +403,14 @@ def _filename_year(file_path: str) -> Optional[int]:
 
 def run_ingestion_for_source(source_config: Dict[str, Any],
                              context: RunContext,
-                             dry_run: bool = False) -> bool:
+                             dry_run: bool = False,
+                             ledger: Optional[AuditLedger] = None,
+                             source_key: str = "") -> bool:
     """Run the complete ETL pipeline for one source."""
     source_name = source_config.get("source_name", "unknown")
     logger.info("===== Processing source: %s =====", source_name)
+    loader = None if dry_run else AuditedLoader(
+            ledger, source_key, batch_size=10000, upsert=True, use_copy=True)
     if dry_run:
         logger.info("  dry run: source %r read and transformed, nothing written",
                     source_name)
@@ -433,6 +442,10 @@ def run_ingestion_for_source(source_config: Dict[str, Any],
                 extractor = FileExtractor(extract_mode=extract_mode,
                                           large_df_threshold=10_000_000)
                 result = extractor.extract(file_path, **reader_args)
+
+                if ledger is not None and not dry_run:
+                    rows = len(result) if isinstance(result, pd.DataFrame) else 0
+                    ledger.file_read(source_key, file_path, rows)
 
                 chunks = result if extract_mode == "chunked" else [result]
                 for chunk_index, chunk_df in enumerate(chunks, start=1):
@@ -746,6 +759,10 @@ def main() -> None:
     core = config.get("core") or {}
     steps = (config.get("process") or {}).get("steps", [])
 
+    ledger = AuditLedger(run_id=context.run_id,
+                         config_path=str(config_path),
+                         registry_digest=context.registry_digest)
+
     boundary = ((core.get("admin_boundaries") or {}).get("path"))
     if boundary:
         candidate = Path(str(boundary))
@@ -787,7 +804,9 @@ def main() -> None:
                 if args.source and source_key != args.source:
                     continue
                 if run_ingestion_for_source(source_cfg, context,
-                                            dry_run=args.dry_run):
+                                            dry_run=args.dry_run,
+                                            ledger=ledger,
+                                            source_key=source_key):
                     succeeded.append(source_key)
                 else:
                     failed.append(source_key)
@@ -817,6 +836,10 @@ def main() -> None:
         else:
             record_run_counts(context)
             generate_summary()
+
+    if not args.dry_run and steps:
+        ledger.write(PROJECT_ROOT / "outputs" / "audit" /
+                     f"ingest_{context.run_id}.json")
 
     if args.expand_burden and not run_consolidate:
         if not run_burden_expansion(force=not args.dry_run,
