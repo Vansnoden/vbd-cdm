@@ -12,13 +12,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from database import models
 from database.session import DATABASE_URL, SessionLocal, engine
 from utilities.constants import DECISION_AUTO_ACCEPTED as _APPLIED_DECISION
 
 logger = logging.getLogger(__name__)
+
+NULL_SENTINEL = "\x00NULL"
 
 NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     "dim_location": {
@@ -34,15 +36,12 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     "dim_resistance_test_type":    {"columns": ["test_type_code"], "sentinels": {}},
     "dim_socioeconomic_indicator": {"columns": ["indicator_code"], "sentinels": {}},
     "dim_time":                    {"columns": ["date_id"], "sentinels": {}},
-
     "fact_environment": {
         "columns": ["location_id", "date_id", "variable", "source_code"],
         "sentinels": {},
     },
     "fact_disease_burden": {
         "columns": ["location_id", "year", "disease_code", "pathogen_species"],
-        # "" keeps the full key usable: without it the shorter in_batch_key is
-        # used and a NULL pathogen collapses P. falciparum into P. vivax.
         "sentinels": {"pathogen_species": ""},
         "in_batch_key": ["location_id", "year", "disease_code"],
     },
@@ -50,10 +49,7 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
         "columns": ["location_id", "year", "indicator_code", "source_code"],
         "sentinels": {},
     },
-    "fact_health_facility": {
-        "columns": ["facility_code"],
-        "sentinels": {},
-    },
+    "fact_health_facility": {"columns": ["facility_code"], "sentinels": {}},
     "fact_vector_observation": {
         "columns": ["location_id", "date_id", "vector_code", "source_code",
                     "life_stage", "sex", "collection_method"],
@@ -62,8 +58,6 @@ NATURAL_KEY_CONFIG: Dict[str, Dict[str, Any]] = {
     "fact_insecticide_resistance": {
         "columns": ["location_id", "date_id", "vector_code", "insecticide_code",
                     "test_type_code", "source_code", "concentration"],
-        # A sentinel here would be a measurement; NULL concentration is keyed by
-        # the partial unique index instead.
         "sentinels": {},
     },
     "fact_bionomics": {
@@ -92,6 +86,51 @@ _SQLITE_BIND_LIMIT = 30000
 _COPY_NULL_MARKER = "\\N"
 
 
+def _null_like(value: Any) -> bool:
+    """True when a value is stored as SQL NULL, NaN included."""
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _constraint_reason(exc: Exception) -> str:
+    """A short token naming the constraint an IntegrityError broke."""
+    message = str(getattr(exc, "orig", exc)).lower()
+    if "foreign key" in message:
+        return "foreign_key"
+    if "unique" in message:
+        return "unique"
+    if "not null" in message:
+        return "not_null"
+    if "check" in message:
+        return "check"
+    return type(exc).__name__
+
+
+def _sum_or_null(series: pd.Series) -> Any:
+    """Sum a nullable count, staying NULL when the group holds no value."""
+    return pd.to_numeric(series, errors="coerce").sum(min_count=1)
+
+
+def _mean_or_null(series: pd.Series) -> Any:
+    """Mean of a nullable measurement, staying NULL when there is none."""
+    return pd.to_numeric(series, errors="coerce").mean()
+
+
+MEASURE_AGGREGATES: Dict[str, Dict[str, Any]] = {
+    # Two trap collections at one site on one night are two samples, not a
+    # duplicate: their counts add. Empty the dict to keep last-wins instead.
+    "fact_vector_observation": {
+        "count": _sum_or_null,
+        "density_per_trap": _mean_or_null,
+        "infection_rate": _mean_or_null,
+    },
+}
+
+
 @dataclass(frozen=True)
 class _ConflictTarget:
     """One ``ON CONFLICT`` target: its columns, plus a partial-index predicate."""
@@ -112,7 +151,6 @@ class DBLoader:
         self._db_type = self._detect_db_type()
         self._drop_hook = None
 
-
     def _build_model_map(self) -> Dict[str, Any]:
         """Map table names to SQLAlchemy model classes, by derivation."""
         model_map = {}
@@ -131,23 +169,25 @@ class DBLoader:
             return "mysql"
         raise ValueError(f"Unsupported database type: {DATABASE_URL}")
 
-
     def _note_drop(self, table_name: str, reason: str, count: int = 1) -> None:
         """Report rows this loader discards, through the optional hook."""
         hook = self._drop_hook
         if hook is not None and count:
             hook(table_name, reason, int(count))
 
-    
     def drop(self, table_name: str, reason: str, count: int = 1) -> None:
         """Record rows discarded before this loader saw them."""
         self._note_drop(table_name, reason, count)
 
-
     def _get_primary_key_columns(self, table_name: str) -> List[str]:
         """The table's primary-key columns, in constraint order."""
         inspector = inspect(engine)
-        return inspector.get_pk_constraint(table_name).get("constrained_columns", []) or []
+        return inspector.get_pk_constraint(table_name).get(
+            "constrained_columns", []) or []
+
+    def _get_pk_list(self, table_name: str) -> List[str]:
+        """The primary-key columns, from the inspector."""
+        return self._get_primary_key_columns(table_name)
 
     def _get_column_types(self, table_name: str) -> Dict[str, str]:
         """The table's columns mapped to their SQL type strings."""
@@ -162,9 +202,9 @@ class DBLoader:
                               ) -> List[_ConflictTarget]:
         """The ``ON CONFLICT`` target(s) a batch needs.
 
-        Normally one target: the declared natural key. A table whose key includes
-        a nullable measurement column has a partial unique index for the NULL
-        case, so a mixed batch is split into two targets.
+        Without a partial index there is one target: the declared natural key. A
+        table whose key includes a nullable measurement column has a partial index
+        for the NULL case, so a mixed batch is split into two targets.
         """
         config = NATURAL_KEY_CONFIG.get(table_name)
         columns = tuple(list(config["columns"]) if config and config["columns"]
@@ -177,8 +217,8 @@ class DBLoader:
         if batch is None:
             return [_ConflictTarget(columns)]
 
-        has_null = any(row.get("concentration") is None for row in batch)
-        has_value = any(row.get("concentration") is not None for row in batch)
+        has_null = any(_null_like(row.get("concentration")) for row in batch)
+        has_value = any(not _null_like(row.get("concentration")) for row in batch)
         targets: List[_ConflictTarget] = []
         if has_value:
             targets.append(_ConflictTarget(columns))
@@ -198,20 +238,17 @@ class DBLoader:
         value_target = next((t for t in targets if t.index_where is None), None)
         groups: List[Tuple[_ConflictTarget, List[Dict[str, Any]]]] = []
         if value_target is not None:
-            values = [r for r in batch if r.get("concentration") is not None]
+            values = [r for r in batch if not _null_like(r.get("concentration"))]
             if values:
                 groups.append((value_target, values))
         if null_target is not None:
-            nulls = [r for r in batch if r.get("concentration") is None]
+            nulls = [r for r in batch if _null_like(r.get("concentration"))]
             if nulls:
                 groups.append((null_target, nulls))
         return groups or [(targets[0], list(batch))]
 
-
     def _prepare_for_upsert(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
         """Apply natural-key hygiene to a DataFrame before insert."""
-        # Sentinels fill NULLs in key columns, then in-batch duplicates are
-        # collapsed; NULL-keyed rows are matched through a sentinel copy.
         config = NATURAL_KEY_CONFIG.get(table_name)
         if not config:
             return df
@@ -234,33 +271,85 @@ class DBLoader:
                 "target %s is incomplete; NULL-keyed rows are matched through a "
                 "sentinel copy.", table_name, fallback, declared)
         else:
-            dedup_cols = []
             if any(c in df.columns for c in declared):
                 logger.warning(
                     "  %s: conflict target %s is missing from this batch and no "
                     "in-batch fallback applies; duplicates are NOT collapsed.",
                     table_name, declared)
+            return df
 
-        if dedup_cols:
-            try:
-                df = df.sort_values(by=dedup_cols, kind="mergesort")
-            except (TypeError, ValueError) as exc:
-                logger.debug("  %s: cannot sort on %s (%s); keeping source order",
-                             table_name, dedup_cols, exc)
-            comparable = df[dedup_cols].astype(object).where(
-                df[dedup_cols].notna(), "\x00NULL")
-            before = len(df)
-            df = df.loc[~comparable.duplicated(keep="last")]
-            df = df.reset_index(drop=True)
-            dropped = before - len(df)
-            if dropped:
+        return self._collapse(df, table_name, dedup_cols)
+
+    def _collapse(self, df: pd.DataFrame, table_name: str,
+                  dedup_cols: List[str]) -> pd.DataFrame:
+        """Merge or drop in-batch rows that share one natural key."""
+        policy = MEASURE_AGGREGATES.get(table_name)
+        before = len(df)
+
+        if policy:
+            merged = self._aggregate(df, dedup_cols, policy)
+            collapsed = before - len(merged)
+            if collapsed:
                 logger.info(
-                    "  Collapsed %d duplicate row(s) within the batch for %s "
-                    "by %s (NULLs compare equal)", dropped, table_name, dedup_cols)
-                self._note_drop(table_name, "duplicate_natural_key", dropped)
+                    "  Merged %d row(s) within the batch for %s by %s, summing "
+                    "the measurement columns (%s)", collapsed, table_name,
+                    dedup_cols, ", ".join(sorted(policy)))
+                self._note_drop(table_name, "merged_by_natural_key", collapsed)
+            return merged
 
+        try:
+            df = df.sort_values(by=dedup_cols, kind="mergesort")
+        except (TypeError, ValueError) as exc:
+            logger.debug("  %s: cannot sort on %s (%s); keeping source order",
+                         table_name, dedup_cols, exc)
+
+        comparables = df[dedup_cols].astype(object)
+        comparable = comparables.where(comparables.notna(), NULL_SENTINEL)
+        df = df.loc[~comparable.duplicated(keep="last")].reset_index(drop=True)
+        collapsed = before - len(df)
+        if collapsed:
+            logger.info(
+                "  Kept one of %d duplicate row(s) within the batch for %s by %s "
+                "(NULLs compare equal); the rest are discarded, not merged",
+                collapsed, table_name, dedup_cols)
+            self._note_drop(table_name, "duplicate_natural_key", collapsed)
         return df
 
+    @staticmethod
+    def _aggregate(df: pd.DataFrame, keys: Sequence[str],
+                   policy: Dict[str, Any]) -> pd.DataFrame:
+        """Collapse duplicate keys, combining the columns the policy names."""
+        aggregations: Dict[str, Any] = {}
+        for column, combine in policy.items():
+            if column in df.columns and column not in keys:
+                aggregations[column] = combine
+        for column in df.columns:
+            if column not in keys and column not in aggregations:
+                aggregations[column] = "first"
+
+        try:
+            frame = df.sort_values(by=list(keys), kind="mergesort")
+        except (TypeError, ValueError):
+            frame = df
+        return frame.groupby(list(keys), dropna=False, sort=False,
+                             as_index=False).agg(aggregations)
+
+    @staticmethod
+    def _unique_on_target(rows: List[Dict[str, Any]], columns: Sequence[str]
+                          ) -> Tuple[List[Dict[str, Any]], int]:
+        """Keep one row per conflict-target tuple, counting the rest."""
+        if not columns:
+            return rows, 0
+        seen: set = set()
+        kept: List[Dict[str, Any]] = []
+        for row in rows:
+            key = tuple(NULL_SENTINEL if _null_like(row.get(column))
+                        else row.get(column) for column in columns)
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(row)
+        return kept, len(rows) - len(kept)
 
     def _copy_upsert_postgresql(self, df: pd.DataFrame, table_name: str,
                                 model: Any) -> int:
@@ -370,108 +459,11 @@ class DBLoader:
                 columns.remove(pk)
         return columns
 
-    def _upsert_postgresql(self, df: pd.DataFrame, table_name: str,
-                           model: Any) -> int:
-        """Batched ``ON CONFLICT DO UPDATE`` for PostgreSQL."""
-        from sqlalchemy.dialects.postgresql import insert as dialect_insert
-
-        pk_cols = self._get_pk_list(table_name)
-        columns = self._select_columns(df, pk_cols)
-        records = self._payload(df, columns)
-
-        total_written = 0
-        with SessionLocal() as session:
-            for target, batch in self._split_by_conflict_target(
-                    table_name, pk_cols, records):
-                chunk = self._effective_batch(columns)
-                for start in range(0, len(batch), chunk):
-                    rows = batch[start:start + chunk]
-                    if not rows:
-                        continue
-                    statement = dialect_insert(model)
-                    active_cols = [
-                        col for col in columns
-                        if col not in pk_cols
-                        and col not in target.columns
-                        and any(row.get(col) is not None for row in rows)
-                    ]
-                    if active_cols:
-                        upsert = statement.on_conflict_do_update(
-                            index_elements=list(target.columns),
-                            index_where=target.index_where,
-                            set_={col: statement.excluded[col]
-                                  for col in active_cols},
-                        )
-                    else:
-                        upsert = statement.on_conflict_do_nothing(
-                            index_elements=list(target.columns),
-                            index_where=target.index_where,
-                        )
-                    result = session.execute(upsert, rows)
-                    rowcount = getattr(result, "rowcount", None)
-                    total_written += (
-                        len(rows) if rowcount is None or rowcount < 0 else rowcount
-                    )
-                    session.commit()
-
-        return total_written
-
-    def _upsert_sqlite(self, df: pd.DataFrame, table_name: str,
-                       model: Any) -> int:
-        """``ON CONFLICT DO UPDATE`` for SQLite, one executemany per target."""
-        from sqlalchemy.dialects.sqlite import insert as dialect_insert
-
-        pk_cols = self._get_pk_list(table_name)
-        columns = self._select_columns(df, pk_cols)
-        records = self._payload(df, columns)
-
-        total_written = 0
-        with SessionLocal() as session:
-            for target, batch in self._split_by_conflict_target(
-                    table_name, pk_cols, records):
-                chunk = self._effective_batch(columns)
-                for start in range(0, len(batch), chunk):
-                    rows = batch[start:start + chunk]
-                    if not rows:
-                        continue
-                    statement = dialect_insert(model)
-                    active_cols = [
-                        col for col in columns
-                        if col not in pk_cols
-                        and col not in target.columns
-                        and any(row.get(col) is not None for row in rows)
-                    ]
-                    if active_cols and target.columns:
-                        upsert = statement.on_conflict_do_update(
-                            index_elements=list(target.columns),
-                            index_where=target.index_where,
-                            set_={col: statement.excluded[col]
-                                  for col in active_cols},
-                        )
-                    elif target.columns:
-                        upsert = statement.on_conflict_do_nothing(
-                            index_elements=list(target.columns),
-                            index_where=target.index_where,
-                        )
-                    else:
-                        upsert = statement
-                    result = session.execute(upsert, rows)
-                    rowcount = getattr(result, "rowcount", None)
-                    written = (len(rows) if rowcount is None or rowcount < 0
-                               else rowcount)
-                    total_written += written
-                    session.commit()
-
-        return total_written
-
-    def _get_pk_list(self, table_name: str) -> List[str]:
-        """The primary-key columns, from the inspector."""
-        return self._get_primary_key_columns(table_name)
-
     def _payload(self, df: pd.DataFrame, columns: List[str]) -> List[Dict[str, Any]]:
-        """Uniform row dicts, so one executemany serves the whole batch."""
+        """Row dicts with NaN mapped to None, so NULL means NULL at the cursor."""
         return [
-            {col: record.get(col) for col in columns}
+            {col: (None if _null_like(record.get(col)) else record.get(col))
+             for col in columns}
             for record in df.to_dict(orient="records")
         ]
 
@@ -479,6 +471,116 @@ class DBLoader:
         """Rows per statement, capped so ``rows x columns`` stays inside the cap."""
         width = max(1, len(columns))
         return max(1, min(int(self.batch_size), _SQLITE_BIND_LIMIT // width))
+
+    def _conflict_statement(self, dialect_insert: Any, model: Any,
+                            columns: Sequence[str], pk_cols: Sequence[str],
+                            target: _ConflictTarget,
+                            rows: Sequence[Dict[str, Any]]) -> Any:
+        """The ON CONFLICT statement for one target and one batch of rows."""
+        statement = dialect_insert(model)
+        if not target.columns:
+            return statement
+
+        active = [
+            col for col in columns
+            if col not in pk_cols
+            and col not in target.columns
+            and any(row.get(col) is not None for row in rows)
+        ]
+        if active:
+            return statement.on_conflict_do_update(
+                index_elements=list(target.columns),
+                index_where=target.index_where,
+                set_={col: statement.excluded[col] for col in active},
+            )
+        return statement.on_conflict_do_nothing(
+            index_elements=list(target.columns),
+            index_where=target.index_where,
+        )
+
+    def _insert_rows(self, statement: Any, rows: Sequence[Dict[str, Any]]) -> int:
+        """Execute one ON CONFLICT statement, returning the rows written."""
+        with SessionLocal() as session:
+            try:
+                result = session.execute(statement, list(rows))
+                session.commit()
+            except SQLAlchemyError:
+                session.rollback()
+                raise
+        rowcount = getattr(result, "rowcount", None)
+        return len(rows) if rowcount is None or rowcount < 0 else int(rowcount)
+
+    def _bisect_insert(self, attempt: Any, rows: List[Dict[str, Any]],
+                       table_name: str) -> Tuple[int, int]:
+        """Insert rows, halving the batch whenever a constraint rejects it."""
+        try:
+            return int(attempt(rows)), 0
+        except IntegrityError as exc:
+            reason = _constraint_reason(exc)
+            if len(rows) <= 1:
+                logger.warning(
+                    "  %s: one row rejected (%s): %s", table_name, reason,
+                    str(getattr(exc, "orig", exc))[:300])
+                self._note_drop(table_name, f"rejected:{reason}", 1)
+                return 0, 1
+            middle = len(rows) // 2
+            written_left, rejected_left = self._bisect_insert(
+                attempt, rows[:middle], table_name)
+            written_right, rejected_right = self._bisect_insert(
+                attempt, rows[middle:], table_name)
+            return written_left + written_right, rejected_left + rejected_right
+
+    def _upsert(self, dialect_insert: Any, df: pd.DataFrame, table_name: str,
+                model: Any) -> int:
+        """Upsert a frame one conflict target at a time, recovering row by row."""
+        pk_cols = self._get_pk_list(table_name)
+        columns = self._select_columns(df, pk_cols)
+        records = self._payload(df, columns)
+
+        total_written = 0
+        for target, batch in self._split_by_conflict_target(
+                table_name, pk_cols, records):
+            batch, collapsed = self._unique_on_target(batch, target.columns)
+            if collapsed:
+                logger.warning(
+                    "  %s: %d row(s) shared the conflict target %s and were "
+                    "collapsed in the batch; the natural-key pass cannot see this "
+                    "when the key itself contains a nullable column.",
+                    table_name, collapsed, list(target.columns))
+                self._note_drop(table_name, "duplicate_target_key", collapsed)
+
+            chunk = self._effective_batch(columns)
+            for start in range(0, len(batch), chunk):
+                rows = batch[start:start + chunk]
+                if not rows:
+                    continue
+
+                def attempt(subset: List[Dict[str, Any]],
+                            _target: _ConflictTarget = target) -> int:
+                    statement = self._conflict_statement(
+                        dialect_insert, model, columns, pk_cols, _target, subset)
+                    return self._insert_rows(statement, subset)
+
+                written, rejected = self._bisect_insert(attempt, rows, table_name)
+                total_written += written
+                if rejected:
+                    logger.error(
+                        "  %s: %d row(s) were rejected by a constraint, recorded "
+                        "in the audit ledger and NOT written.", table_name, rejected)
+
+        return total_written
+
+    def _upsert_postgresql(self, df: pd.DataFrame, table_name: str,
+                           model: Any) -> int:
+        """Batched ``ON CONFLICT DO UPDATE`` for PostgreSQL."""
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+        return self._upsert(dialect_insert, df, table_name, model)
+
+    def _upsert_sqlite(self, df: pd.DataFrame, table_name: str,
+                       model: Any) -> int:
+        """Batched ``ON CONFLICT DO UPDATE`` for SQLite."""
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+        return self._upsert(dialect_insert, df, table_name, model)
 
     def _simple_insert(self, df: pd.DataFrame, table_name: str) -> int:
         """Plain append. Bypasses every sentinel and dedup rule above."""
@@ -588,7 +690,9 @@ class DBLoader:
         try:
             if self.upsert:
                 if self._db_type == "postgresql":
-                    if self.use_copy and len(df) > self.batch_size * 2:
+                    partial = table_name in _CONFLICT_WHERE
+                    if (self.use_copy and not partial
+                            and len(df) > self.batch_size * 2):
                         written = self._copy_upsert_postgresql(df, table_name, model)
                     else:
                         written = self._upsert_postgresql(df, table_name, model)
@@ -607,14 +711,12 @@ class DBLoader:
         )
         return written
 
-
     def load_all(self, table_dfs: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         """Load multiple tables. Returns ``{table: rows written}``."""
         return {
             table_name: self.load_table(table_name, df)
             for table_name, df in table_dfs.items()
         }
-
 
     def load_resolutions(self, resolutions: "List[Any]") -> int:
         """Persist a run's resolutions: append the ledger, project the current state."""
@@ -871,4 +973,4 @@ class DBLoader:
         return protected
 
 
-__all__ = ["DBLoader", "NATURAL_KEY_CONFIG"]
+__all__ = ["DBLoader", "MEASURE_AGGREGATES", "NATURAL_KEY_CONFIG", "NULL_SENTINEL"]

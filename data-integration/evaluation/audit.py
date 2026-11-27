@@ -68,11 +68,14 @@ class TableAudit:
         """Rows staged minus written minus dropped. Must be zero."""
         return self.rows_staged - self.rows_written - self.rows_dropped
 
+    
     def drop(self, reason: str, count: int = 1) -> None:
-        """Record ``count`` rows dropped for ``reason``."""
+        """Record ``count`` staged rows dropped for ``reason``."""
         if count <= 0:
             return
+        self.rows_staged += int(count)
         self.reasons[str(reason)] = self.reasons.get(str(reason), 0) + int(count)
+
 
     def as_dict(self) -> Dict[str, Any]:
         """Plain dict, with the derived counts spelled out."""
@@ -176,14 +179,20 @@ class AuditedLoader(DBLoader):
         self.source_key = str(source_key)
         self._drop_hook = ledger.hook(self.source_key)
 
+    
     def load_table(self, table_name: str, df) -> int:
         """Load one table, recording staged, written and row-count deltas."""
         audit = self.ledger.table(self.source_key, table_name)
         audit.rows_staged += int(len(df))
         before = self.count_rows(table_name)
-        written = super().load_table(table_name, df)
-        audit.rows_before += before
-        audit.rows_after += self.count_rows(table_name)
+        try:
+            written = super().load_table(table_name, df)
+        except Exception as exc:
+            audit.drop(f"load_failed:{type(exc).__name__}", len(df))
+            raise
+        finally:
+            audit.rows_after += self.count_rows(table_name)
+            audit.rows_before += before
         audit.rows_written += int(written)
         return written
 
@@ -200,7 +209,7 @@ class AuditedLoader(DBLoader):
                     text(f"SELECT COUNT(*) FROM {name}")).scalar() or 0)
         except Exception:
             return 0
-            
+
 
 __all__ = [
     "REASON_DUPLICATE", "REASON_NOT_NULL", "REASON_NULL_LOCATION",

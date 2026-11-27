@@ -11,7 +11,7 @@ y,dim_location,centroid_lat,cast,"{""type"": ""float""}",False,,,
 ,dim_disease,disease_name,none,,False,,Malaria (P. falciparum),
 ,dim_disease,pathogen,none,,False,,Plasmodium falciparum,
 ,dim_disease,source_standard,none,,False,,WHO,
-,dim_disease,icd_code,none,,False,,B54,
+,dim_disease,icd_code,none,,False,,B50,
 
 ,dim_source,source_code,none,,False,,MAP,
 ,dim_source,source_name,none,,False,,Malaria Atlas Project,
